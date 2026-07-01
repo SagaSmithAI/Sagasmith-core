@@ -88,6 +88,13 @@ class SnapshotService:
                 or 0
             ) + 1
             payload = self._capture(session, campaign)
+            if recap is None:
+                parent_payload = (
+                    dict(session.get(CampaignSnapshot, parent_id).payload)
+                    if parent_id
+                    else None
+                )
+                recap = self._build_recap(parent_payload, payload)
             session.execute(
                 update(CampaignSnapshot)
                 .where(CampaignSnapshot.campaign_id == campaign_id)
@@ -108,6 +115,18 @@ class SnapshotService:
             session.add(row)
             session.flush()
             return self._info(row)
+
+    def regenerate_recap(self, campaign_id: str, slot: int) -> dict[str, Any]:
+        """Rebuild a deterministic delta recap without changing snapshot state."""
+        with self.database.transaction() as session:
+            row = self._row(session, campaign_id, slot)
+            parent = session.get(CampaignSnapshot, row.parent_id) if row.parent_id else None
+            row.recap = self._build_recap(
+                dict(parent.payload) if parent else None,
+                dict(row.payload),
+            )
+            session.flush()
+            return dict(row.recap)
 
     def list(self, campaign_id: str) -> list[SnapshotInfo]:
         with self.database.transaction() as session:
@@ -274,6 +293,73 @@ class SnapshotService:
                 }
                 for memory, revision in memory_rows
             ],
+        }
+
+    @staticmethod
+    def _build_recap(
+        previous: dict[str, Any] | None,
+        current: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Describe state differences in a compact, model-independent shape."""
+        if previous is None:
+            return {
+                "summary": "Campaign baseline",
+                "plot_progress": [],
+                "characters": [item["name"] for item in current.get("characters", [])],
+                "locations": [],
+                "events": [],
+                "future_impact": [],
+                "player_choices": [],
+                "memory_candidates": [],
+                "source": "deterministic",
+            }
+        changed: list[str] = []
+        for field in ("status", "description", "settings", "state"):
+            if previous.get("campaign", {}).get(field) != current.get("campaign", {}).get(field):
+                changed.append(f"campaign.{field}")
+        old_characters = {item["id"]: item for item in previous.get("characters", [])}
+        new_characters = {item["id"]: item for item in current.get("characters", [])}
+        character_changes = [
+            item["name"]
+            for key, item in new_characters.items()
+            if old_characters.get(key) != item
+        ]
+        removed = [
+            item["name"] for key, item in old_characters.items() if key not in new_characters
+        ]
+        old_scenes = {item["scene_id"]: item for item in previous.get("scene_progress", [])}
+        scene_changes = [
+            item["scene_id"]
+            for item in current.get("scene_progress", [])
+            if old_scenes.get(item["scene_id"]) != item
+        ]
+        old_memories = {item["revision_id"] for item in previous.get("memories", [])}
+        memory_candidates = [
+            item["memory_id"]
+            for item in current.get("memories", [])
+            if item["revision_id"] not in old_memories
+        ]
+        summary_parts = []
+        if changed:
+            summary_parts.append(f"updated {', '.join(changed)}")
+        if character_changes or removed:
+            summary_parts.append("changed characters")
+        if scene_changes:
+            summary_parts.append("advanced scenes")
+        if memory_candidates:
+            summary_parts.append("recorded memories")
+        return {
+            "summary": "; ".join(summary_parts) or "No material state changes",
+            "plot_progress": scene_changes,
+            "characters": character_changes,
+            "removed_characters": removed,
+            "locations": [],
+            "events": [],
+            "future_impact": [],
+            "player_choices": [],
+            "memory_candidates": memory_candidates,
+            "changed_fields": changed,
+            "source": "deterministic",
         }
 
     @staticmethod

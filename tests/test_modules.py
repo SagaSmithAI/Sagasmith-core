@@ -28,4 +28,5 @@ def test_module_ingest_search_and_progress(database) -> None:
     assert result.scenes == 2
     assert hits[0].title == "Broken Gate"
     assert progress["progress"] == 40
-
+    index = service.scene_index(campaign.id)
+    assert [item["title"] for item in index] == ["Broken Gate", "Inner Hall"]

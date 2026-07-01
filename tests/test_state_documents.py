@@ -37,6 +37,7 @@ def test_campaign_profile_events_snapshot_and_memory(database) -> None:
 
     saves = SnapshotService(database)
     first = saves.create(campaign.id, label="Before opening")
+    assert saves.get(campaign.id, first.slot)["recap"]["summary"] == "Campaign baseline"
     campaigns.update(campaign.id, state={"door": "open"})
     CharacterService(database).update(character.id, sheet={"hp": 4})
     MemoryService(database).revise(memory.id, content="The cellar door is open.")
@@ -48,6 +49,8 @@ def test_campaign_profile_events_snapshot_and_memory(database) -> None:
     assert MemoryService(database).list(campaign.id)[0].content.endswith("locked.")
     assert saves.verify(campaign.id, restored.slot)
     assert [item.slot for item in saves.lineage(campaign.id)] == [first.slot, restored.slot]
+    recap = saves.regenerate_recap(campaign.id, restored.slot)
+    assert recap["source"] == "deterministic"
 
 
 def test_revision_undo_and_redo(database) -> None:

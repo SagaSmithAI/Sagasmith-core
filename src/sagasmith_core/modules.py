@@ -572,6 +572,38 @@ class ModuleService:
                 "keywords": list(row.ModuleScene.keywords),
             }
 
+    def scene_index(
+        self,
+        campaign_id: str,
+        *,
+        module_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return a stable, portable scene index for agents and module generators."""
+        with self.database.transaction() as session:
+            statement = (
+                select(ModuleScene, ModuleChapter, ModuleSource)
+                .join(ModuleChapter, ModuleChapter.id == ModuleScene.chapter_id)
+                .join(ModuleSource, ModuleSource.id == ModuleScene.module_id)
+                .where(ModuleSource.campaign_id == campaign_id)
+                .order_by(ModuleChapter.ordinal, ModuleScene.ordinal, ModuleScene.id)
+            )
+            if module_id:
+                statement = statement.where(ModuleSource.id == module_id)
+            return [
+                {
+                    "scene_id": row.ModuleScene.id,
+                    "title": row.ModuleScene.title,
+                    "chapter_id": row.ModuleChapter.id,
+                    "chapter": row.ModuleChapter.title,
+                    "module_id": row.ModuleSource.id,
+                    "module": row.ModuleSource.title,
+                    "page_start": row.ModuleScene.page_start,
+                    "page_end": row.ModuleScene.page_end,
+                    "keywords": list(row.ModuleScene.keywords),
+                }
+                for row in session.execute(statement)
+            ]
+
     def set_active(self, campaign_id: str, module_id: str, *, active: bool) -> dict[str, Any]:
         with self.database.transaction() as session:
             row = session.get(ModuleSource, module_id)
