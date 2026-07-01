@@ -11,7 +11,7 @@ from sqlalchemy import delete, select
 
 from sagasmith_core.database import Database
 from sagasmith_core.embeddings import Embedder
-from sagasmith_core.models import RuleChunk, RuleSection, RuleSource
+from sagasmith_core.models import RuleChunk, RuleSection, RuleSource, VectorIndexJob
 from sagasmith_core.parsing import MarkdownHierarchyParser
 from sagasmith_core.retrieval import (
     SearchHit,
@@ -43,7 +43,11 @@ class RuleService:
         title: str,
         content: str,
         locale: str = "en",
+        edition: str = "",
         version: str = "",
+        publication_id: str = "",
+        authority: str = "primary",
+        canonical_source_id: str | None = None,
         metadata: dict[str, Any] | None = None,
         parser: MarkdownHierarchyParser | None = None,
         embedder: Embedder | None = None,
@@ -59,6 +63,15 @@ class RuleService:
                 )
             )
             if existing and existing.checksum == checksum:
+                existing.title = title
+                existing.locale = locale
+                existing.edition = edition
+                existing.version = version
+                existing.publication_id = publication_id
+                existing.authority = authority
+                existing.canonical_source_id = canonical_source_id
+                existing.metadata_json = metadata or {}
+                session.flush()
                 chunk_count = session.query(RuleChunk).filter_by(source_id=existing.id).count()
                 section_count = session.query(RuleSection).filter_by(source_id=existing.id).count()
                 return RuleIngestResult(existing.id, True, section_count, chunk_count, 0)
@@ -74,7 +87,11 @@ class RuleService:
                     source_key=source_key,
                     title=title,
                     locale=locale,
+                    edition=edition,
                     version=version,
+                    publication_id=publication_id,
+                    authority=authority,
+                    canonical_source_id=canonical_source_id,
                     checksum=checksum,
                     metadata_json=metadata or {},
                 )
@@ -87,6 +104,7 @@ class RuleService:
             vector_values: list[list[float]] = []
             vector_metadata: list[dict[str, Any]] = []
             vector_documents: list[str] = []
+            vector_job_ids: list[str] = []
             for section in parsed:
                 section_id = str(uuid.uuid4())
                 parent_id = section_ids.get(section.path[:-1])
@@ -131,25 +149,56 @@ class RuleService:
                     chunk_count += 1
                     embedding_count += int(vector is not None)
                     if vector is not None:
+                        job_id = str(uuid.uuid4())
+                        vector_job_ids.append(job_id)
                         vector_ids.append(chunk_id)
                         vector_values.append(vector)
                         vector_metadata.append(
                             {
                                 "system_id": system_id,
+                                "edition": edition,
+                                "locale": locale,
+                                "publication_id": publication_id,
                                 "source_id": source_id,
                                 "section_id": section_id,
                             }
                         )
                         vector_documents.append(chunk.content)
+                        session.add(
+                            VectorIndexJob(
+                                id=job_id,
+                                system_id=system_id,
+                                collection="rules",
+                                entity_type="rule_chunk",
+                                entity_id=chunk_id,
+                                payload={
+                                    "document": chunk.content,
+                                    "metadata": vector_metadata[-1],
+                                    "embedding_model": embedder.model_name,
+                                },
+                            )
+                        )
             if vector_store and vector_values:
-                vector_store.upsert(
-                    "rules",
-                    ids=vector_ids,
-                    embeddings=vector_values,
-                    metadatas=vector_metadata,
-                    documents=vector_documents,
-                    profile=getattr(embedder, "profile", None),
-                )
+                try:
+                    vector_store.upsert(
+                        "rules",
+                        ids=vector_ids,
+                        embeddings=vector_values,
+                        metadatas=vector_metadata,
+                        documents=vector_documents,
+                        profile=getattr(embedder, "profile", None),
+                    )
+                except Exception as exc:
+                    for job_id in vector_job_ids:
+                        job = session.get(VectorIndexJob, job_id)
+                        job.status = "failed"
+                        job.attempts = 1
+                        job.error = str(exc)
+                else:
+                    for job_id in vector_job_ids:
+                        job = session.get(VectorIndexJob, job_id)
+                        job.status = "completed"
+                        job.attempts = 1
             return RuleIngestResult(
                 source_id,
                 False,
@@ -163,17 +212,27 @@ class RuleService:
         *,
         system_id: str,
         query: str,
+        edition: str | None = None,
+        locale: str | None = None,
+        publications: list[str] | None = None,
         top_k: int = 8,
         embedder: Embedder | None = None,
         vector_store: VectorStore | None = None,
     ) -> list[SearchHit]:
         with self.database.transaction() as session:
-            rows = session.execute(
+            statement = (
                 select(RuleChunk, RuleSection, RuleSource)
                 .join(RuleSection, RuleSection.id == RuleChunk.section_id)
                 .join(RuleSource, RuleSource.id == RuleChunk.source_id)
                 .where(RuleSource.system_id == system_id)
-            ).all()
+            )
+            if edition is not None:
+                statement = statement.where(RuleSource.edition == edition)
+            if locale is not None:
+                statement = statement.where(RuleSource.locale == locale)
+            if publications:
+                statement = statement.where(RuleSource.publication_id.in_(publications))
+            rows = session.execute(statement).all()
         if not rows:
             return []
 
@@ -198,13 +257,19 @@ class RuleService:
         if embedder:
             query_vector = embedder.encode([query])[0]
             if vector_store and vector_store.enabled:
+                filters: list[dict[str, Any]] = [{"system_id": system_id}]
+                if edition is not None:
+                    filters.append({"edition": edition})
+                if locale is not None:
+                    filters.append({"locale": locale})
+                where = filters[0] if len(filters) == 1 else {"$and": filters}
                 rankings["dense"] = [
                     item_id
                     for item_id, _score in vector_store.query(
                         "rules",
                         query_embedding=query_vector,
                         limit=max(top_k * 4, 20),
-                        where={"system_id": system_id},
+                        where=where,
                         profile=getattr(embedder, "profile", None),
                     )
                     if item_id in {row.RuleChunk.id for row in rows}
@@ -244,6 +309,10 @@ class RuleService:
                         "source_key": row.RuleSource.source_key,
                         "version": row.RuleSource.version,
                         "locale": row.RuleSource.locale,
+                        "edition": row.RuleSource.edition,
+                        "publication_id": row.RuleSource.publication_id,
+                        "authority": row.RuleSource.authority,
+                        "canonical_source_id": row.RuleSource.canonical_source_id,
                     },
                 )
             )
@@ -269,5 +338,36 @@ class RuleService:
                     "title": row.RuleSource.title,
                     "version": row.RuleSource.version,
                     "locale": row.RuleSource.locale,
+                    "edition": row.RuleSource.edition,
+                    "publication_id": row.RuleSource.publication_id,
+                    "authority": row.RuleSource.authority,
+                    "canonical_source_id": row.RuleSource.canonical_source_id,
                 },
             }
+
+    def sources(
+        self,
+        *,
+        system_id: str,
+        edition: str | None = None,
+    ) -> list[dict[str, Any]]:
+        statement = select(RuleSource).where(RuleSource.system_id == system_id)
+        if edition is not None:
+            statement = statement.where(RuleSource.edition == edition)
+        statement = statement.order_by(RuleSource.edition, RuleSource.locale, RuleSource.title)
+        with self.database.transaction() as session:
+            return [
+                {
+                    "id": row.id,
+                    "source_key": row.source_key,
+                    "title": row.title,
+                    "edition": row.edition,
+                    "locale": row.locale,
+                    "version": row.version,
+                    "publication_id": row.publication_id,
+                    "authority": row.authority,
+                    "canonical_source_id": row.canonical_source_id,
+                    "checksum": row.checksum,
+                }
+                for row in session.scalars(statement)
+            ]
