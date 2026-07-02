@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sagasmith-core"
-version = "0.1.0"
-description = "Shared runtime and nanobot integration layer for SagaSmith tabletop agents"
+version = "0.2.0"
+description = "System-neutral database, document, retrieval, and campaign runtime for tabletop RPGs"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -17,12 +17,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-nanobot = ["nanobot-ai>=0.2.2,<0.3.0"]
 vector = ["chromadb>=0.6.0,<1.0.0"]
 embedding = ["sentence-transformers>=5.0.0,<6.0.0"]
 documents = ["pypdf>=5.0.0,<7.0.0"]
 all = [
-    "nanobot-ai>=0.2.2,<0.3.0",
     "chromadb>=0.6.0,<1.0.0",
     "sentence-transformers>=5.0.0,<6.0.0",
     "pypdf>=5.0.0,<7.0.0",

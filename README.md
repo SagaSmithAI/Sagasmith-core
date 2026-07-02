@@ -1,7 +1,7 @@
 # SagaSmith Core
 
 `sagasmith-core` is a general TTRPG application base. It contains no D&D or
-Call of Cthulhu rules. System packages register rules and tools on top of a
+Call of Cthulhu rules. System packages register rules and CLIs on top of a
 shared set of durable services:
 
 - campaigns and system-neutral campaign state;
@@ -10,7 +10,7 @@ shared set of durable services:
 - adventure modules, chapters, scenes, chunks, and scene progress;
 - SQLAlchemy transactions and bundled migrations;
 - optional ChromaDB and embedding infrastructure;
-- optional [nanobot](https://github.com/HKUDS/nanobot) integration.
+- immutable snapshot DAGs, audited revisions, and branch-aware memory.
 
 ## Install
 
@@ -18,11 +18,8 @@ shared set of durable services:
 pip install sagasmith-core
 ```
 
-System packages normally install it automatically:
-
-```bash
-pip install "sagasmith-core[nanobot]"
-```
+System packages normally install it automatically. Core has no Agent-platform
+dependency.
 
 ## Stability contract
 

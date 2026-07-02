@@ -41,12 +41,10 @@ core table.
 
 ```text
 sagasmith-dnd ─┐
-sagasmith-coc7 ├─> sagasmith-core
+sagasmith-coc ├─> sagasmith-core
 custom-system ─┘
-
-sagasmith-dnd -> nanobot-ai (optional agent adapter)
 ```
 
-Core remains usable without nanobot. The nanobot adapter is an optional
-installation extra.
-
+Core has no Agent-platform adapter. nanobot and other platforms load a
+system-specific Skill and call the system Runtime's JSON CLI through their
+normal shell capability.
