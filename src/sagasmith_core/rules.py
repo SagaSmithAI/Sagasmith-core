@@ -253,7 +253,17 @@ class RuleService:
         # FTS5 lexical channel — indexed BM25 on SQLite, zero deps
         fts_ids: list[str] = []
         with self.database.transaction() as session:
-            fts_ids = fts5_hits(session, "rule_fts", enriched, limit=max(top_k * 4, 20))
+            fts_ids = fts5_hits(
+                session, "rule_fts", enriched,
+                limit=max(top_k * 4, 20),
+                weights=(
+                    0.0,   # chunk_id UNINDEXED
+                    5.0,   # source_title
+                    5.0,   # section_title
+                    3.0,   # heading_path
+                    1.0,   # content
+                ),
+            )
             if fts_ids:
                 # Prune to rows that match the filter criteria
                 fts_filtered = [

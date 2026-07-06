@@ -775,7 +775,22 @@ class ModuleService:
         # FTS5 lexical channel — indexed BM25 on SQLite, zero deps
         fts_ids: list[str] = []
         with self.database.transaction() as session:
-            fts_ids = fts5_hits(session, "module_fts", enriched, limit=max(top_k * 4, 20))
+            fts_ids = fts5_hits(
+                session, "module_fts", enriched,
+                limit=max(top_k * 4, 20),
+                weights=(
+                    0.0,   # chunk_id UNINDEXED
+                    8.0,   # module_title
+                    6.0,   # chapter_title
+                    4.0,   # scene_title
+                    3.0,   # headings
+                    2.5,   # keywords
+                    2.0,   # tags
+                    2.0,   # scene_type
+                    1.5,   # chunk_type
+                    1.0,   # content
+                ),
+            )
             if fts_ids:
                 fts_filtered = [
                     chunk_id for chunk_id in fts_ids

@@ -309,13 +309,24 @@ def fts5_query(query: str) -> str | None:
     return " ".join(dict.fromkeys(terms_builder))
 
 
-def fts5_hits(session, table: str, query: str, *, limit: int = 20) -> list[str]:
+def fts5_hits(
+    session,
+    table: str,
+    query: str,
+    *,
+    limit: int = 20,
+    weights: tuple[float, ...] | None = None,
+) -> list[str]:
     """Run an FTS5 MATCH and return chunk IDs ranked by BM25.
 
     ``table`` is the FTS virtual-table name (``"module_fts"`` or
-    ``"rule_fts"``).  Returns an empty list when FTS5 is unavailable
-    (not SQLite, migration not applied, empty index) so callers can
-    fall through to ``structured_score()`` unconditionally.
+    ``"rule_fts"``).  ``weights`` are per-column BM25 weights matching
+    the column order declared in the FTS5 schema (including the
+    ``chunk_id UNINDEXED`` column — pass ``0`` for that one).
+
+    Returns an empty list when FTS5 is unavailable (not SQLite,
+    migration not applied, empty index) so callers can fall through
+    to ``structured_score()`` unconditionally.
     """
     if session.bind.dialect.name != "sqlite":
         return []
@@ -323,11 +334,16 @@ def fts5_hits(session, table: str, query: str, *, limit: int = 20) -> list[str]:
     if match_expr is None:
         return []
     try:
+        if weights:
+            weights_str = ", ".join(str(w) for w in weights)
+            order_clause = f"bm25({table}, {weights_str})"
+        else:
+            order_clause = "rank"
         rows = session.execute(
             __import__("sqlalchemy").text(
                 f"SELECT chunk_id FROM {table} "
-                "WHERE search_text MATCH :query "
-                "ORDER BY rank LIMIT :limit"
+                f"WHERE {table} MATCH :query "
+                f"ORDER BY {order_clause} LIMIT :limit"
             ),
             {"query": match_expr, "limit": limit},
         )
