@@ -34,6 +34,25 @@ def test_campaign_profile_events_snapshot_and_memory(database) -> None:
         subject="Door",
         content="The cellar door is locked.",
     )
+    modules = ModuleService(database)
+    modules.ingest(
+        campaign_id=campaign.id,
+        source_key="split-party.md",
+        title="Split Party",
+        content="# Chapter\n## Gate\nOutside.\n## Cellar\nBelow.",
+    )
+    scenes = modules.scene_index(campaign.id)
+    modules.set_scene_progress(
+        campaign_id=campaign.id,
+        scene_id=scenes[0]["scene_id"],
+        scope_id="party",
+    )
+    modules.set_scene_progress(
+        campaign_id=campaign.id,
+        scene_id=scenes[1]["scene_id"],
+        scope_id="player:mira",
+        state={"private_discoveries": ["whisper"]},
+    )
 
     saves = SnapshotService(database)
     first = saves.create(campaign.id, label="Before opening")
@@ -41,12 +60,22 @@ def test_campaign_profile_events_snapshot_and_memory(database) -> None:
     campaigns.update(campaign.id, state={"door": "open"})
     CharacterService(database).update(character.id, sheet={"hp": 4})
     MemoryService(database).revise(memory.id, content="The cellar door is open.")
+    modules.set_scene_progress(
+        campaign_id=campaign.id,
+        scene_id=scenes[0]["scene_id"],
+        scope_id="player:mira",
+        state={"private_discoveries": []},
+    )
     restored = saves.restore(campaign.id, first.slot)
 
     assert restored.parent_id == first.id
     assert campaigns.get(campaign.id).state == {"door": "closed"}
     assert CharacterService(database).get(character.id).sheet == {"hp": 10}
     assert MemoryService(database).list(campaign.id)[0].content.endswith("locked.")
+    assert modules.current_scene(campaign.id)["title"] == "Gate"
+    mira_scene = modules.current_scene(campaign.id, scope_id="player:mira")
+    assert mira_scene["title"] == "Cellar"
+    assert mira_scene["progress"]["state"] == {"private_discoveries": ["whisper"]}
     assert saves.verify(campaign.id, restored.slot)
     assert [item.slot for item in saves.lineage(campaign.id)] == [first.slot, restored.slot]
     recap = saves.regenerate_recap(campaign.id, restored.slot)

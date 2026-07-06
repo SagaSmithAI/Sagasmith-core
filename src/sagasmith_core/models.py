@@ -253,7 +253,12 @@ class ModuleChunk(Base):
 class SceneProgress(TimestampMixin, Base):
     __tablename__ = "scene_progress"
     __table_args__ = (
-        UniqueConstraint("campaign_id", "scene_id", name="uq_scene_progress"),
+        UniqueConstraint(
+            "campaign_id",
+            "scope_id",
+            "scene_id",
+            name="uq_scene_progress",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -265,6 +270,7 @@ class SceneProgress(TimestampMixin, Base):
         ForeignKey("module_scenes.id", ondelete="CASCADE"),
         index=True,
     )
+    scope_id: Mapped[str] = mapped_column(String(200), default="party", index=True)
     status: Mapped[str] = mapped_column(String(32), default="current")
     progress: Mapped[int] = mapped_column(Integer, default=0)
     current_room: Mapped[str | None] = mapped_column(String(500), nullable=True)

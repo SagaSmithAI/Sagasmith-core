@@ -1,0 +1,17 @@
+# Normalize all text files to LF (Git internal standard)
+* text=auto eol=lf
+
+# Windows batch scripts need CRLF to run correctly
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=lf
+
+# Binary files — never touch
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.tar.gz binary

@@ -278,6 +278,7 @@ class SnapshotService:
                 {
                     "id": row.id,
                     "scene_id": row.scene_id,
+                    "scope_id": row.scope_id,
                     "status": row.status,
                     "progress": row.progress,
                     "current_room": row.current_room,
@@ -327,11 +328,14 @@ class SnapshotService:
         removed = [
             item["name"] for key, item in old_characters.items() if key not in new_characters
         ]
-        old_scenes = {item["scene_id"]: item for item in previous.get("scene_progress", [])}
+        old_scenes = {
+            (item.get("scope_id", "party"), item["scene_id"]): item
+            for item in previous.get("scene_progress", [])
+        }
         scene_changes = [
             item["scene_id"]
             for item in current.get("scene_progress", [])
-            if old_scenes.get(item["scene_id"]) != item
+            if old_scenes.get((item.get("scope_id", "party"), item["scene_id"])) != item
         ]
         old_memories = {item["revision_id"] for item in previous.get("memories", [])}
         memory_candidates = [
@@ -396,6 +400,7 @@ class SnapshotService:
             delete(SceneProgress).where(SceneProgress.campaign_id == campaign.id)
         )
         for item in payload.get("scene_progress", []):
+            item.setdefault("scope_id", "party")
             session.add(SceneProgress(campaign_id=campaign.id, **item))
 
         active_ids = {item["revision_id"] for item in payload.get("memories", [])}

@@ -59,6 +59,14 @@ class ParsedChapter:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class SceneBoundary:
+    title: str
+    start: int
+    end: int
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
 class ModuleStructureProfile(Protocol):
     name: str
     version: str
@@ -66,6 +74,12 @@ class ModuleStructureProfile(Protocol):
     def classify_chunk(self, heading: str, text: str) -> str: ...
 
     def keywords(self, title: str, text: str) -> list[str]: ...
+
+    def scene_boundaries(
+        self,
+        chapter_title: str,
+        chapter_content: str,
+    ) -> list[SceneBoundary]: ...
 
 
 class GenericModuleProfile:
@@ -89,6 +103,43 @@ class GenericModuleProfile:
     def keywords(self, title: str, text: str) -> list[str]:
         values = re.findall(r"[A-Za-z][A-Za-z0-9'-]{2,}|[\u4e00-\u9fff]{2,8}", title)
         return list(dict.fromkeys(value.casefold() for value in values))[:20]
+
+    def scene_boundaries(
+        self,
+        chapter_title: str,
+        chapter_content: str,
+    ) -> list[SceneBoundary]:
+        matches = list(re.finditer(r"^(#{2,4})\s+(.+?)\s*$", chapter_content, re.MULTILINE))
+        counts = {
+            level: sum(len(match.group(1)) == level for match in matches)
+            for level in (2, 3, 4)
+        }
+        if counts[2] and counts[3] >= counts[2] * 5:
+            scene_level = 3
+        elif counts[2]:
+            scene_level = 2
+        elif counts[3]:
+            scene_level = 3
+        else:
+            scene_level = 4
+        scene_headings = [
+            match for match in matches if len(match.group(1)) == scene_level
+        ]
+        if not scene_headings:
+            return [SceneBoundary(chapter_title, 0, len(chapter_content))]
+        return [
+            SceneBoundary(
+                heading.group(2).strip(),
+                heading.start(),
+                (
+                    scene_headings[index + 1].start()
+                    if index + 1 < len(scene_headings)
+                    else len(chapter_content)
+                ),
+                {"scene_level": scene_level},
+            )
+            for index, heading in enumerate(scene_headings)
+        ]
 
 
 class MarkdownModuleParser:
@@ -135,35 +186,18 @@ class MarkdownModuleParser:
         global_start: int,
         global_end: int,
     ) -> ParsedChapter:
-        matches = list(re.finditer(r"^(#{2,4})\s+(.+?)\s*$", chapter_content, re.MULTILINE))
-        counts = {
-            level: sum(len(match.group(1)) == level for match in matches)
-            for level in (2, 3, 4)
-        }
-        if counts[2] and counts[3] >= counts[2] * 5:
-            scene_level = 3
-        elif counts[2]:
-            scene_level = 2
-        elif counts[3]:
-            scene_level = 3
-        else:
-            scene_level = 4
-        scene_headings = [
-            match for match in matches if len(match.group(1)) == scene_level
-        ]
-        ranges: list[tuple[str, int, int]] = []
-        for index, heading in enumerate(scene_headings):
-            end = (
-                scene_headings[index + 1].start()
-                if index + 1 < len(scene_headings)
-                else len(chapter_content)
-            )
-            ranges.append((heading.group(2).strip(), heading.start(), end))
-        if not ranges:
-            ranges.append((title, 0, len(chapter_content)))
+        boundary_factory = getattr(self.profile, "scene_boundaries", None)
+        ranges = (
+            boundary_factory(title, chapter_content)
+            if callable(boundary_factory)
+            else GenericModuleProfile().scene_boundaries(title, chapter_content)
+        )
 
         scenes: list[ParsedScene] = []
-        for scene_ordinal, (scene_title, start, end) in enumerate(ranges):
+        for scene_ordinal, boundary in enumerate(ranges):
+            scene_title = boundary.title
+            start = boundary.start
+            end = boundary.end
             raw = chapter_content[start:end].strip()
             clean = strip_page_markers(raw)
             sections = self.hierarchy_parser.parse(raw)
@@ -208,6 +242,7 @@ class MarkdownModuleParser:
                     heading_path=(title, scene_title),
                     chunks=tuple(chunks),
                     metadata={
+                        **boundary.metadata,
                         "start_line": chapter_content.count("\n", 0, start) + 1,
                         "end_line": chapter_content.count("\n", 0, end) + 1,
                         "page_start": page_for_offset(chapter_content, start),
@@ -347,11 +382,15 @@ class ModuleService:
                             ordinal=scene.ordinal,
                             title=scene.title,
                             content=scene.content,
+                            scene_type=scene.metadata.get("scene_type", "section"),
                             start_line=scene.metadata.get("start_line", 1),
                             end_line=scene.metadata.get("end_line", 1),
                             page_start=scene.metadata.get("page_start"),
                             page_end=scene.metadata.get("page_end"),
-                            headings=list(scene.heading_path),
+                            headings=scene.metadata.get(
+                                "headings",
+                                list(scene.heading_path),
+                            ),
                             keywords=scene.metadata.get("keywords", []),
                             metadata_json=scene.metadata,
                         )
@@ -539,6 +578,9 @@ class ModuleService:
                 "scene": {
                     "id": row.ModuleScene.id,
                     "title": row.ModuleScene.title,
+                    "page_start": row.ModuleScene.page_start,
+                    "page_end": row.ModuleScene.page_end,
+                    **self._scene_structure(row.ModuleScene),
                 },
                 "chapter": {
                     "id": row.ModuleChapter.id,
@@ -569,7 +611,10 @@ class ModuleService:
                 "page_end": row.ModuleScene.page_end,
                 "chapter": row.ModuleChapter.title,
                 "module": row.ModuleSource.title,
+                "start_line": row.ModuleScene.start_line,
+                "end_line": row.ModuleScene.end_line,
                 "keywords": list(row.ModuleScene.keywords),
+                **self._scene_structure(row.ModuleScene),
             }
 
     def scene_index(
@@ -599,10 +644,70 @@ class ModuleService:
                     "module": row.ModuleSource.title,
                     "page_start": row.ModuleScene.page_start,
                     "page_end": row.ModuleScene.page_end,
+                    "start_line": row.ModuleScene.start_line,
+                    "end_line": row.ModuleScene.end_line,
                     "keywords": list(row.ModuleScene.keywords),
+                    **self._scene_structure(row.ModuleScene),
                 }
                 for row in session.execute(statement)
             ]
+
+    def current_scene(
+        self,
+        campaign_id: str,
+        *,
+        scope_id: str = "party",
+        fallback_to_party: bool = True,
+    ) -> dict[str, Any] | None:
+        with self.database.transaction() as session:
+            row = None
+            scopes = [scope_id]
+            if fallback_to_party and scope_id != "party":
+                scopes.append("party")
+            for effective_scope in scopes:
+                row = session.execute(
+                    select(SceneProgress, ModuleScene, ModuleChapter, ModuleSource)
+                    .join(ModuleScene, ModuleScene.id == SceneProgress.scene_id)
+                    .join(ModuleChapter, ModuleChapter.id == ModuleScene.chapter_id)
+                    .join(ModuleSource, ModuleSource.id == ModuleScene.module_id)
+                    .where(
+                        SceneProgress.campaign_id == campaign_id,
+                        SceneProgress.scope_id == effective_scope,
+                        SceneProgress.status == "current",
+                        ModuleSource.active.is_(True),
+                    )
+                    .order_by(SceneProgress.updated_at.desc(), SceneProgress.id.desc())
+                ).first()
+                if row is not None:
+                    break
+            if row is None:
+                return None
+            return {
+                "campaign_id": campaign_id,
+                "scope_id": row.SceneProgress.scope_id,
+                "requested_scope_id": scope_id,
+                "inherited_from_party": (
+                    scope_id != "party" and row.SceneProgress.scope_id == "party"
+                ),
+                "scene_id": row.ModuleScene.id,
+                "title": row.ModuleScene.title,
+                "content": row.ModuleScene.content,
+                "chapter": row.ModuleChapter.title,
+                "module": row.ModuleSource.title,
+                "page_start": row.ModuleScene.page_start,
+                "page_end": row.ModuleScene.page_end,
+                "start_line": row.ModuleScene.start_line,
+                "end_line": row.ModuleScene.end_line,
+                "keywords": list(row.ModuleScene.keywords),
+                "progress": {
+                    "status": row.SceneProgress.status,
+                    "percent": row.SceneProgress.progress,
+                    "current_room": row.SceneProgress.current_room,
+                    "state_version": row.SceneProgress.state_version,
+                    "state": dict(row.SceneProgress.state),
+                },
+                **self._scene_structure(row.ModuleScene),
+            }
 
     def set_active(self, campaign_id: str, module_id: str, *, active: bool) -> dict[str, Any]:
         with self.database.transaction() as session:
@@ -714,6 +819,15 @@ class ModuleService:
                         "campaign_id": row.ModuleSource.campaign_id,
                         "module_title": row.ModuleSource.title,
                         "scene_id": row.ModuleScene.id,
+                        "scene_type": row.ModuleScene.scene_type,
+                        "visibility": row.ModuleScene.metadata_json.get(
+                            "visibility",
+                            "keeper",
+                        ),
+                        "page_start": row.ModuleChunk.page_start,
+                        "page_end": row.ModuleChunk.page_end,
+                        "chunk_type": row.ModuleChunk.chunk_type,
+                        "tags": row.ModuleScene.metadata_json.get("tags", []),
                     },
                 )
             )
@@ -728,6 +842,7 @@ class ModuleService:
         progress: int = 0,
         state: dict[str, Any] | None = None,
         current_room: str | None = None,
+        scope_id: str = "party",
     ) -> dict[str, Any]:
         progress = max(0, min(100, progress))
         with self.database.transaction() as session:
@@ -740,6 +855,7 @@ class ModuleService:
             row = session.scalar(
                 select(SceneProgress).where(
                     SceneProgress.campaign_id == campaign_id,
+                    SceneProgress.scope_id == scope_id,
                     SceneProgress.scene_id == scene_id,
                 )
             )
@@ -748,24 +864,73 @@ class ModuleService:
                     id=str(uuid.uuid4()),
                     campaign_id=campaign_id,
                     scene_id=scene_id,
+                    scope_id=scope_id,
                 )
                 session.add(row)
+            if status == "current":
+                for other in session.scalars(
+                    select(SceneProgress).where(
+                        SceneProgress.campaign_id == campaign_id,
+                        SceneProgress.scope_id == scope_id,
+                        SceneProgress.scene_id != scene_id,
+                        SceneProgress.status == "current",
+                    )
+                ):
+                    other.status = "previous"
             row.status = status
             row.progress = progress
-            row.current_room = current_room
+            if current_room is not None:
+                row.current_room = current_room
             row.state_version = (row.state_version or 0) + 1
-            row.state = state or {}
+            if state is not None:
+                row.state = state
             session.flush()
             return {
                 "id": row.id,
                 "campaign_id": row.campaign_id,
                 "scene_id": row.scene_id,
+                "scope_id": row.scope_id,
                 "status": row.status,
                 "progress": row.progress,
                 "current_room": row.current_room,
                 "state_version": row.state_version,
                 "state": dict(row.state),
             }
+
+    @staticmethod
+    def _scene_structure(scene: ModuleScene) -> dict[str, Any]:
+        """Build a scene-structure dict from DB columns + profile-populated metadata.
+
+        Column-backed fields (always populated regardless of profile):
+          scene_type, headings
+
+        Fields set by any profile that implements ``scene_boundaries()``:
+          scene_level, line_count, subsections, tags
+
+        Fields set only by certain system profiles — **not** guaranteed for every
+        system. Consumers must treat missing/empty values as "not provided by the
+        profile that parsed this module", not "zero of that thing exists":
+
+          - ``visibility`` — defaulted to ``"keeper"`` if the profile omits it
+          - ``clues``, ``checks``       — CoC profile populates these
+          - ``sanity``                  — CoC profile only
+          - ``transitions``, ``node_id`` — CoC ``solo_scenario`` parsing only
+        """
+        metadata = dict(scene.metadata_json or {})
+        return {
+            "scene_type": scene.scene_type,
+            "visibility": metadata.get("visibility", "keeper"),
+            "scene_level": metadata.get("scene_level"),
+            "line_count": metadata.get("line_count"),
+            "headings": list(scene.headings),
+            "subsections": list(metadata.get("subsections", [])),
+            "tags": list(metadata.get("tags", [])),
+            "clues": list(metadata.get("clues", [])),
+            "checks": list(metadata.get("checks", [])),
+            "sanity": list(metadata.get("sanity", [])),
+            "transitions": list(metadata.get("transitions", [])),
+            "node_id": metadata.get("node_id"),
+        }
 
     @staticmethod
     def _counts(session, module_id: str) -> tuple[int, int, int]:
