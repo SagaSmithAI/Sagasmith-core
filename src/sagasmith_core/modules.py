@@ -36,6 +36,7 @@ from sagasmith_core.retrieval import (
     SearchHit,
     cosine_similarity,
     enrich_query,
+    fts5_hits,
     lexical_score,
     reciprocal_rank_fusion,
     structured_score,
@@ -769,24 +770,44 @@ class ModuleService:
             or row.ModuleChapter.title.casefold() == query.casefold()
             or row.ModuleSource.title.casefold() == query.casefold()
         ]
-        lexical = sorted(
-            rows,
-            key=lambda row: -structured_score(
-                enriched,
-                module_title=row.ModuleSource.title,
-                chapter_title=row.ModuleChapter.title,
-                scene_title=row.ModuleScene.title,
-                heading_paths=" ".join(row.ModuleScene.headings or []),
-                keywords=" ".join(row.ModuleScene.keywords or []),
-                tags=" ".join(row.ModuleScene.metadata_json.get("tags", [])),
-                scene_type=row.ModuleScene.scene_type,
-                chunk_type=row.ModuleChunk.chunk_type,
-                content=row.ModuleChunk.content,
-            ),
-        )
-        rankings = {
-            "exact": [row.ModuleChunk.id for row in exact],
-            "lexical": [row.ModuleChunk.id for row in lexical],
+        exact_ids = {row.ModuleChunk.id for row in exact}
+
+        # FTS5 lexical channel — indexed BM25 on SQLite, zero deps
+        fts_ids: list[str] = []
+        with self.database.transaction() as session:
+            fts_ids = fts5_hits(session, "module_fts", enriched, limit=max(top_k * 4, 20))
+            if fts_ids:
+                fts_filtered = [
+                    chunk_id for chunk_id in fts_ids
+                    if chunk_id in {row.ModuleChunk.id for row in rows}
+                ]
+                fts_ids = fts_filtered
+
+        if fts_ids:
+            lexical = fts_ids
+        else:
+            # Fallback: Python-side structured_score when FTS5 unavailable
+            lexical = [
+                row.ModuleChunk.id for row in sorted(
+                    rows,
+                    key=lambda row: -structured_score(
+                        enriched,
+                        module_title=row.ModuleSource.title,
+                        chapter_title=row.ModuleChapter.title,
+                        scene_title=row.ModuleScene.title,
+                        heading_paths=" ".join(row.ModuleScene.headings or []),
+                        keywords=" ".join(row.ModuleScene.keywords or []),
+                        tags=" ".join(row.ModuleScene.metadata_json.get("tags", [])),
+                        scene_type=row.ModuleScene.scene_type,
+                        chunk_type=row.ModuleChunk.chunk_type,
+                        content=row.ModuleChunk.content,
+                    ),
+                )
+            ]
+
+        rankings: dict[str, list[str]] = {
+            "exact": list(exact_ids),
+            "lexical": lexical,
         }
         if embedder:
             query_vector = embedder.encode([query])[0]

@@ -15,6 +15,19 @@ When ChromaDB / embeddings are unavailable, ``structured_score()`` and
 Together they replace the old single-field ``lexical_score()`` with a
 profile-aware, denormalised scoring pipeline that works on any backend
 (SQLite, PostgreSQL) with zero additional dependencies.
+
+SQLite FTS5 full-text search
+----------------------------
+When running on SQLite, ``fts5_hits()`` provides indexed BM25 ranking via
+the ``module_fts`` / ``rule_fts`` virtual tables created by migration
+``20260706_04``.  FTS5 replaces the O(n) Python-side structured_score()
+with an O(log n) indexed search that also handles phrase matching and
+BM25 normalisation \u2014 all with zero pip dependencies.
+
+Callers check the dialect name and call ``fts5_hits()`` first; if it
+returns a non-empty list, those chunk IDs become the ``"lexical"``
+channel in the reciprocal-rank-fusion pipeline.  Otherwise they fall
+back to ``structured_score()`` as before.
 """
 
 from __future__ import annotations
@@ -241,4 +254,85 @@ def reciprocal_rank_fusion(
         ),
         key=lambda item: (-item[1], item[0]),
     )
+
+
+# ── SQLite FTS5 helpers ──────────────────────────────────────────────
+# These are used by RuleService.search() and ModuleService.search() when
+# running on SQLite.  They require the FTS5 virtual tables created by
+# migration 20260706_04.  PostgreSQL callers silently skip to the
+# structured_score fallback.
+
+_FTS5_SPECIAL = re.compile(r"[*^\"()+\-\\]")
+
+
+def fts5_query(query: str) -> str | None:
+    """Convert a plain-text user query to an FTS5 MATCH expression.
+
+    * English word tokens are kept as-is.
+    * Chinese characters are each emitted as independent tokens with a
+      mandatory ``+`` prefix so the result requires ALL CJK characters
+      from the query.
+    * FTS5 special characters (``* ^ \\" ( ) + - \\``) are stripped.
+    * Returns ``None`` when the query contains no valid tokens (useful
+      for early-exit).
+    """
+    stripped = _FTS5_SPECIAL.sub(" ", query).strip()
+    if not stripped:
+        return None
+
+    terms_builder: list[str] = []
+
+    # Extract CJK character runs — each becomes a mandatory + token
+    last = 0
+    for cjk_match in _CJK.finditer(stripped):
+        start = cjk_match.start()
+        # Any Latin text before this CJK run?
+        if start > last:
+            latin_bit = stripped[last:start]
+            for word in _LATIN_WORD.finditer(latin_bit):
+                terms_builder.append(word.group())
+        # Each CJK character in the run gets + prefix
+        run = cjk_match.group()
+        for char in run:
+            if not char.isspace():
+                terms_builder.append(f"+{char}")
+        last = cjk_match.end()
+
+    # Remaining Latin text after last CJK run
+    tail = stripped[last:]
+    if tail:
+        for word in _LATIN_WORD.finditer(tail):
+            terms_builder.append(word.group())
+
+    if not terms_builder:
+        return None
+    return " ".join(dict.fromkeys(terms_builder))
+
+
+def fts5_hits(session, table: str, query: str, *, limit: int = 20) -> list[str]:
+    """Run an FTS5 MATCH and return chunk IDs ranked by BM25.
+
+    ``table`` is the FTS virtual-table name (``"module_fts"`` or
+    ``"rule_fts"``).  Returns an empty list when FTS5 is unavailable
+    (not SQLite, migration not applied, empty index) so callers can
+    fall through to ``structured_score()`` unconditionally.
+    """
+    if session.bind.dialect.name != "sqlite":
+        return []
+    match_expr = fts5_query(query)
+    if match_expr is None:
+        return []
+    try:
+        rows = session.execute(
+            __import__("sqlalchemy").text(
+                f"SELECT chunk_id FROM {table} "
+                "WHERE search_text MATCH :query "
+                "ORDER BY rank LIMIT :limit"
+            ),
+            {"query": match_expr, "limit": limit},
+        )
+        return [str(row[0]) for row in rows]
+    except Exception:
+        # Table may not exist (migration not yet applied)
+        return []
 

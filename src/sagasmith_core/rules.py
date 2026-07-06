@@ -18,6 +18,7 @@ from sagasmith_core.retrieval import (
     SearchHit,
     cosine_similarity,
     enrich_query,
+    fts5_hits,
     lexical_score,
     reciprocal_rank_fusion,
     structured_score,
@@ -247,19 +248,40 @@ class RuleService:
             if row.RuleSection.title.casefold() == query.casefold()
             or row.RuleSource.title.casefold() == query.casefold()
         ]
-        lexical = sorted(
-            rows,
-            key=lambda row: -structured_score(
-                enriched,
-                section_title=row.RuleSection.title,
-                source_title=row.RuleSource.title,
-                heading_paths=" ".join(row.RuleChunk.heading_path or []),
-                content=row.RuleChunk.content,
-            ),
-        )
-        rankings = {
-            "exact": [row.RuleChunk.id for row in exact],
-            "lexical": [row.RuleChunk.id for row in lexical],
+        exact_ids = {row.RuleChunk.id for row in exact}
+
+        # FTS5 lexical channel — indexed BM25 on SQLite, zero deps
+        fts_ids: list[str] = []
+        with self.database.transaction() as session:
+            fts_ids = fts5_hits(session, "rule_fts", enriched, limit=max(top_k * 4, 20))
+            if fts_ids:
+                # Prune to rows that match the filter criteria
+                fts_filtered = [
+                    chunk_id for chunk_id in fts_ids
+                    if chunk_id in {row.RuleChunk.id for row in rows}
+                ]
+                fts_ids = fts_filtered
+
+        if fts_ids:
+            lexical = fts_ids
+        else:
+            # Fallback: Python-side structured_score when FTS5 unavailable
+            lexical = [
+                row.RuleChunk.id for row in sorted(
+                    rows,
+                    key=lambda row: -structured_score(
+                        enriched,
+                        section_title=row.RuleSection.title,
+                        source_title=row.RuleSource.title,
+                        heading_paths=" ".join(row.RuleChunk.heading_path or []),
+                        content=row.RuleChunk.content,
+                    ),
+                )
+            ]
+
+        rankings: dict[str, list[str]] = {
+            "exact": list(exact_ids),
+            "lexical": lexical,
         }
         if embedder:
             query_vector = embedder.encode([query])[0]

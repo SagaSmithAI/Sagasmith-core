@@ -102,3 +102,62 @@ def test_structured_score_skips_empty_fields() -> None:
     assert score > 0
     assert not math.isnan(score)
 
+
+def test_fts5_query_handles_cjk_and_english() -> None:
+    from sagasmith_core.retrieval import fts5_query
+
+    cjk = fts5_query("豁免检定")
+    assert cjk is not None
+    assert "+" in cjk
+
+    english = fts5_query("fireball")
+    assert english == "fireball"
+
+    mixed = fts5_query("豁免 save combat")
+    assert mixed is not None
+    assert "+" in mixed
+    assert "save" in mixed
+    assert "combat" in mixed
+
+    empty = fts5_query("")
+    assert empty is None
+
+    special = fts5_query("fireball (damage)")
+    assert special is not None and "(" not in special
+
+
+def test_fts5_hits_produces_results_on_sqlite(database) -> None:
+    from sagasmith_core.campaigns import CampaignService
+    from sagasmith_core.database import alembic_config
+    from sagasmith_core.modules import ModuleService
+    from sagasmith_core.retrieval import fts5_hits
+    from alembic import command
+
+    db = database
+    campaign = CampaignService(db).create(system_id="dnd5e", name="FTS")
+
+    service = ModuleService(db)
+    service.ingest(
+        campaign_id=campaign.id,
+        source_key="fts_demo.md",
+        title="FTS Demo",
+        content="# Ch1\n## Gate\nGuarded by wolves.\n## Library\nBooks about fireball.",
+    )
+
+    # Run the migration to create FTS5 tables
+    config = alembic_config(db.url)
+    command.upgrade(config, "head")
+
+    with db.transaction() as session:
+        hits = fts5_hits(session, "module_fts", "wolves", limit=5)
+    assert len(hits) >= 1, f"expected at least 1 hit for 'wolves', got {hits}"
+
+    with db.transaction() as session:
+        hits_cjk = fts5_hits(session, "module_fts", "fireball", limit=5)
+    assert len(hits_cjk) >= 1, f"expected at least 1 hit for 'fireball', got {hits_cjk}"
+
+    # Search through the public API should also use FTS5
+    api_hits = service.search(campaign_id=campaign.id, query="wolves")
+    assert len(api_hits) >= 1
+    assert "Gate" in api_hits[0].title
+
