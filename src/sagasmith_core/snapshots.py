@@ -19,8 +19,17 @@ from sagasmith_core.models import (
     CampaignRuleProfile,
     CampaignSnapshot,
     Character,
+    ActiveEffect,
+    GameActivity,
+    GameActor,
+    GameItem,
+    GameMessage,
+    ItemInstance,
+    MapScene,
     MemoryRevision,
+    SceneRegion,
     SceneProgress,
+    SceneToken,
 )
 
 
@@ -231,6 +240,69 @@ class SnapshotService:
                 .order_by(SceneProgress.id)
             )
         )
+        items = list(
+            session.scalars(
+                select(ItemInstance)
+                .where(ItemInstance.campaign_id == campaign.id)
+                .order_by(ItemInstance.id)
+            )
+        )
+        map_scenes = list(
+            session.scalars(
+                select(MapScene)
+                .where(MapScene.campaign_id == campaign.id)
+                .order_by(MapScene.id)
+            )
+        )
+        scene_tokens = list(
+            session.scalars(
+                select(SceneToken)
+                .where(SceneToken.campaign_id == campaign.id)
+                .order_by(SceneToken.id)
+            )
+        )
+        scene_regions = list(
+            session.scalars(
+                select(SceneRegion)
+                .where(SceneRegion.campaign_id == campaign.id)
+                .order_by(SceneRegion.id)
+            )
+        )
+        game_actors = list(
+            session.scalars(
+                select(GameActor)
+                .where(GameActor.campaign_id == campaign.id)
+                .order_by(GameActor.id)
+            )
+        )
+        game_items = list(
+            session.scalars(
+                select(GameItem)
+                .where(GameItem.campaign_id == campaign.id)
+                .order_by(GameItem.id)
+            )
+        )
+        game_activities = list(
+            session.scalars(
+                select(GameActivity)
+                .where(GameActivity.campaign_id == campaign.id)
+                .order_by(GameActivity.id)
+            )
+        )
+        active_effects = list(
+            session.scalars(
+                select(ActiveEffect)
+                .where(ActiveEffect.campaign_id == campaign.id)
+                .order_by(ActiveEffect.id)
+            )
+        )
+        game_messages = list(
+            session.scalars(
+                select(GameMessage)
+                .where(GameMessage.campaign_id == campaign.id)
+                .order_by(GameMessage.sequence, GameMessage.id)
+            )
+        )
         memory_rows = session.execute(
             select(CampaignMemory, MemoryRevision)
             .join(MemoryRevision, MemoryRevision.memory_id == CampaignMemory.id)
@@ -286,6 +358,161 @@ class SnapshotService:
                     "state": dict(row.state),
                 }
                 for row in progress
+            ],
+            "items": [
+                {
+                    "id": row.id,
+                    "template_id": row.template_id,
+                    "name": row.name,
+                    "owner_type": row.owner_type,
+                    "owner_id": row.owner_id,
+                    "container_id": row.container_id,
+                    "quantity": row.quantity,
+                    "equipped_slot": row.equipped_slot,
+                    "attunement": row.attunement,
+                    "identified": row.identified,
+                    "charges": dict(row.charges),
+                    "condition": row.condition,
+                    "state": dict(row.state),
+                }
+                for row in items
+            ],
+            "map_scenes": [
+                {
+                    "id": row.id,
+                    "name": row.name,
+                    "grid_size": row.grid_size,
+                    "grid_units": row.grid_units,
+                    "width": row.width,
+                    "height": row.height,
+                    "background": row.background,
+                    "active": row.active,
+                    "metadata_json": dict(row.metadata_json),
+                }
+                for row in map_scenes
+            ],
+            "scene_tokens": [
+                {
+                    "id": row.id,
+                    "scene_id": row.scene_id,
+                    "actor_type": row.actor_type,
+                    "actor_id": row.actor_id,
+                    "name": row.name,
+                    "x": row.x,
+                    "y": row.y,
+                    "width": row.width,
+                    "height": row.height,
+                    "elevation": row.elevation,
+                    "disposition": row.disposition,
+                    "hidden": row.hidden,
+                    "vision": dict(row.vision),
+                    "actor_delta": dict(row.actor_delta),
+                    "metadata_json": dict(row.metadata_json),
+                }
+                for row in scene_tokens
+            ],
+            "scene_regions": [
+                {
+                    "id": row.id,
+                    "scene_id": row.scene_id,
+                    "name": row.name,
+                    "shape": dict(row.shape),
+                    "behavior": row.behavior,
+                    "origin_activity_id": row.origin_activity_id,
+                    "attached_token_id": row.attached_token_id,
+                    "duration": dict(row.duration),
+                    "metadata_json": dict(row.metadata_json),
+                }
+                for row in scene_regions
+            ],
+            "game_actors": [
+                {
+                    "id": row.id,
+                    "system_id": row.system_id,
+                    "actor_type": row.actor_type,
+                    "name": row.name,
+                    "img": row.img,
+                    "system": dict(row.system),
+                    "prototype_token": dict(row.prototype_token),
+                    "flags": dict(row.flags),
+                    "derived": dict(row.derived),
+                    "revision": row.revision,
+                }
+                for row in game_actors
+            ],
+            "game_items": [
+                {
+                    "id": row.id,
+                    "actor_id": row.actor_id,
+                    "container_id": row.container_id,
+                    "system_id": row.system_id,
+                    "item_type": row.item_type,
+                    "name": row.name,
+                    "source_key": row.source_key,
+                    "img": row.img,
+                    "system": dict(row.system),
+                    "effects": list(row.effects),
+                    "flags": dict(row.flags),
+                    "sort": row.sort,
+                    "revision": row.revision,
+                }
+                for row in game_items
+            ],
+            "game_activities": [
+                {
+                    "id": row.id,
+                    "item_id": row.item_id,
+                    "activity_type": row.activity_type,
+                    "name": row.name,
+                    "activation": dict(row.activation),
+                    "consumption": dict(row.consumption),
+                    "duration": dict(row.duration),
+                    "effects": list(row.effects),
+                    "range": dict(row.range),
+                    "target": dict(row.target),
+                    "uses": dict(row.uses),
+                    "system": dict(row.system),
+                    "flags": dict(row.flags),
+                    "sort": row.sort,
+                }
+                for row in game_activities
+            ],
+            "active_effects": [
+                {
+                    "id": row.id,
+                    "parent_type": row.parent_type,
+                    "parent_id": row.parent_id,
+                    "actor_id": row.actor_id,
+                    "origin": row.origin,
+                    "name": row.name,
+                    "img": row.img,
+                    "disabled": row.disabled,
+                    "suppressed": row.suppressed,
+                    "transfer": row.transfer,
+                    "duration": dict(row.duration),
+                    "changes": list(row.changes),
+                    "statuses": list(row.statuses),
+                    "flags": dict(row.flags),
+                }
+                for row in active_effects
+            ],
+            "game_messages": [
+                {
+                    "id": row.id,
+                    "sequence": row.sequence,
+                    "message_type": row.message_type,
+                    "speaker": dict(row.speaker),
+                    "actor_id": row.actor_id,
+                    "item_id": row.item_id,
+                    "activity_id": row.activity_id,
+                    "rolls": list(row.rolls),
+                    "deltas": list(row.deltas),
+                    "pending": list(row.pending),
+                    "narration_hints": list(row.narration_hints),
+                    "content": row.content,
+                    "flags": dict(row.flags),
+                }
+                for row in game_messages
             ],
             "memories": [
                 {
@@ -343,6 +570,16 @@ class SnapshotService:
             for item in current.get("memories", [])
             if item["revision_id"] not in old_memories
         ]
+        old_items = {item["id"]: item for item in previous.get("items", [])}
+        new_items = {item["id"]: item for item in current.get("items", [])}
+        item_changes = [
+            item["name"]
+            for key, item in new_items.items()
+            if old_items.get(key) != item
+        ]
+        removed_items = [
+            item["name"] for key, item in old_items.items() if key not in new_items
+        ]
         summary_parts = []
         if changed:
             summary_parts.append(f"updated {', '.join(changed)}")
@@ -352,6 +589,24 @@ class SnapshotService:
             summary_parts.append("advanced scenes")
         if memory_candidates:
             summary_parts.append("recorded memories")
+        if item_changes or removed_items:
+            summary_parts.append("changed inventory")
+        if previous.get("map_scenes", []) != current.get("map_scenes", []):
+            summary_parts.append("changed map scenes")
+        if previous.get("scene_tokens", []) != current.get("scene_tokens", []):
+            summary_parts.append("changed scene tokens")
+        if previous.get("scene_regions", []) != current.get("scene_regions", []):
+            summary_parts.append("changed scene regions")
+        if previous.get("game_actors", []) != current.get("game_actors", []):
+            summary_parts.append("changed game actors")
+        if previous.get("game_items", []) != current.get("game_items", []):
+            summary_parts.append("changed game items")
+        if previous.get("game_activities", []) != current.get("game_activities", []):
+            summary_parts.append("changed game activities")
+        if previous.get("active_effects", []) != current.get("active_effects", []):
+            summary_parts.append("changed active effects")
+        if previous.get("game_messages", []) != current.get("game_messages", []):
+            summary_parts.append("recorded game messages")
         return {
             "summary": "; ".join(summary_parts) or "No material state changes",
             "plot_progress": scene_changes,
@@ -362,6 +617,8 @@ class SnapshotService:
             "future_impact": [],
             "player_choices": [],
             "memory_candidates": memory_candidates,
+            "items": item_changes,
+            "removed_items": removed_items,
             "changed_fields": changed,
             "source": "deterministic",
         }
@@ -402,6 +659,42 @@ class SnapshotService:
         for item in payload.get("scene_progress", []):
             item.setdefault("scope_id", "party")
             session.add(SceneProgress(campaign_id=campaign.id, **item))
+
+        session.execute(delete(ItemInstance).where(ItemInstance.campaign_id == campaign.id))
+        for item in payload.get("items", []):
+            session.add(ItemInstance(campaign_id=campaign.id, **item))
+
+        session.execute(delete(SceneRegion).where(SceneRegion.campaign_id == campaign.id))
+        session.execute(delete(SceneToken).where(SceneToken.campaign_id == campaign.id))
+        session.execute(delete(MapScene).where(MapScene.campaign_id == campaign.id))
+        for item in payload.get("map_scenes", []):
+            session.add(MapScene(campaign_id=campaign.id, **item))
+        session.flush()
+        for item in payload.get("scene_tokens", []):
+            session.add(SceneToken(campaign_id=campaign.id, **item))
+        session.flush()
+        for item in payload.get("scene_regions", []):
+            session.add(SceneRegion(campaign_id=campaign.id, **item))
+
+        session.execute(delete(GameMessage).where(GameMessage.campaign_id == campaign.id))
+        session.execute(delete(ActiveEffect).where(ActiveEffect.campaign_id == campaign.id))
+        session.execute(delete(GameActivity).where(GameActivity.campaign_id == campaign.id))
+        session.execute(delete(GameItem).where(GameItem.campaign_id == campaign.id))
+        session.execute(delete(GameActor).where(GameActor.campaign_id == campaign.id))
+        for item in payload.get("game_actors", []):
+            session.add(GameActor(campaign_id=campaign.id, **item))
+        session.flush()
+        for item in payload.get("game_items", []):
+            session.add(GameItem(campaign_id=campaign.id, **item))
+        session.flush()
+        for item in payload.get("game_activities", []):
+            session.add(GameActivity(campaign_id=campaign.id, **item))
+        session.flush()
+        for item in payload.get("active_effects", []):
+            session.add(ActiveEffect(campaign_id=campaign.id, **item))
+        session.flush()
+        for item in payload.get("game_messages", []):
+            session.add(GameMessage(campaign_id=campaign.id, **item))
 
         active_ids = {item["revision_id"] for item in payload.get("memories", [])}
         memory_ids = select(CampaignMemory.id).where(

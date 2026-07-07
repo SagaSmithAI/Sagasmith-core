@@ -18,6 +18,9 @@ from sagasmith_core.embeddings import (
     create_embedder,
 )
 from sagasmith_core.events import EventService
+from sagasmith_core.foundry_documents import FoundryDocumentService
+from sagasmith_core.items import InventoryService
+from sagasmith_core.maps import MapService
 from sagasmith_core.memory import MemoryService
 from sagasmith_core.modules import ModuleService
 from sagasmith_core.revisions import RevisionService
@@ -38,6 +41,9 @@ __all__ = [
     "DocumentQualityError",
     "EmbeddingProfile",
     "EventService",
+    "FoundryDocumentService",
+    "InventoryService",
+    "MapService",
     "MemoryService",
     "ModuleService",
     "NormalizedDocument",

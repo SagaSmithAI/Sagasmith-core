@@ -10,7 +10,16 @@ from sqlalchemy import func, select
 
 from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.database import Database
-from sagasmith_core.models import AuditLog, Campaign, Character, StateRevision
+from sagasmith_core.models import (
+    AuditLog,
+    Campaign,
+    Character,
+    ItemInstance,
+    MapScene,
+    SceneRegion,
+    SceneToken,
+    StateRevision,
+)
 
 
 @dataclass(frozen=True)
@@ -156,6 +165,46 @@ class RevisionService:
             row = session.get(Campaign, revision.entity_id)
         elif revision.entity_type == "character":
             row = session.get(Character, revision.entity_id)
+        elif revision.entity_type == "item_instance":
+            row = session.get(ItemInstance, revision.entity_id)
+            if value is None:
+                if row is not None:
+                    session.delete(row)
+                return
+            if row is None:
+                row = ItemInstance(**value)
+                session.add(row)
+                return
+        elif revision.entity_type == "map_scene":
+            row = session.get(MapScene, revision.entity_id)
+            if value is None:
+                if row is not None:
+                    session.delete(row)
+                return
+            if row is None:
+                row = MapScene(**value)
+                session.add(row)
+                return
+        elif revision.entity_type == "scene_token":
+            row = session.get(SceneToken, revision.entity_id)
+            if value is None:
+                if row is not None:
+                    session.delete(row)
+                return
+            if row is None:
+                row = SceneToken(**value)
+                session.add(row)
+                return
+        elif revision.entity_type == "scene_region":
+            row = session.get(SceneRegion, revision.entity_id)
+            if value is None:
+                if row is not None:
+                    session.delete(row)
+                return
+            if row is None:
+                row = SceneRegion(**value)
+                session.add(row)
+                return
         else:
             raise ValueError(f"unsupported reversible entity: {revision.entity_type}")
         if row is None:
