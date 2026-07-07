@@ -439,6 +439,39 @@ class FoundryDocumentService:
             self._campaign(session, campaign_id)
             return [self._effect(row) for row in session.scalars(statement)]
 
+    def update_effect(
+        self,
+        effect_id: str,
+        *,
+        disabled: bool | None = None,
+        suppressed: bool | None = None,
+        duration: dict[str, Any] | None = None,
+        flags: dict[str, Any] | None = None,
+    ) -> EffectDocument:
+        with self.database.transaction() as session:
+            row = session.get(ActiveEffect, effect_id)
+            if row is None:
+                raise LookupError(effect_id)
+            if disabled is not None:
+                row.disabled = bool(disabled)
+            if suppressed is not None:
+                row.suppressed = bool(suppressed)
+            if duration is not None:
+                row.duration = dict(duration)
+            if flags is not None:
+                row.flags = dict(flags)
+            session.flush()
+            return self._effect(row)
+
+    def delete_effect(self, effect_id: str) -> EffectDocument:
+        with self.database.transaction() as session:
+            row = session.get(ActiveEffect, effect_id)
+            if row is None:
+                raise LookupError(effect_id)
+            value = self._effect(row)
+            session.delete(row)
+            return value
+
     def create_message(
         self,
         *,

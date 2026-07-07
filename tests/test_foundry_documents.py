@@ -55,6 +55,10 @@ def test_foundry_style_documents_form_actor_item_activity_effect_message_chain(d
 
     updated = documents.update_activity(activity.id, uses={"spent": 1, "max": 1})
     assert documents.get_activity(activity.id).uses == updated.uses
+    updated_effect = documents.update_effect(effect.id, duration={"period": "narrative_beat", "remaining": 1})
+    assert updated_effect.duration["remaining"] == 1
+    assert documents.delete_effect(effect.id).id == effect.id
+    assert documents.list_effects(campaign.id, actor_id=actor.id) == []
     assert documents.get_actor(actor.id).system["abilities"]["str"]["value"] == 16
 
 
