@@ -53,6 +53,10 @@ def test_foundry_style_documents_form_actor_item_activity_effect_message_chain(d
     assert documents.list_effects(campaign.id, actor_id=actor.id)[0].id == effect.id
     assert documents.list_messages(campaign.id)[0].sequence == message.sequence
 
+    updated = documents.update_activity(activity.id, uses={"spent": 1, "max": 1})
+    assert documents.get_activity(activity.id).uses == updated.uses
+    assert documents.get_actor(actor.id).system["abilities"]["str"]["value"] == 16
+
 
 def test_snapshot_restores_foundry_style_documents(database) -> None:
     campaign = CampaignService(database).create(system_id="dnd5e", name="Runtime")

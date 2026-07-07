@@ -161,6 +161,35 @@ class FoundryDocumentService:
             self._campaign(session, campaign_id)
             return [self._actor(row) for row in session.scalars(statement)]
 
+    def get_actor(self, actor_id: str) -> ActorDocument:
+        with self.database.transaction() as session:
+            row = session.get(GameActor, actor_id)
+            if row is None:
+                raise LookupError(actor_id)
+            return self._actor(row)
+
+    def update_actor(
+        self,
+        actor_id: str,
+        *,
+        system: dict[str, Any] | None = None,
+        derived: dict[str, Any] | None = None,
+        flags: dict[str, Any] | None = None,
+    ) -> ActorDocument:
+        with self.database.transaction() as session:
+            row = session.get(GameActor, actor_id)
+            if row is None:
+                raise LookupError(actor_id)
+            if system is not None:
+                row.system = dict(system)
+            if derived is not None:
+                row.derived = dict(derived)
+            if flags is not None:
+                row.flags = dict(flags)
+            row.revision += 1
+            session.flush()
+            return self._actor(row)
+
     def create_item(
         self,
         *,
@@ -199,6 +228,35 @@ class FoundryDocumentService:
                 sort=sort,
             )
             session.add(row)
+            session.flush()
+            return self._item(row)
+
+    def get_item(self, item_id: str) -> ItemDocument:
+        with self.database.transaction() as session:
+            row = session.get(GameItem, item_id)
+            if row is None:
+                raise LookupError(item_id)
+            return self._item(row)
+
+    def update_item(
+        self,
+        item_id: str,
+        *,
+        system: dict[str, Any] | None = None,
+        effects: list[dict[str, Any]] | None = None,
+        flags: dict[str, Any] | None = None,
+    ) -> ItemDocument:
+        with self.database.transaction() as session:
+            row = session.get(GameItem, item_id)
+            if row is None:
+                raise LookupError(item_id)
+            if system is not None:
+                row.system = dict(system)
+            if effects is not None:
+                row.effects = list(effects)
+            if flags is not None:
+                row.flags = dict(flags)
+            row.revision += 1
             session.flush()
             return self._item(row)
 
@@ -258,6 +316,52 @@ class FoundryDocumentService:
                 sort=sort,
             )
             session.add(row)
+            session.flush()
+            return self._activity(row)
+
+    def get_activity(self, activity_id: str) -> ActivityDocument:
+        with self.database.transaction() as session:
+            row = session.get(GameActivity, activity_id)
+            if row is None:
+                raise LookupError(activity_id)
+            return self._activity(row)
+
+    def update_activity(
+        self,
+        activity_id: str,
+        *,
+        activation: dict[str, Any] | None = None,
+        consumption: dict[str, Any] | None = None,
+        duration: dict[str, Any] | None = None,
+        effects: list[dict[str, Any]] | None = None,
+        range: dict[str, Any] | None = None,
+        target: dict[str, Any] | None = None,
+        uses: dict[str, Any] | None = None,
+        system: dict[str, Any] | None = None,
+        flags: dict[str, Any] | None = None,
+    ) -> ActivityDocument:
+        with self.database.transaction() as session:
+            row = session.get(GameActivity, activity_id)
+            if row is None:
+                raise LookupError(activity_id)
+            if activation is not None:
+                row.activation = dict(activation)
+            if consumption is not None:
+                row.consumption = dict(consumption)
+            if duration is not None:
+                row.duration = dict(duration)
+            if effects is not None:
+                row.effects = list(effects)
+            if range is not None:
+                row.range = dict(range)
+            if target is not None:
+                row.target = dict(target)
+            if uses is not None:
+                row.uses = dict(uses)
+            if system is not None:
+                row.system = dict(system)
+            if flags is not None:
+                row.flags = dict(flags)
             session.flush()
             return self._activity(row)
 
