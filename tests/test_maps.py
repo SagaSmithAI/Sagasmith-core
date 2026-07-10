@@ -61,3 +61,26 @@ def test_map_scene_token_region_snapshot_and_undo(database) -> None:
     maps.move_token(token.id, x=50, y=60)
     snapshots.restore(campaign.id, snap.slot)
     assert maps.get_token(token.id).x == 10
+
+
+def test_region_can_be_read_updated_and_deleted(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Region lifecycle")
+    maps = MapService(database)
+    scene = maps.create_scene(campaign.id, name="Cellar")
+    region = maps.create_region(
+        scene.id,
+        name="Fog Cloud",
+        shape={"type": "circle", "x": 10, "y": 10, "radius": 20},
+        duration={"remaining": 2},
+    )
+
+    assert maps.get_region(region.id).duration["remaining"] == 2
+    updated = maps.update_region(
+        region.id,
+        duration={"remaining": 1},
+        metadata={"origin": "spell:fog-cloud"},
+    )
+    assert updated.duration["remaining"] == 1
+    assert updated.metadata["origin"] == "spell:fog-cloud"
+    assert maps.delete_region(region.id).id == region.id
+    assert maps.list_regions(scene.id) == []

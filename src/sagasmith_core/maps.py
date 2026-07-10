@@ -271,6 +271,55 @@ class MapService:
             )
             return [self._region_info(row) for row in rows]
 
+    def get_region(self, region_id: str) -> SceneRegionInfo:
+        with self.database.transaction() as session:
+            row = session.get(SceneRegion, region_id)
+            if row is None:
+                raise LookupError(f"region not found: {region_id}")
+            return self._region_info(row)
+
+    def update_region(
+        self,
+        region_id: str,
+        *,
+        name: str | None = None,
+        shape: dict[str, Any] | None = None,
+        behavior: str | None = None,
+        attached_token_id: str | None = None,
+        duration: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> SceneRegionInfo:
+        with self.database.transaction() as session:
+            row = session.get(SceneRegion, region_id)
+            if row is None:
+                raise LookupError(f"region not found: {region_id}")
+            if attached_token_id is not None:
+                token = self._token(session, attached_token_id)
+                if token.scene_id != row.scene_id:
+                    raise ValueError("attached token must belong to the region scene")
+                row.attached_token_id = attached_token_id
+            if name is not None:
+                row.name = name
+            if shape is not None:
+                row.shape = dict(shape)
+            if behavior is not None:
+                row.behavior = behavior or "area"
+            if duration is not None:
+                row.duration = dict(duration)
+            if metadata is not None:
+                row.metadata_json = {**dict(row.metadata_json or {}), **metadata}
+            session.flush()
+            return self._region_info(row)
+
+    def delete_region(self, region_id: str) -> SceneRegionInfo:
+        with self.database.transaction() as session:
+            row = session.get(SceneRegion, region_id)
+            if row is None:
+                raise LookupError(f"region not found: {region_id}")
+            value = self._region_info(row)
+            session.delete(row)
+            return value
+
     @staticmethod
     def _campaign(session, campaign_id: str) -> Campaign:
         campaign = session.get(Campaign, campaign_id)
