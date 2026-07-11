@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import pytest
+
 from sagasmith_core import (
     CampaignService,
     CharacterService,
+    CharacterStateUpdate,
     EventService,
     MemoryService,
     ModuleService,
     RevisionService,
     RuleProfileService,
     SnapshotService,
+    StateMutationService,
 )
 from sagasmith_core.documents import DocumentBookmark, build_structured_markdown
 
@@ -100,6 +104,52 @@ def test_revision_undo_and_redo(database) -> None:
     assert campaigns.get(campaign.id).state == {"clock": 1}
     revisions.redo(campaign.id)
     assert campaigns.get(campaign.id).state == {"clock": 2}
+
+
+def test_state_mutation_replaces_campaign_and_character_documents_atomically(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Mutations")
+    characters = CharacterService(database)
+    hero = characters.create(
+        system_id="dnd5e",
+        campaign_id=campaign.id,
+        name="Mira",
+        sheet={"wallet": {"gp": 1}},
+        notes={"memories": []},
+    )
+
+    StateMutationService(database).replace(
+        campaign.id,
+        campaign_state={"party": {"wallet": {"gp": 2}}},
+        character_updates=[
+            CharacterStateUpdate(
+                character_id=hero.id,
+                expected_revision=hero.revision,
+                sheet={"wallet": {"gp": 0}},
+                notes={"memories": [{"summary": "Paid the party fund."}]},
+            )
+        ],
+    )
+
+    assert CampaignService(database).get(campaign.id).state["party"]["wallet"] == {"gp": 2}
+    updated = characters.get(hero.id)
+    assert updated.sheet["wallet"] == {"gp": 0}
+    assert updated.notes["memories"][0]["summary"] == "Paid the party fund."
+
+    with pytest.raises(ValueError):
+        StateMutationService(database).replace(
+            campaign.id,
+            campaign_state={"party": {"wallet": {"gp": 99}}},
+            character_updates=[
+                CharacterStateUpdate(
+                    character_id=hero.id,
+                    expected_revision=hero.revision,
+                    sheet={},
+                    notes={},
+                )
+            ],
+        )
+
+    assert CampaignService(database).get(campaign.id).state["party"]["wallet"] == {"gp": 2}
 
 
 def test_pdf_normalization_and_module_generator_structure(database) -> None:
