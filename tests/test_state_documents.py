@@ -30,7 +30,12 @@ def test_campaign_profile_events_snapshot_and_memory(database) -> None:
         system_id="dnd5e",
         campaign_id=campaign.id,
         name="Mira",
-        sheet={"hp": 10},
+        sheet={
+            "hp": 10,
+            "inventory": [{"id": "healing-potion", "equipped": False}],
+            "effects": [{"id": "bless", "remaining_turns": 3}],
+        },
+        notes={"memories": [{"summary": "Trusts the gate guard."}]},
     )
     EventService(database).add(campaign.id, summary="The door is found")
     memory = MemoryService(database).add(
@@ -61,9 +66,13 @@ def test_campaign_profile_events_snapshot_and_memory(database) -> None:
     saves = SnapshotService(database)
     first = saves.create(campaign.id, label="Before opening")
     assert saves.get(campaign.id, first.slot)["recap"]["summary"] == "Campaign baseline"
+    payload = saves.get(campaign.id, first.slot)["payload"]
+    assert payload["events"][0]["summary"] == "The door is found"
+    assert payload["memories"][0]["revision"]["content"].endswith("locked.")
     campaigns.update(campaign.id, state={"door": "open"})
-    CharacterService(database).update(character.id, sheet={"hp": 4})
+    CharacterService(database).update(character.id, sheet={"hp": 4}, notes={"memories": []})
     MemoryService(database).revise(memory.id, content="The cellar door is open.")
+    EventService(database).add(campaign.id, summary="The door is opened")
     modules.set_scene_progress(
         campaign_id=campaign.id,
         scene_id=scenes[0]["scene_id"],
@@ -74,8 +83,17 @@ def test_campaign_profile_events_snapshot_and_memory(database) -> None:
 
     assert restored.parent_id == first.id
     assert campaigns.get(campaign.id).state == {"door": "closed"}
-    assert CharacterService(database).get(character.id).sheet == {"hp": 10}
+    restored_character = CharacterService(database).get(character.id)
+    assert restored_character.sheet == {
+        "hp": 10,
+        "inventory": [{"id": "healing-potion", "equipped": False}],
+        "effects": [{"id": "bless", "remaining_turns": 3}],
+    }
+    assert restored_character.notes == {"memories": [{"summary": "Trusts the gate guard."}]}
     assert MemoryService(database).list(campaign.id)[0].content.endswith("locked.")
+    assert [item.summary for item in EventService(database).list(campaign.id)] == [
+        "The door is found"
+    ]
     assert modules.current_scene(campaign.id)["title"] == "Gate"
     mira_scene = modules.current_scene(campaign.id, scope_id="player:mira")
     assert mira_scene["title"] == "Cellar"
@@ -104,6 +122,101 @@ def test_revision_undo_and_redo(database) -> None:
     assert campaigns.get(campaign.id).state == {"clock": 1}
     revisions.redo(campaign.id)
     assert campaigns.get(campaign.id).state == {"clock": 2}
+
+
+def test_campaign_character_is_an_independent_library_instance(database) -> None:
+    campaigns = CampaignService(database)
+    campaign = campaigns.create(system_id="dnd5e", name="Instances")
+    characters = CharacterService(database)
+    template = characters.create(
+        system_id="dnd5e",
+        name="Mira Template",
+        character_type="pc",
+        sheet={"hp": 10, "inventory": [{"id": "key"}]},
+        notes={"profile": {"summary": "A careful explorer."}},
+    )
+    instance = characters.instantiate(
+        template.id,
+        campaign_id=campaign.id,
+        name="Mira",
+        player_name="Ada",
+    )
+
+    assert instance.id != template.id
+    assert instance.template_id == template.id
+    assert instance.campaign_id == campaign.id
+    assert [item.id for item in characters.list_library(system_id="dnd5e")] == [template.id]
+
+    characters.update(instance.id, sheet={"hp": 4, "inventory": []})
+    assert characters.get(template.id).sheet == {
+        "hp": 10,
+        "inventory": [{"id": "key"}],
+    }
+
+    snapshot = SnapshotService(database).create(campaign.id, label="Template instance")
+    characters.update(instance.id, sheet={"hp": 1, "inventory": []})
+    characters.update(template.id, notes={"profile": {"summary": "Updated library copy."}})
+    SnapshotService(database).restore(campaign.id, snapshot.slot)
+
+    assert characters.get(instance.id).sheet["hp"] == 4
+    assert characters.get(template.id).notes["profile"]["summary"] == "Updated library copy."
+
+
+def test_character_build_creates_template_and_instance_atomically(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Build")
+    template, instance = CharacterService(database).create_with_instance(
+        system_id="dnd5e",
+        campaign_id=campaign.id,
+        name="Mira",
+        character_type="pc",
+        player_name="Ada",
+        sheet={"hp": 10},
+        notes={"profile": {"summary": "A newly built hero."}},
+    )
+
+    assert template.campaign_id is None
+    assert template.player_name is None
+    assert instance.campaign_id == campaign.id
+    assert instance.player_name == "Ada"
+    assert instance.template_id == template.id
+    assert instance.sheet == template.sheet
+
+
+def test_snapshot_restore_preserves_its_undo_cursor_and_retires_future_revisions(
+    database,
+) -> None:
+    campaigns = CampaignService(database)
+    campaign = campaigns.create(system_id="dnd5e", name="Undo branch", state={"clock": 0})
+    revisions = RevisionService(database)
+    snapshots = SnapshotService(database)
+
+    campaigns.update(campaign.id, state={"clock": 1})
+    revisions.record(
+        campaign.id,
+        operation="campaign.state",
+        entity_type="campaign",
+        entity_id=campaign.id,
+        before={"state": {"clock": 0}},
+        after={"state": {"clock": 1}},
+    )
+    saved = snapshots.create(campaign.id, label="Clock one")
+
+    campaigns.update(campaign.id, state={"clock": 2})
+    revisions.record(
+        campaign.id,
+        operation="campaign.state",
+        entity_type="campaign",
+        entity_id=campaign.id,
+        before={"state": {"clock": 1}},
+        after={"state": {"clock": 2}},
+    )
+    snapshots.restore(campaign.id, saved.slot)
+
+    assert campaigns.get(campaign.id).state == {"clock": 1}
+    with pytest.raises(LookupError, match="nothing to redo"):
+        revisions.redo(campaign.id)
+    revisions.undo(campaign.id)
+    assert campaigns.get(campaign.id).state == {"clock": 0}
 
 
 def test_state_mutation_replaces_campaign_and_character_documents_atomically(database) -> None:

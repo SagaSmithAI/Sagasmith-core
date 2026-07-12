@@ -72,6 +72,11 @@ class Character(TimestampMixin, Base):
         nullable=True,
         index=True,
     )
+    template_id: Mapped[str | None] = mapped_column(
+        ForeignKey("characters.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     character_type: Mapped[str] = mapped_column(String(32), default="pc")
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     player_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
@@ -334,6 +339,7 @@ class StateRevision(Base):
     before: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     after: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     applied: Mapped[bool] = mapped_column(Boolean, default=True)
+    redoable: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

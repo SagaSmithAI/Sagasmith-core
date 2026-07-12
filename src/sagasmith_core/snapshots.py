@@ -6,6 +6,7 @@ import hashlib
 import json
 import uuid
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -15,12 +16,14 @@ from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.database import Database
 from sagasmith_core.models import (
     Campaign,
+    CampaignEvent,
     CampaignMemory,
     CampaignRuleProfile,
     CampaignSnapshot,
     Character,
     MemoryRevision,
     SceneProgress,
+    StateRevision,
 )
 
 
@@ -49,7 +52,7 @@ def _checksum(value: dict[str, Any]) -> str:
 
 
 class SnapshotService:
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
 
     def __init__(self, database: Database) -> None:
         self.database = database
@@ -157,6 +160,10 @@ class SnapshotService:
         target = self.get(campaign_id, slot)
         if not target["valid"]:
             raise SnapshotIntegrityError(f"snapshot {slot} failed checksum verification")
+        if target["schema_version"] != self.SCHEMA_VERSION:
+            raise SnapshotIntegrityError(
+                "snapshot schema is unsupported; create a new snapshot with the current runtime"
+            )
         self.create(campaign_id, label=f"Before restore to slot {slot}")
         with self.database.transaction() as session:
             campaign = session.get(Campaign, campaign_id)
@@ -240,6 +247,20 @@ class SnapshotService:
             )
             .order_by(CampaignMemory.id)
         )
+        events = list(
+            session.scalars(
+                select(CampaignEvent)
+                .where(CampaignEvent.campaign_id == campaign.id)
+                .order_by(CampaignEvent.sequence)
+            )
+        )
+        revisions = list(
+            session.scalars(
+                select(StateRevision)
+                .where(StateRevision.campaign_id == campaign.id)
+                .order_by(StateRevision.sequence)
+            )
+        )
         return {
             "campaign": {
                 "name": campaign.name,
@@ -265,6 +286,7 @@ class SnapshotService:
                     "id": row.id,
                     "system_id": row.system_id,
                     "character_type": row.character_type,
+                    "template_id": row.template_id,
                     "name": row.name,
                     "player_name": row.player_name,
                     "summary": row.summary,
@@ -287,12 +309,41 @@ class SnapshotService:
                 }
                 for row in progress
             ],
+            "events": [
+                {
+                    "id": row.id,
+                    "sequence": row.sequence,
+                    "event_type": row.event_type,
+                    "summary": row.summary,
+                    "payload": dict(row.payload),
+                    "created_at": row.created_at.isoformat(),
+                }
+                for row in events
+            ],
             "memories": [
                 {
-                    "memory_id": memory.id,
-                    "revision_id": revision.id,
+                    "id": memory.id,
+                    "kind": memory.kind,
+                    "subject": memory.subject,
+                    "created_at": memory.created_at.isoformat(),
+                    "updated_at": memory.updated_at.isoformat(),
+                    "revision": {
+                        "id": revision.id,
+                        "snapshot_id": revision.snapshot_id,
+                        "content": revision.content,
+                        "metadata": dict(revision.metadata_json),
+                        "created_at": revision.created_at.isoformat(),
+                    },
                 }
                 for memory, revision in memory_rows
+            ],
+            "revision_cursor": [
+                {
+                    "id": row.id,
+                    "applied": row.applied,
+                    "redoable": row.redoable,
+                }
+                for row in revisions
             ],
         }
 
@@ -337,11 +388,13 @@ class SnapshotService:
             for item in current.get("scene_progress", [])
             if old_scenes.get((item.get("scope_id", "party"), item["scene_id"])) != item
         ]
-        old_memories = {item["revision_id"] for item in previous.get("memories", [])}
+        old_memories = {
+            item["revision"]["id"] for item in previous.get("memories", [])
+        }
         memory_candidates = [
-            item["memory_id"]
+            item["id"]
             for item in current.get("memories", [])
-            if item["revision_id"] not in old_memories
+            if item["revision"]["id"] not in old_memories
         ]
         summary_parts = []
         if changed:
@@ -403,20 +456,62 @@ class SnapshotService:
             item.setdefault("scope_id", "party")
             session.add(SceneProgress(campaign_id=campaign.id, **item))
 
-        active_ids = {item["revision_id"] for item in payload.get("memories", [])}
-        memory_ids = select(CampaignMemory.id).where(
-            CampaignMemory.campaign_id == campaign.id
-        )
+        session.execute(delete(CampaignEvent).where(CampaignEvent.campaign_id == campaign.id))
+        for item in payload.get("events", []):
+            session.add(
+                CampaignEvent(
+                    campaign_id=campaign.id,
+                    id=item["id"],
+                    sequence=item["sequence"],
+                    event_type=item["event_type"],
+                    summary=item["summary"],
+                    payload=item["payload"],
+                    created_at=_parse_timestamp(item["created_at"]),
+                )
+            )
+
+        session.execute(delete(CampaignMemory).where(CampaignMemory.campaign_id == campaign.id))
+        memories = payload.get("memories", [])
+        for item in memories:
+            session.add(
+                CampaignMemory(
+                    id=item["id"],
+                    campaign_id=campaign.id,
+                    kind=item["kind"],
+                    subject=item["subject"],
+                    created_at=_parse_timestamp(item["created_at"]),
+                    updated_at=_parse_timestamp(item["updated_at"]),
+                )
+            )
+        session.flush()
+        for item in memories:
+            revision = item["revision"]
+            session.add(
+                MemoryRevision(
+                    id=revision["id"],
+                    memory_id=item["id"],
+                    snapshot_id=revision.get("snapshot_id"),
+                    content=revision["content"],
+                    metadata_json=revision["metadata"],
+                    active=True,
+                    created_at=_parse_timestamp(revision["created_at"]),
+                )
+            )
+
+        cursor = {item["id"]: item for item in payload.get("revision_cursor", [])}
         session.execute(
-            update(MemoryRevision)
-            .where(MemoryRevision.memory_id.in_(memory_ids))
-            .values(active=False)
+            update(StateRevision)
+            .where(StateRevision.campaign_id == campaign.id)
+            .values(applied=False, redoable=False)
         )
-        if active_ids:
+        for revision_id, item in cursor.items():
             session.execute(
-                update(MemoryRevision)
-                .where(MemoryRevision.id.in_(active_ids))
-                .values(active=True)
+                update(StateRevision)
+                .where(
+                    StateRevision.campaign_id == campaign.id,
+                    StateRevision.id == revision_id,
+                )
+                .values(applied=item["applied"], redoable=item["redoable"])
             )
 
     @staticmethod
@@ -443,3 +538,7 @@ class SnapshotService:
             is_head=row.is_head,
             created_at=row.created_at.isoformat(),
         )
+
+
+def _parse_timestamp(value: str) -> datetime:
+    return datetime.fromisoformat(value)

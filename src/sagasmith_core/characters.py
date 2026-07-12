@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -22,6 +23,7 @@ class CharacterInfo:
     id: str
     system_id: str
     campaign_id: str | None
+    template_id: str | None
     character_type: str
     name: str
     player_name: str | None
@@ -88,6 +90,96 @@ class CharacterService:
         with self.database.transaction() as session:
             return [self._info(row) for row in session.scalars(statement)]
 
+    def list_library(
+        self,
+        *,
+        system_id: str | None = None,
+        character_type: str | None = None,
+    ) -> list[CharacterInfo]:
+        statement = select(Character).where(Character.campaign_id.is_(None)).order_by(
+            Character.name, Character.id
+        )
+        if system_id:
+            statement = statement.where(Character.system_id == system_id)
+        if character_type:
+            statement = statement.where(Character.character_type == character_type)
+        with self.database.transaction() as session:
+            return [self._info(row) for row in session.scalars(statement)]
+
+    def instantiate(
+        self,
+        template_id: str,
+        *,
+        campaign_id: str,
+        name: str | None = None,
+        player_name: str | None = None,
+    ) -> CharacterInfo:
+        """Copy a library character into a campaign as an independent instance."""
+        with self.database.transaction() as session:
+            template = session.get(Character, template_id)
+            if template is None:
+                raise CharacterNotFoundError(template_id)
+            if template.campaign_id is not None:
+                raise ValueError("only a library character can be instantiated")
+            self._validate_campaign(session, template.system_id, campaign_id)
+            row = Character(
+                id=str(uuid.uuid4()),
+                system_id=template.system_id,
+                campaign_id=campaign_id,
+                template_id=template.id,
+                character_type=template.character_type,
+                name=name if name is not None else template.name,
+                player_name=(
+                    player_name if player_name is not None else template.player_name
+                ),
+                summary=template.summary,
+                sheet=copy.deepcopy(template.sheet),
+                notes=copy.deepcopy(template.notes),
+            )
+            session.add(row)
+            session.flush()
+            return self._info(row)
+
+    def create_with_instance(
+        self,
+        *,
+        system_id: str,
+        campaign_id: str,
+        name: str,
+        character_type: str = "pc",
+        player_name: str | None = None,
+        summary: str = "",
+        sheet: dict[str, Any] | None = None,
+        notes: dict[str, Any] | None = None,
+    ) -> tuple[CharacterInfo, CharacterInfo]:
+        """Create a public-library template and an independent campaign instance."""
+        with self.database.transaction() as session:
+            self._validate_campaign(session, system_id, campaign_id)
+            template = Character(
+                id=str(uuid.uuid4()),
+                system_id=system_id,
+                character_type=character_type,
+                name=name,
+                summary=summary,
+                sheet=copy.deepcopy(sheet or {}),
+                notes=copy.deepcopy(notes or {}),
+            )
+            instance = Character(
+                id=str(uuid.uuid4()),
+                system_id=system_id,
+                campaign_id=campaign_id,
+                template_id=template.id,
+                character_type=character_type,
+                name=name,
+                player_name=player_name,
+                summary=summary,
+                sheet=copy.deepcopy(sheet or {}),
+                notes=copy.deepcopy(notes or {}),
+            )
+            session.add_all([template, instance])
+            session.flush()
+            return self._info(template), self._info(instance)
+
     def update(
         self,
         character_id: str,
@@ -143,6 +235,7 @@ class CharacterService:
             id=row.id,
             system_id=row.system_id,
             campaign_id=row.campaign_id,
+            template_id=row.template_id,
             character_type=row.character_type,
             name=row.name,
             player_name=row.player_name,

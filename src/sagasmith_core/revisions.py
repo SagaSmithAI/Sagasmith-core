@@ -23,6 +23,7 @@ class RevisionInfo:
     entity_type: str
     entity_id: str
     applied: bool
+    redoable: bool
 
 
 class RevisionService:
@@ -113,6 +114,7 @@ class RevisionService:
             statement = select(StateRevision).where(
                 StateRevision.campaign_id == campaign_id,
                 StateRevision.applied.is_(False),
+                StateRevision.redoable.is_(True),
             )
             if current:
                 statement = statement.where(StateRevision.parent_id == current.id)
@@ -146,6 +148,7 @@ class RevisionService:
                 .where(
                     StateRevision.campaign_id == campaign_id,
                     StateRevision.applied.is_(False),
+                    StateRevision.redoable.is_(True),
                 )
             )
         )
@@ -192,4 +195,5 @@ class RevisionService:
             entity_type=row.entity_type,
             entity_id=row.entity_id,
             applied=row.applied,
+            redoable=row.redoable,
         )
