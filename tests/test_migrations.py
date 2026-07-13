@@ -120,3 +120,31 @@ def test_character_template_migrates_existing_character_library(tmp_path: Path) 
         assert "template_id" in columns
     finally:
         database.dispose()
+
+
+def test_branch_continuity_does_not_backfill_existing_campaigns(tmp_path: Path) -> None:
+    database = Database(sqlite_database_url(tmp_path / "branch-continuity.db"))
+    config = alembic_config(database.url)
+    command.upgrade(config, "20260712_06")
+    with database.engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO campaigns "
+            "(id, system_id, slug, name, status, description, settings, state, revision, "
+            "created_at, updated_at) "
+            "VALUES ('legacy-campaign', 'dnd5e', 'legacy', 'Legacy campaign', 'active', '', "
+            "'{}', '{}', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        )
+    database.upgrade_schema()
+    try:
+        with database.engine.connect() as connection:
+            active_branch_id = connection.exec_driver_sql(
+                "SELECT active_branch_id FROM campaigns WHERE id = 'legacy-campaign'"
+            ).scalar_one()
+            branch_count = connection.exec_driver_sql(
+                "SELECT COUNT(*) FROM campaign_branches "
+                "WHERE campaign_id = 'legacy-campaign'"
+            ).scalar_one()
+        assert active_branch_id is None
+        assert branch_count == 0
+    finally:
+        database.dispose()
