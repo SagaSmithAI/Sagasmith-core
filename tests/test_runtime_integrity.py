@@ -67,6 +67,16 @@ def test_principal_membership_and_actor_grants_are_explicit(database) -> None:
     assert access.require_actor(campaign.id, actor.id, "user:alice", control=True)
 
 
+def test_campaign_role_cannot_forge_unknown_actor(database) -> None:
+    campaigns = CampaignService(database)
+    campaign = campaigns.create(system_id="dnd5e", name="Access owner")
+    access = AccessService(database)
+    access.ensure_principal("user:dm", platform="test", external_id="dm")
+    access.grant_campaign(campaign.id, "user:dm", role="dm")
+    with pytest.raises(AccessDeniedError):
+        access.require_actor(campaign.id, "not-an-actor", "user:dm", control=True)
+
+
 def test_idempotency_rejects_key_reuse_with_different_payload(database) -> None:
     service = IdempotencyService(database)
     service.remember("campaign:c1", "request-1", {"amount": 1}, {"ok": True})
@@ -74,4 +84,3 @@ def test_idempotency_rejects_key_reuse_with_different_payload(database) -> None:
     assert replay is not None and replay.replayed is True
     with pytest.raises(IdempotencyConflictError):
         service.lookup("campaign:c1", "request-1", {"amount": 2})
-

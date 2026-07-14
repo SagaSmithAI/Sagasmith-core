@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 
 from sagasmith_core.branches import BranchService, resolve_branch
 from sagasmith_core.campaigns import CampaignNotFoundError
@@ -28,6 +28,7 @@ from sagasmith_core.models import (
     CampaignSnapshot,
     Character,
     MemoryRevision,
+    MutationGroup,
     SceneProgress,
     SnapshotActorKnowledgeBinding,
     SnapshotEventBinding,
@@ -79,49 +80,69 @@ class SnapshotService:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
-            branch = resolve_branch(session, campaign)
-            parent_id = parent_id if parent_id is not None else branch.head_snapshot_id
-            if parent_id:
-                parent = session.get(CampaignSnapshot, parent_id)
-                if parent is None or parent.campaign_id != campaign_id:
-                    raise LookupError(parent_id)
-            slot = (
-                session.scalar(
-                    select(func.max(CampaignSnapshot.slot)).where(
-                        CampaignSnapshot.campaign_id == campaign_id
-                    )
-                )
-                or 0
-            ) + 1
-            payload = self._capture(session, campaign, branch.id)
-            if recap is None:
-                parent_payload = (
-                    dict(session.get(CampaignSnapshot, parent_id).payload) if parent_id else None
-                )
-                recap = self._build_recap(parent_payload, payload)
-            session.execute(
-                update(CampaignSnapshot)
-                .where(CampaignSnapshot.campaign_id == campaign_id)
-                .values(is_head=False)
-            )
-            row = CampaignSnapshot(
-                id=str(uuid.uuid4()),
-                campaign_id=campaign_id,
-                branch_id=branch.id,
-                parent_id=parent_id,
-                slot=slot,
+            return self._create_in_session(
+                session,
+                campaign,
                 label=label,
-                schema_version=self.SCHEMA_VERSION,
-                payload=payload,
-                checksum=_checksum(payload),
                 recap=recap,
-                is_head=True,
+                parent_id=parent_id,
             )
-            session.add(row)
-            session.flush()
-            self._bind_continuity(session, row, branch)
-            branch.head_snapshot_id = row.id
-            return self._info(row)
+
+    def _create_in_session(
+        self,
+        session,
+        campaign: Campaign,
+        *,
+        label: str = "",
+        recap: dict[str, Any] | None = None,
+        parent_id: str | None = None,
+    ) -> SnapshotInfo:
+        branch = resolve_branch(session, campaign)
+        parent_id = parent_id if parent_id is not None else branch.head_snapshot_id
+        if parent_id:
+            parent = session.get(CampaignSnapshot, parent_id)
+            if parent is None or parent.campaign_id != campaign.id:
+                raise LookupError(parent_id)
+        slot = (
+            session.scalar(
+                select(func.max(CampaignSnapshot.slot)).where(
+                    CampaignSnapshot.campaign_id == campaign.id
+                )
+            )
+            or 0
+        ) + 1
+        payload = self._capture(session, campaign, branch.id)
+        if recap is None:
+            parent_payload = (
+                dict(session.get(CampaignSnapshot, parent_id).payload) if parent_id else None
+            )
+            recap = self._build_recap(parent_payload, payload)
+        session.execute(
+            update(CampaignSnapshot)
+            .where(
+                CampaignSnapshot.campaign_id == campaign.id,
+                CampaignSnapshot.branch_id == branch.id,
+            )
+            .values(is_head=False)
+        )
+        row = CampaignSnapshot(
+            id=str(uuid.uuid4()),
+            campaign_id=campaign.id,
+            branch_id=branch.id,
+            parent_id=parent_id,
+            slot=slot,
+            label=label,
+            schema_version=self.SCHEMA_VERSION,
+            payload=payload,
+            checksum=_checksum(payload),
+            recap=recap,
+            is_head=True,
+        )
+        session.add(row)
+        session.flush()
+        self._bind_continuity(session, row, branch)
+        branch.head_snapshot_id = row.id
+        return self._info(row)
 
     def regenerate_recap(self, campaign_id: str, slot: int) -> dict[str, Any]:
         """Rebuild a deterministic delta recap without changing snapshot state."""
@@ -161,44 +182,55 @@ class SnapshotService:
         return bool(self.get(campaign_id, slot)["valid"])
 
     def restore(self, campaign_id: str, slot: int) -> SnapshotInfo:
-        target = self.get(campaign_id, slot)
-        if not target["valid"]:
-            raise SnapshotIntegrityError(f"snapshot {slot} failed checksum verification")
-        if target["schema_version"] != self.SCHEMA_VERSION:
-            raise SnapshotIntegrityError(
-                "snapshot schema is unsupported; create a new snapshot with the current runtime"
-            )
-        self.create(campaign_id, label=f"Before restore to slot {slot}")
-        BranchService(self.database).create(
-            campaign_id,
-            name=f"restore-{slot}-{uuid.uuid4().hex[:8]}",
-            from_snapshot_id=target["id"],
-            checkout=True,
-        )
         with self.database.transaction() as session:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
-            self._apply(session, campaign, target["payload"])
-        return self.create(
-            campaign_id,
-            label=f"Restored from slot {slot}",
-            parent_id=target["id"],
-        )
+            target = self._row(session, campaign_id, slot)
+            if _checksum(target.payload) != target.checksum:
+                raise SnapshotIntegrityError(f"snapshot {slot} failed checksum verification")
+            if target.schema_version != self.SCHEMA_VERSION:
+                raise SnapshotIntegrityError(
+                    "snapshot schema is unsupported; create a new snapshot with the current runtime"
+                )
+            self._create_in_session(session, campaign, label=f"Before restore to slot {slot}")
+            branch = CampaignBranch(
+                id=str(uuid.uuid4()),
+                campaign_id=campaign_id,
+                name=f"restore-{slot}-{uuid.uuid4().hex[:8]}",
+                base_snapshot_id=target.id,
+                head_snapshot_id=target.id,
+                is_current=False,
+            )
+            session.add(branch)
+            session.flush()
+            branch_service = BranchService(self.database)
+            branch_service._copy_snapshot_heads(session, target.id, branch.id)
+            branch_service._copy_snapshot_revisions(session, target.id, branch.id)
+            branch_service._checkout(session, campaign, branch)
+            self._apply(session, campaign, dict(target.payload))
+            return self._create_in_session(
+                session,
+                campaign,
+                label=f"Restored from slot {slot}",
+                parent_id=target.id,
+            )
 
     def checkout_branch(self, campaign_id: str, branch_id: str) -> SnapshotInfo | None:
         """Materialize a branch head without creating or deleting history."""
-
-        branch = BranchService(self.database).checkout(campaign_id, branch_id)
-        if branch.head_snapshot_id is None:
-            return None
         with self.database.transaction() as session:
             campaign = session.get(Campaign, campaign_id)
-            row = session.get(CampaignSnapshot, branch.head_snapshot_id)
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
+            branch_row = session.get(CampaignBranch, branch_id)
+            if branch_row is None or branch_row.campaign_id != campaign_id:
+                raise LookupError(branch_id)
+            BranchService._checkout(session, campaign, branch_row)
+            if branch_row.head_snapshot_id is None:
+                return None
+            row = session.get(CampaignSnapshot, branch_row.head_snapshot_id)
             if row is None or row.campaign_id != campaign_id:
-                raise LookupError(branch.head_snapshot_id)
+                raise LookupError(branch_row.head_snapshot_id)
             if _checksum(row.payload) != row.checksum:
                 raise SnapshotIntegrityError("branch head failed checksum verification")
             self._apply(session, campaign, dict(row.payload))
@@ -286,7 +318,9 @@ class SnapshotService:
         revisions = list(
             session.scalars(
                 select(StateRevision)
+                .join(MutationGroup, MutationGroup.id == StateRevision.mutation_group_id)
                 .where(StateRevision.campaign_id == campaign.id)
+                .where(MutationGroup.branch_id == branch_id)
                 .order_by(StateRevision.sequence)
             )
         )
@@ -471,7 +505,10 @@ class SnapshotService:
         campaign.description = value["description"]
         campaign.settings = value["settings"]
         campaign.state = value["state"]
-        campaign.revision = value["revision"]
+        # Snapshot revisions describe the captured timeline, not the live
+        # optimistic-concurrency token.  Never move the live token backwards
+        # when switching to an older branch or restoring an earlier snapshot.
+        campaign.revision = max(int(campaign.revision), int(value["revision"])) + 1
 
         profile_value = payload.get("rule_profile")
         profile = session.get(CampaignRuleProfile, campaign.id)
@@ -502,9 +539,15 @@ class SnapshotService:
         # branch visibility is selected by bindings, so restore must never delete them.
 
         cursor = {item["id"]: item for item in payload.get("revision_cursor", [])}
+        branch = resolve_branch(session, campaign)
         session.execute(
             update(StateRevision)
-            .where(StateRevision.campaign_id == campaign.id)
+            .where(
+                StateRevision.campaign_id == campaign.id,
+                StateRevision.mutation_group_id.in_(
+                    select(MutationGroup.id).where(MutationGroup.branch_id == branch.id)
+                ),
+            )
             .values(applied=False, redoable=False)
         )
         for revision_id, item in cursor.items():
@@ -512,7 +555,10 @@ class SnapshotService:
                 update(StateRevision)
                 .where(
                     StateRevision.campaign_id == campaign.id,
-                    StateRevision.id == revision_id,
+                    or_(StateRevision.id == revision_id, StateRevision.branch_key == revision_id),
+                    StateRevision.mutation_group_id.in_(
+                        select(MutationGroup.id).where(MutationGroup.branch_id == branch.id)
+                    ),
                 )
                 .values(applied=item["applied"], redoable=item["redoable"])
             )

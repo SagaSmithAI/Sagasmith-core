@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from sagasmith_core.campaigns import CampaignNotFoundError
@@ -16,8 +16,10 @@ from sagasmith_core.models import (
     Campaign,
     CampaignBranch,
     CampaignSnapshot,
+    MutationGroup,
     SnapshotActorKnowledgeBinding,
     SnapshotFactBinding,
+    StateRevision,
 )
 
 
@@ -180,12 +182,30 @@ class BranchService:
             session.flush()
             if source_id:
                 self._copy_snapshot_heads(session, source_id, row.id)
+                self._copy_snapshot_revisions(session, source_id, row.id)
             elif current is not None:
                 self._copy_branch_heads(session, current.id, row.id)
             if current is None:
                 campaign.active_branch_id = row.id
             elif checkout:
                 self._checkout(session, campaign, row)
+                if row.head_snapshot_id:
+                    # Keep direct BranchService callers safe too: pointer
+                    # switching and snapshot materialization share this
+                    # transaction.  The local import avoids the module cycle
+                    # with SnapshotService's branch helpers.
+                    from sagasmith_core.snapshots import (
+                        SnapshotIntegrityError,
+                        SnapshotService,
+                        _checksum,
+                    )
+
+                    snapshot = session.get(CampaignSnapshot, row.head_snapshot_id)
+                    if snapshot is None or snapshot.campaign_id != campaign_id:
+                        raise LookupError(row.head_snapshot_id)
+                    if _checksum(snapshot.payload) != snapshot.checksum:
+                        raise SnapshotIntegrityError("branch head failed checksum verification")
+                    SnapshotService(self.database)._apply(session, campaign, dict(snapshot.payload))
             return self._info(row)
 
     def checkout(self, campaign_id: str, branch_id: str) -> BranchInfo:
@@ -197,6 +217,21 @@ class BranchService:
             if row is None or row.campaign_id != campaign_id:
                 raise LookupError(branch_id)
             self._checkout(session, campaign, row)
+            if row.head_snapshot_id:
+                # Direct core callers must receive the same atomic pointer plus
+                # materialized state contract as SnapshotService.checkout_branch.
+                from sagasmith_core.snapshots import (
+                    SnapshotIntegrityError,
+                    SnapshotService,
+                    _checksum,
+                )
+
+                snapshot = session.get(CampaignSnapshot, row.head_snapshot_id)
+                if snapshot is None or snapshot.campaign_id != campaign_id:
+                    raise LookupError(row.head_snapshot_id)
+                if _checksum(snapshot.payload) != snapshot.checksum:
+                    raise SnapshotIntegrityError("branch head failed checksum verification")
+                SnapshotService(self.database)._apply(session, campaign, dict(snapshot.payload))
             return self._info(row)
 
     @staticmethod
@@ -232,6 +267,77 @@ class BranchService:
                     branch_id=branch_id,
                     knowledge_id=item.knowledge_id,
                     revision_id=item.revision_id,
+                )
+            )
+
+    @staticmethod
+    def _copy_snapshot_revisions(session: Session, snapshot_id: str, branch_id: str) -> None:
+        """Fork the snapshot's reversible cursor so undo never mutates its source branch."""
+        snapshot = session.get(CampaignSnapshot, snapshot_id)
+        if snapshot is None:
+            return
+        cursor = {
+            str(item["id"]): item
+            for item in dict(snapshot.payload).get("revision_cursor", [])
+            if item.get("id")
+        }
+        if not cursor:
+            return
+        rows = list(
+            session.scalars(
+                select(StateRevision)
+                .where(StateRevision.id.in_(cursor))
+                .order_by(StateRevision.sequence)
+            )
+        )
+        if not rows:
+            return
+        max_sequence = session.scalar(
+            select(func.max(StateRevision.sequence)).where(
+                StateRevision.campaign_id == snapshot.campaign_id
+            )
+        ) or 0
+        group_ids = {row.mutation_group_id for row in rows if row.mutation_group_id}
+        group_map: dict[str, str] = {}
+        for group_offset, old_group in enumerate(
+            session.scalars(select(MutationGroup).where(MutationGroup.id.in_(group_ids))), start=1
+        ):
+            group_rows = [row for row in rows if row.mutation_group_id == old_group.id]
+            new_id = str(uuid.uuid4())
+            group_map[old_group.id] = new_id
+            session.add(
+                MutationGroup(
+                    id=new_id,
+                    campaign_id=old_group.campaign_id,
+                    branch_id=branch_id,
+                    sequence=max_sequence + group_offset,
+                    operation=old_group.operation,
+                    actor=old_group.actor,
+                    idempotency_key=None,
+                    request_hash=None,
+                    applied=all(bool(cursor[row.id].get("applied", True)) for row in group_rows),
+                    redoable=all(bool(cursor[row.id].get("redoable", True)) for row in group_rows),
+                )
+            )
+        revision_map = {row.id: str(uuid.uuid4()) for row in rows}
+        for offset, old in enumerate(rows, start=1):
+            cursor_item = cursor[old.id]
+            session.add(
+                StateRevision(
+                    id=revision_map[old.id],
+                    mutation_group_id=group_map.get(old.mutation_group_id),
+                    campaign_id=old.campaign_id,
+                    parent_id=revision_map.get(old.parent_id),
+                    sequence=max_sequence + offset,
+                    # Preserve the source revision id as a snapshot-cursor alias.
+                    branch_key=old.id,
+                    operation=old.operation,
+                    entity_type=old.entity_type,
+                    entity_id=old.entity_id,
+                    before=dict(old.before) if old.before else None,
+                    after=dict(old.after) if old.after else None,
+                    applied=bool(cursor_item.get("applied", True)),
+                    redoable=bool(cursor_item.get("redoable", True)),
                 )
             )
 

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from sqlalchemy import select
+
 from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.database import Database
 from sagasmith_core.models import ActorGrant, Campaign, CampaignMembership, Character, Principal
@@ -147,6 +149,17 @@ class AccessService:
                 else MembershipInfo(row.campaign_id, row.principal_id, row.role)
             )
 
+    def accessible_campaign_ids(self, principal_id: str) -> set[str]:
+        """Return only campaigns explicitly granted to one principal."""
+        with self.database.transaction() as session:
+            return set(
+                session.scalars(
+                    select(CampaignMembership.campaign_id).where(
+                        CampaignMembership.principal_id == principal_id
+                    )
+                )
+            )
+
     def require_campaign(
         self,
         campaign_id: str,
@@ -171,6 +184,15 @@ class AccessService:
         private: bool = False,
     ) -> ActorGrantInfo | MembershipInfo:
         membership = self.require_campaign(campaign_id, principal_id)
+        # Campaign owners/DMs still need a real actor in this campaign.  A role
+        # grants authority over actors; it must not turn an arbitrary identifier
+        # into a readable or writable object.
+        with self.database.transaction() as session:
+            actor = session.get(Character, actor_id)
+            if actor is None or actor.campaign_id != campaign_id:
+                raise AccessDeniedError(
+                    f"actor {actor_id!r} does not belong to campaign {campaign_id!r}"
+                )
         if membership.role in {"owner", "dm"}:
             return membership
         with self.database.transaction() as session:

@@ -9,6 +9,7 @@ from sagasmith_core import (
     CharacterService,
     CharacterStateUpdate,
     EventService,
+    IdempotencyService,
     MemoryService,
     ModuleService,
     RevisionService,
@@ -142,11 +143,13 @@ def test_campaign_character_is_an_independent_library_instance(database) -> None
         campaign_id=campaign.id,
         name="Mira",
         player_name="Ada",
+        sheet={"hp": 9, "inventory": [{"id": "key"}], "edition": "2024"},
     )
 
     assert instance.id != template.id
     assert instance.template_id == template.id
     assert instance.campaign_id == campaign.id
+    assert instance.sheet["edition"] == "2024"
     assert [item.id for item in characters.list_library(system_id="dnd5e")] == [template.id]
 
     characters.update(instance.id, sheet={"hp": 4, "inventory": []})
@@ -219,6 +222,29 @@ def test_snapshot_restore_preserves_its_undo_cursor_and_retires_future_revisions
         revisions.redo(campaign.id)
     revisions.undo(campaign.id)
     assert campaigns.get(campaign.id).state == {"clock": 0}
+
+
+def test_snapshot_restore_rolls_back_every_step_when_materialization_fails(
+    database, monkeypatch
+) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Atomic restore")
+    snapshots = SnapshotService(database)
+    target = snapshots.create(campaign.id, label="target")
+    branches = BranchService(database)
+    original_branch = branches.current(campaign.id)
+    original_slots = [item.slot for item in snapshots.list(campaign.id)]
+
+    def fail_apply(*_args, **_kwargs) -> None:
+        raise RuntimeError("materialization failed")
+
+    monkeypatch.setattr(snapshots, "_apply", fail_apply)
+
+    with pytest.raises(RuntimeError, match="materialization failed"):
+        snapshots.restore(campaign.id, target.slot)
+
+    assert [item.slot for item in snapshots.list(campaign.id)] == original_slots
+    assert [item.id for item in branches.list(campaign.id)] == [original_branch.id]
+    assert branches.current(campaign.id).id == original_branch.id
 
 
 def test_branch_scoped_facts_events_and_actor_knowledge_do_not_leak(database) -> None:
@@ -299,9 +325,18 @@ def test_state_mutation_replaces_campaign_and_character_documents_atomically(dat
     )
 
     assert CampaignService(database).get(campaign.id).state["party"]["wallet"] == {"gp": 2}
+
     updated = characters.get(hero.id)
     assert updated.sheet["wallet"] == {"gp": 0}
     assert updated.notes["memories"][0]["summary"] == "Paid the party fund."
+
+    with pytest.raises(ValueError, match="campaign revision conflict"):
+        StateMutationService(database).replace(
+            campaign.id,
+            campaign_state={"party": {"wallet": {"gp": 3}}},
+            expected_campaign_revision=0,
+        )
+    assert CampaignService(database).get(campaign.id).state["party"]["wallet"] == {"gp": 2}
 
     with pytest.raises(ValueError):
         StateMutationService(database).replace(
@@ -318,6 +353,25 @@ def test_state_mutation_replaces_campaign_and_character_documents_atomically(dat
         )
 
     assert CampaignService(database).get(campaign.id).state["party"]["wallet"] == {"gp": 2}
+
+
+def test_state_mutation_exposes_committed_idempotency_recovery_without_a_receipt(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Receipt recovery")
+    StateMutationService(database).replace(
+        campaign.id,
+        campaign_state={"phase": "after"},
+        operation="test.receipt.recovery",
+        idempotency_key="recover-on-retry",
+    )
+    assert IdempotencyService(database).mutation_committed(campaign.id, "recover-on-retry")
+    with pytest.raises(ValueError, match="committed mutation group"):
+        StateMutationService(database).replace(
+            campaign.id,
+            campaign_state={"phase": "duplicated"},
+            operation="test.receipt.recovery",
+            idempotency_key="recover-on-retry",
+        )
+    assert CampaignService(database).get(campaign.id).state == {"phase": "after"}
 
 
 def test_pdf_normalization_and_module_generator_structure(database) -> None:

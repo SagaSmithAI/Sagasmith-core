@@ -5,10 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from sqlalchemy import select
+
 from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.characters import CharacterNotFoundError
 from sagasmith_core.database import Database
-from sagasmith_core.models import Campaign, Character
+from sagasmith_core.idempotency import request_hash
+from sagasmith_core.models import Campaign, Character, MutationGroup
 from sagasmith_core.revisions import RevisionInfo, RevisionService
 
 
@@ -20,6 +23,9 @@ class CharacterStateUpdate:
     sheet: dict[str, Any]
     notes: dict[str, Any]
     expected_revision: int | None = None
+    name: str | None = None
+    player_name: str | None = None
+    summary: str | None = None
 
 
 class StateMutationService:
@@ -39,6 +45,7 @@ class StateMutationService:
         *,
         campaign_state: dict[str, Any] | None = None,
         character_updates: list[CharacterStateUpdate] | None = None,
+        expected_campaign_revision: int | None = None,
         operation: str | None = None,
         actor: str = "runtime",
         branch_id: str | None = None,
@@ -61,6 +68,25 @@ class StateMutationService:
                 "state": dict(campaign.state),
                 "revision": campaign.revision,
             }
+            if (
+                expected_campaign_revision is not None
+                and campaign.revision != expected_campaign_revision
+            ):
+                raise ValueError(
+                    "campaign revision conflict: "
+                    f"expected {expected_campaign_revision}, found {campaign.revision}"
+                )
+            if idempotency_key and session.scalar(
+                select(MutationGroup.id).where(
+                    MutationGroup.campaign_id == campaign_id,
+                    MutationGroup.idempotency_key == idempotency_key,
+                    MutationGroup.applied.is_(True),
+                )
+            ):
+                raise ValueError(
+                    "idempotency key already has a committed mutation group; "
+                    "read its replay receipt instead of applying another write"
+                )
             before_characters: dict[str, dict[str, Any]] = {}
             for update in updates:
                 row = session.get(Character, update.character_id)
@@ -87,6 +113,12 @@ class StateMutationService:
                 campaign.state = dict(campaign_state)
                 campaign.revision += 1
             for row, update in rows:
+                if update.name is not None:
+                    row.name = update.name
+                if update.player_name is not None:
+                    row.player_name = update.player_name
+                if update.summary is not None:
+                    row.summary = update.summary
                 row.sheet = dict(update.sheet)
                 row.notes = dict(update.notes)
                 row.revision += 1
@@ -130,4 +162,23 @@ class StateMutationService:
                 actor=actor,
                 branch_id=branch_id,
                 idempotency_key=idempotency_key,
+                request_hash=request_hash(
+                    {
+                        "campaign_state": campaign_state,
+                        "character_updates": [
+                            {
+                                "character_id": item.character_id,
+                                "sheet": item.sheet,
+                                "notes": item.notes,
+                                "expected_revision": item.expected_revision,
+                                "name": item.name,
+                                "player_name": item.player_name,
+                                "summary": item.summary,
+                            }
+                            for item in updates
+                        ],
+                    }
+                )
+                if idempotency_key
+                else None,
             )

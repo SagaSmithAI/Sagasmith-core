@@ -354,7 +354,12 @@ class MutationGroup(Base):
     """One user-visible state mutation, possibly touching many entities."""
 
     __tablename__ = "mutation_groups"
-    __table_args__ = (Index("ix_mutation_group_campaign_sequence", "campaign_id", "sequence"),)
+    __table_args__ = (
+        Index("ix_mutation_group_campaign_sequence", "campaign_id", "sequence"),
+        UniqueConstraint(
+            "campaign_id", "idempotency_key", name="uq_mutation_group_campaign_idempotency"
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     campaign_id: Mapped[str] = mapped_column(

@@ -11,6 +11,7 @@ from sqlalchemy import select
 
 from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.database import Database
+from sagasmith_core.idempotency import IdempotencyService
 from sagasmith_core.models import Campaign, Character
 
 
@@ -113,6 +114,7 @@ class CharacterService:
         campaign_id: str,
         name: str | None = None,
         player_name: str | None = None,
+        sheet: dict[str, Any] | None = None,
     ) -> CharacterInfo:
         """Copy a library character into a campaign as an independent instance."""
         with self.database.transaction() as session:
@@ -133,12 +135,70 @@ class CharacterService:
                     player_name if player_name is not None else template.player_name
                 ),
                 summary=template.summary,
-                sheet=copy.deepcopy(template.sheet),
+                sheet=copy.deepcopy(template.sheet if sheet is None else sheet),
                 notes=copy.deepcopy(template.notes),
             )
             session.add(row)
             session.flush()
             return self._info(row)
+
+    def create_idempotent(
+        self,
+        *,
+        system_id: str,
+        name: str,
+        principal_id: str,
+        idempotency_key: str,
+        character_type: str = "pc",
+        campaign_id: str | None = None,
+        player_name: str | None = None,
+        summary: str = "",
+        sheet: dict[str, Any] | None = None,
+        notes: dict[str, Any] | None = None,
+    ) -> CharacterInfo:
+        """Create one character and its replay receipt in the same transaction."""
+        payload = {
+            "system_id": system_id,
+            "name": name,
+            "character_type": character_type,
+            "campaign_id": campaign_id,
+            "player_name": player_name,
+            "summary": summary,
+            "sheet": sheet or {},
+            "notes": notes or {},
+        }
+        scope = f"character-create:{campaign_id or 'library'}:{principal_id}"
+        idempotency = IdempotencyService(self.database)
+        with self.database.transaction() as session:
+            replay = idempotency.lookup_in_session(
+                session, scope, idempotency_key, payload
+            )
+            if replay is not None and replay.response is not None:
+                return CharacterInfo(**replay.response)
+            self._validate_campaign(session, system_id, campaign_id)
+            row = Character(
+                id=str(uuid.uuid4()),
+                system_id=system_id,
+                campaign_id=campaign_id,
+                character_type=character_type,
+                name=name,
+                player_name=player_name,
+                summary=summary,
+                sheet=sheet or {},
+                notes=notes or {},
+            )
+            session.add(row)
+            session.flush()
+            result = self._info(row)
+            idempotency.remember_in_session(
+                session,
+                scope,
+                idempotency_key,
+                payload,
+                result.__dict__,
+                campaign_id=campaign_id,
+            )
+            return result
 
     def create_with_instance(
         self,

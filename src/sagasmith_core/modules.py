@@ -573,6 +573,7 @@ class ModuleService:
             ).one()
             return {
                 "chunk_id": row.ModuleChunk.id,
+                "campaign_id": row.ModuleSource.campaign_id,
                 "content": row.ModuleChunk.content,
                 "heading_path": list(row.ModuleChunk.heading_path),
                 "chunk_type": row.ModuleChunk.chunk_type,
@@ -892,6 +893,7 @@ class ModuleService:
         state: dict[str, Any] | None = None,
         current_room: str | None = None,
         scope_id: str = "party",
+        expected_state_version: int | None = None,
     ) -> dict[str, Any]:
         progress = max(0, min(100, progress))
         with self.database.transaction() as session:
@@ -909,6 +911,10 @@ class ModuleService:
                 )
             )
             if row is None:
+                if expected_state_version not in {None, 0}:
+                    raise ValueError(
+                        f"scene progress conflict: expected {expected_state_version}, found 0"
+                    )
                 row = SceneProgress(
                     id=str(uuid.uuid4()),
                     campaign_id=campaign_id,
@@ -916,6 +922,14 @@ class ModuleService:
                     scope_id=scope_id,
                 )
                 session.add(row)
+            elif (
+                expected_state_version is not None
+                and row.state_version != expected_state_version
+            ):
+                raise ValueError(
+                    f"scene progress conflict: expected {expected_state_version}, "
+                    f"found {row.state_version}"
+                )
             if status == "current":
                 for other in session.scalars(
                     select(SceneProgress).where(

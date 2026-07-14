@@ -10,7 +10,13 @@ from sqlalchemy import func, select
 
 from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.database import Database
-from sagasmith_core.models import AuditLog, Campaign, Character, MutationGroup, StateRevision
+from sagasmith_core.models import (
+    AuditLog,
+    Campaign,
+    Character,
+    MutationGroup,
+    StateRevision,
+)
 
 
 @dataclass(frozen=True)
@@ -98,11 +104,14 @@ class RevisionService:
         campaign = session.get(Campaign, campaign_id)
         if campaign is None:
             raise CampaignNotFoundError(campaign_id)
+        effective_branch_id = branch_id or campaign.active_branch_id
         current = session.scalar(
             select(StateRevision)
+            .join(MutationGroup, MutationGroup.id == StateRevision.mutation_group_id)
             .where(
                 StateRevision.campaign_id == campaign_id,
                 StateRevision.applied.is_(True),
+                MutationGroup.branch_id == effective_branch_id,
             )
             .order_by(StateRevision.sequence.desc())
         )
@@ -117,7 +126,7 @@ class RevisionService:
         group = MutationGroup(
             id=str(uuid.uuid4()),
             campaign_id=campaign_id,
-            branch_id=branch_id or campaign.active_branch_id,
+            branch_id=effective_branch_id,
             sequence=max_sequence + 1,
             operation=operation,
             actor=actor,
@@ -125,20 +134,24 @@ class RevisionService:
             request_hash=request_hash,
         )
         session.add(group)
-        if self._has_redo(session, campaign_id):
+        if self._has_redo(session, campaign_id, effective_branch_id):
             session.query(MutationGroup).filter(
                 MutationGroup.campaign_id == campaign_id,
+                MutationGroup.branch_id == effective_branch_id,
                 MutationGroup.applied.is_(False),
                 MutationGroup.redoable.is_(True),
             ).update({MutationGroup.redoable: False}, synchronize_session=False)
             session.query(StateRevision).filter(
                 StateRevision.campaign_id == campaign_id,
+                StateRevision.mutation_group_id.in_(
+                    select(MutationGroup.id).where(MutationGroup.branch_id == effective_branch_id)
+                ),
                 StateRevision.applied.is_(False),
                 StateRevision.redoable.is_(True),
             ).update({StateRevision.redoable: False}, synchronize_session=False)
         branch_key = (
             current.branch_key
-            if current is not None and not self._has_redo(session, campaign_id)
+            if current is not None and not self._has_redo(session, campaign_id, effective_branch_id)
             else str(uuid.uuid4())
         )
         rows: list[StateRevision] = []
@@ -167,11 +180,16 @@ class RevisionService:
 
     def undo(self, campaign_id: str) -> RevisionInfo:
         with self.database.transaction() as session:
+            campaign = session.get(Campaign, campaign_id)
+            if campaign is None:
+                raise CampaignNotFoundError(campaign_id)
             row = session.scalar(
                 select(StateRevision)
+                .join(MutationGroup, MutationGroup.id == StateRevision.mutation_group_id)
                 .where(
                     StateRevision.campaign_id == campaign_id,
                     StateRevision.applied.is_(True),
+                    self._visible_branch_revision_clause(session, campaign),
                 )
                 .order_by(StateRevision.sequence.desc())
             )
@@ -191,17 +209,24 @@ class RevisionService:
 
     def redo(self, campaign_id: str) -> RevisionInfo:
         with self.database.transaction() as session:
+            campaign = session.get(Campaign, campaign_id)
+            if campaign is None:
+                raise CampaignNotFoundError(campaign_id)
+            branch_id = campaign.active_branch_id
             current = session.scalar(
                 select(StateRevision)
+                .join(MutationGroup, MutationGroup.id == StateRevision.mutation_group_id)
                 .where(
                     StateRevision.campaign_id == campaign_id,
                     StateRevision.applied.is_(True),
+                    self._visible_branch_revision_clause(session, campaign),
                 )
                 .order_by(StateRevision.sequence.desc())
             )
             current_group_id = current.mutation_group_id if current else None
             statement = select(MutationGroup).where(
                 MutationGroup.campaign_id == campaign_id,
+                MutationGroup.branch_id == branch_id,
                 MutationGroup.applied.is_(False),
                 MutationGroup.redoable.is_(True),
             )
@@ -214,25 +239,7 @@ class RevisionService:
                 statement = statement.where(MutationGroup.sequence > current_sequence)
             group = session.scalar(statement.order_by(MutationGroup.sequence))
             if group is None:
-                # Legacy single revisions, created before grouped revisions, remain redoable.
-                legacy = select(StateRevision).where(
-                    StateRevision.campaign_id == campaign_id,
-                    StateRevision.mutation_group_id.is_(None),
-                    StateRevision.applied.is_(False),
-                    StateRevision.redoable.is_(True),
-                )
-                if current:
-                    legacy = legacy.where(StateRevision.parent_id == current.id)
-                else:
-                    legacy = legacy.where(StateRevision.parent_id.is_(None))
-                row = session.scalar(legacy.order_by(StateRevision.sequence))
-                if row is None:
-                    raise LookupError("nothing to redo")
-                self._apply(session, row, row.after)
-                row.applied = True
-                self._audit(session, row, actor="redo")
-                session.flush()
-                return self._info(row)
+                raise LookupError("nothing to redo")
             rows = self._group_rows(session, group_id=group.id)
             for member in sorted(rows, key=lambda item: item.sequence):
                 self._apply(session, member, member.after)
@@ -245,27 +252,40 @@ class RevisionService:
 
     def history(self, campaign_id: str, *, limit: int = 100) -> list[RevisionInfo]:
         with self.database.transaction() as session:
+            campaign = session.get(Campaign, campaign_id)
+            if campaign is None:
+                raise CampaignNotFoundError(campaign_id)
             rows = session.scalars(
                 select(StateRevision)
-                .where(StateRevision.campaign_id == campaign_id)
+                .join(MutationGroup, MutationGroup.id == StateRevision.mutation_group_id)
+                .where(
+                    StateRevision.campaign_id == campaign_id,
+                    self._visible_branch_revision_clause(session, campaign),
+                )
                 .order_by(StateRevision.sequence.desc())
                 .limit(max(1, min(limit, 500)))
             )
             return [self._info(row) for row in rows]
 
     @staticmethod
-    def _has_redo(session, campaign_id: str) -> bool:
+    def _has_redo(session, campaign_id: str, branch_id: str | None) -> bool:
         return bool(
             session.scalar(
                 select(func.count())
                 .select_from(MutationGroup)
                 .where(
                     MutationGroup.campaign_id == campaign_id,
+                    MutationGroup.branch_id == branch_id,
                     MutationGroup.applied.is_(False),
                     MutationGroup.redoable.is_(True),
                 )
             )
         )
+
+    @staticmethod
+    def _visible_branch_revision_clause(session, campaign: Campaign):
+        """Revision rows are branch-owned; fork setup clones a snapshot cursor."""
+        return MutationGroup.branch_id == campaign.active_branch_id
 
     @staticmethod
     def _group_rows(
