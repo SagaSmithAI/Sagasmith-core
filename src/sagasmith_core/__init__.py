@@ -26,7 +26,9 @@ from sagasmith_core.knowledge import ActorKnowledgeService
 from sagasmith_core.memory import MemoryService
 from sagasmith_core.modules import ModuleService
 from sagasmith_core.revisions import RevisionService
+from sagasmith_core.rule_packs import RulePackService
 from sagasmith_core.rule_profiles import RuleProfileService
+from sagasmith_core.rule_receipts import RuleReceiptService
 from sagasmith_core.rules import RuleService
 from sagasmith_core.snapshots import SnapshotService
 from sagasmith_core.state import CharacterStateUpdate, StateMutationService
@@ -58,6 +60,8 @@ __all__ = [
     "PdfDocumentConverter",
     "RevisionService",
     "RuleProfileService",
+    "RuleReceiptService",
+    "RulePackService",
     "RuleService",
     "SnapshotService",
     "StateMutationService",

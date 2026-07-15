@@ -24,11 +24,13 @@ from sagasmith_core.models import (
     CampaignBranch,
     CampaignEvent,
     CampaignMemory,
+    CampaignRuleActivation,
     CampaignRuleProfile,
     CampaignSnapshot,
     Character,
     MemoryRevision,
     MutationGroup,
+    RulePackVersion,
     SceneProgress,
     SnapshotActorKnowledgeBinding,
     SnapshotEventBinding,
@@ -63,7 +65,7 @@ def _checksum(value: dict[str, Any]) -> str:
 
 
 class SnapshotService:
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
 
     def __init__(self, database: Database) -> None:
         self.database = database
@@ -170,13 +172,14 @@ class SnapshotService:
     def get(self, campaign_id: str, slot: int) -> dict[str, Any]:
         with self.database.transaction() as session:
             row = self._row(session, campaign_id, slot)
-            return {
-                **asdict(self._info(row)),
-                "schema_version": row.schema_version,
-                "payload": dict(row.payload),
-                "recap": dict(row.recap) if row.recap else None,
-                "valid": _checksum(row.payload) == row.checksum,
-            }
+            return self._document(row)
+
+    def get_by_id(self, campaign_id: str, snapshot_id: str) -> dict[str, Any]:
+        with self.database.transaction() as session:
+            row = session.get(CampaignSnapshot, snapshot_id)
+            if row is None or row.campaign_id != campaign_id:
+                raise LookupError(snapshot_id)
+            return self._document(row)
 
     def verify(self, campaign_id: str, slot: int) -> bool:
         return bool(self.get(campaign_id, slot)["valid"])
@@ -225,14 +228,20 @@ class SnapshotService:
             branch_row = session.get(CampaignBranch, branch_id)
             if branch_row is None or branch_row.campaign_id != campaign_id:
                 raise LookupError(branch_id)
-            BranchService._checkout(session, campaign, branch_row)
             if branch_row.head_snapshot_id is None:
+                BranchService._checkout(session, campaign, branch_row)
                 return None
             row = session.get(CampaignSnapshot, branch_row.head_snapshot_id)
             if row is None or row.campaign_id != campaign_id:
                 raise LookupError(branch_row.head_snapshot_id)
             if _checksum(row.payload) != row.checksum:
                 raise SnapshotIntegrityError("branch head failed checksum verification")
+            if row.schema_version != self.SCHEMA_VERSION:
+                raise SnapshotIntegrityError(
+                    "branch head schema is unsupported; create a new snapshot with "
+                    "the current runtime"
+                )
+            BranchService._checkout(session, campaign, branch_row)
             self._apply(session, campaign, dict(row.payload))
             return self._info(row)
 
@@ -282,6 +291,16 @@ class SnapshotService:
     @staticmethod
     def _capture(session, campaign: Campaign, branch_id: str) -> dict[str, Any]:
         profile = session.get(CampaignRuleProfile, campaign.id)
+        rule_lock = list(
+            session.scalars(
+                select(CampaignRuleActivation)
+                .where(
+                    CampaignRuleActivation.campaign_id == campaign.id,
+                    CampaignRuleActivation.branch_id == branch_id,
+                )
+                .order_by(CampaignRuleActivation.pack_id)
+            )
+        )
         characters = list(
             session.scalars(
                 select(Character).where(Character.campaign_id == campaign.id).order_by(Character.id)
@@ -344,6 +363,16 @@ class SnapshotService:
                 if profile
                 else None
             ),
+            "rule_lock": [
+                {
+                    "pack_id": row.pack_id,
+                    "version": row.version,
+                    "checksum": row.checksum,
+                    "enabled": row.enabled,
+                    "options": dict(row.options),
+                }
+                for row in rule_lock
+            ],
             "characters": [
                 {
                     "id": row.id,
@@ -499,6 +528,20 @@ class SnapshotService:
 
     @staticmethod
     def _apply(session, campaign: Campaign, payload: dict[str, Any]) -> None:
+        rule_lock = list(payload.get("rule_lock") or [])
+        for item in rule_lock:
+            version = session.get(
+                RulePackVersion,
+                {"pack_id": item["pack_id"], "version": item["version"]},
+            )
+            if (
+                version is None
+                or version.status != "installed"
+                or version.checksum != item["checksum"]
+            ):
+                raise SnapshotIntegrityError(
+                    "snapshot rule lock is unavailable; install the exact pack version first"
+                )
         value = payload["campaign"]
         campaign.name = value["name"]
         campaign.status = value["status"]
@@ -526,6 +569,37 @@ class SnapshotService:
             profile.publications = profile_value["publications"]
             profile.options = profile_value["options"]
 
+        branch = resolve_branch(session, campaign)
+        session.execute(
+            delete(CampaignRuleActivation).where(
+                CampaignRuleActivation.campaign_id == campaign.id,
+                CampaignRuleActivation.branch_id == branch.id,
+            )
+        )
+        for item in rule_lock:
+            session.add(
+                CampaignRuleActivation(
+                    campaign_id=campaign.id,
+                    branch_id=branch.id,
+                    pack_id=item["pack_id"],
+                    version=item["version"],
+                    checksum=item["checksum"],
+                    enabled=bool(item.get("enabled", True)),
+                    options=dict(item.get("options") or {}),
+                )
+            )
+        session.flush()
+        # Restoring a save must not make either its own branch or another
+        # branch's lock incompatible with the campaign-global edition profile.
+        from sagasmith_core.rule_packs import RulePackService
+
+        RulePackService._assert_edition_compatible_in_session(
+            session,
+            campaign,
+            profile.edition if profile is not None else "",
+        )
+        RulePackService._resolve(session, campaign, branch.id)
+
         session.execute(delete(Character).where(Character.campaign_id == campaign.id))
         for item in payload.get("characters", []):
             session.add(Character(campaign_id=campaign.id, **item))
@@ -539,7 +613,6 @@ class SnapshotService:
         # branch visibility is selected by bindings, so restore must never delete them.
 
         cursor = {item["id"]: item for item in payload.get("revision_cursor", [])}
-        branch = resolve_branch(session, campaign)
         session.execute(
             update(StateRevision)
             .where(
@@ -588,6 +661,16 @@ class SnapshotService:
             created_at=row.created_at.isoformat(),
             branch_id=row.branch_id,
         )
+
+    @classmethod
+    def _document(cls, row: CampaignSnapshot) -> dict[str, Any]:
+        return {
+            **asdict(cls._info(row)),
+            "schema_version": row.schema_version,
+            "payload": dict(row.payload),
+            "recap": dict(row.recap) if row.recap else None,
+            "valid": _checksum(row.payload) == row.checksum,
+        }
 
     @staticmethod
     def _visible_events(session, campaign_id: str, branch_id: str) -> list[CampaignEvent]:

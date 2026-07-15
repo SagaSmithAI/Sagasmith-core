@@ -15,8 +15,10 @@ from sagasmith_core.models import (
     BranchFactHead,
     Campaign,
     CampaignBranch,
+    CampaignRuleActivation,
     CampaignSnapshot,
     MutationGroup,
+    RuleResolutionReceipt,
     SnapshotActorKnowledgeBinding,
     SnapshotFactBinding,
     StateRevision,
@@ -135,13 +137,30 @@ class BranchService:
                     )
                 )
             }
+            left_rules = {
+                row.pack_id: f"{row.version}:{row.checksum}:{int(row.enabled)}"
+                for row in session.scalars(
+                    select(CampaignRuleActivation).where(
+                        CampaignRuleActivation.branch_id == left.id
+                    )
+                )
+            }
+            right_rules = {
+                row.pack_id: f"{row.version}:{row.checksum}:{int(row.enabled)}"
+                for row in session.scalars(
+                    select(CampaignRuleActivation).where(
+                        CampaignRuleActivation.branch_id == right.id
+                    )
+                )
+            }
             return {
                 "campaign_id": campaign_id,
                 "left_branch_id": left.id,
                 "right_branch_id": right.id,
                 "facts": self._diff_ids(left_facts, right_facts),
                 "actor_knowledge": self._diff_ids(left_knowledge, right_knowledge),
-                "merge_policy": "explicit-per-fact-and-actor-knowledge",
+                "rule_lock": self._diff_ids(left_rules, right_rules),
+                "merge_policy": "explicit-per-fact-actor-knowledge-and-rule-lock",
             }
 
     @staticmethod
@@ -183,8 +202,11 @@ class BranchService:
             if source_id:
                 self._copy_snapshot_heads(session, source_id, row.id)
                 self._copy_snapshot_revisions(session, source_id, row.id)
+                if not checkout:
+                    self._copy_snapshot_rule_lock(session, source_id, row.id)
             elif current is not None:
                 self._copy_branch_heads(session, current.id, row.id)
+                self._copy_branch_rule_lock(session, current.id, row.id)
             if current is None:
                 campaign.active_branch_id = row.id
             elif checkout:
@@ -205,6 +227,11 @@ class BranchService:
                         raise LookupError(row.head_snapshot_id)
                     if _checksum(snapshot.payload) != snapshot.checksum:
                         raise SnapshotIntegrityError("branch head failed checksum verification")
+                    if snapshot.schema_version != SnapshotService.SCHEMA_VERSION:
+                        raise SnapshotIntegrityError(
+                            "branch head schema is unsupported; create a new snapshot "
+                            "with the current runtime"
+                        )
                     SnapshotService(self.database)._apply(session, campaign, dict(snapshot.payload))
             return self._info(row)
 
@@ -231,6 +258,11 @@ class BranchService:
                     raise LookupError(row.head_snapshot_id)
                 if _checksum(snapshot.payload) != snapshot.checksum:
                     raise SnapshotIntegrityError("branch head failed checksum verification")
+                if snapshot.schema_version != SnapshotService.SCHEMA_VERSION:
+                    raise SnapshotIntegrityError(
+                        "branch head schema is unsupported; create a new snapshot "
+                        "with the current runtime"
+                    )
                 SnapshotService(self.database)._apply(session, campaign, dict(snapshot.payload))
             return self._info(row)
 
@@ -319,6 +351,27 @@ class BranchService:
                     redoable=all(bool(cursor[row.id].get("redoable", True)) for row in group_rows),
                 )
             )
+        for old_receipt in session.scalars(
+            select(RuleResolutionReceipt).where(
+                RuleResolutionReceipt.mutation_group_id.in_(group_ids)
+            )
+        ):
+            new_group_id = group_map.get(old_receipt.mutation_group_id)
+            if new_group_id is None:
+                continue
+            session.add(
+                RuleResolutionReceipt(
+                    id=str(uuid.uuid4()),
+                    campaign_id=old_receipt.campaign_id,
+                    branch_id=branch_id,
+                    mutation_group_id=new_group_id,
+                    ruleset_fingerprint=old_receipt.ruleset_fingerprint,
+                    mechanic_id=old_receipt.mechanic_id,
+                    event=old_receipt.event,
+                    receipt=dict(old_receipt.receipt),
+                    created_at=old_receipt.created_at,
+                )
+            )
         revision_map = {row.id: str(uuid.uuid4()) for row in rows}
         for offset, old in enumerate(rows, start=1):
             cursor_item = cursor[old.id]
@@ -342,6 +395,24 @@ class BranchService:
             )
 
     @staticmethod
+    def _copy_snapshot_rule_lock(session: Session, snapshot_id: str, branch_id: str) -> None:
+        snapshot = session.get(CampaignSnapshot, snapshot_id)
+        if snapshot is None:
+            return
+        for item in dict(snapshot.payload).get("rule_lock", []):
+            session.add(
+                CampaignRuleActivation(
+                    campaign_id=snapshot.campaign_id,
+                    branch_id=branch_id,
+                    pack_id=item["pack_id"],
+                    version=item["version"],
+                    checksum=item["checksum"],
+                    enabled=bool(item.get("enabled", True)),
+                    options=dict(item.get("options") or {}),
+                )
+            )
+
+    @staticmethod
     def _copy_branch_heads(session: Session, source_id: str, branch_id: str) -> None:
         for item in session.scalars(
             select(BranchFactHead).where(BranchFactHead.branch_id == source_id)
@@ -359,6 +430,23 @@ class BranchService:
                     branch_id=branch_id,
                     knowledge_id=item.knowledge_id,
                     revision_id=item.revision_id,
+                )
+            )
+
+    @staticmethod
+    def _copy_branch_rule_lock(session: Session, source_id: str, branch_id: str) -> None:
+        for item in session.scalars(
+            select(CampaignRuleActivation).where(CampaignRuleActivation.branch_id == source_id)
+        ):
+            session.add(
+                CampaignRuleActivation(
+                    campaign_id=item.campaign_id,
+                    branch_id=branch_id,
+                    pack_id=item.pack_id,
+                    version=item.version,
+                    checksum=item.checksum,
+                    enabled=item.enabled,
+                    options=dict(item.options),
                 )
             )
 

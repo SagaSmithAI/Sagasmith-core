@@ -74,12 +74,18 @@ def _repeated_margin_lines(pages: list[list[str]]) -> set[str]:
     candidates: Counter[str] = Counter()
     for lines in pages:
         nonempty = [line for line in lines if line]
+        seen_on_page: set[str] = set()
         for line in [*nonempty[:3], *nonempty[-3:]]:
             if _CHAPTER_RE.match(line):
                 continue
             normalized = _normalize(line)
-            if normalized and not _PAGE_NUMBER_RE.fullmatch(line):
+            if (
+                normalized
+                and normalized not in seen_on_page
+                and not _PAGE_NUMBER_RE.fullmatch(line)
+            ):
                 candidates[normalized] += 1
+                seen_on_page.add(normalized)
     threshold = max(2, len(pages) // 8)
     return {line for line, count in candidates.items() if count >= threshold}
 
@@ -127,6 +133,19 @@ def _joiner(left: str, right: str) -> str:
     return " "
 
 
+def _looks_like_all_caps_heading(value: str) -> bool:
+    """Recover short visual subheadings that are absent from a PDF outline."""
+    text = value.strip()
+    letters = [char for char in text if char.isalpha()]
+    return bool(
+        3 <= len(text) <= 80
+        and 1 <= len(text.split()) <= 12
+        and letters
+        and all(char == char.upper() for char in letters)
+        and not _TERMINAL_RE.search(text)
+    )
+
+
 def _reflow_page(
     page_number: int,
     lines: list[str],
@@ -171,6 +190,8 @@ def _reflow_page(
         elif _ROOM_RE.match(line):
             level = level or 4
             room_count += 1
+        elif level is None and _looks_like_all_caps_heading(line):
+            level = 5
         if level is not None:
             flush()
             output.extend((f"{'#' * level} {line}", ""))

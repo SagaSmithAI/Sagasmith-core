@@ -90,6 +90,22 @@ System packages normally install it automatically. Core has no agent-platform de
 
 ---
 
+## Rule-document and rule-pack boundary
+
+`RuleService.inspect_path()` and `RuleService.ingest_path()` use the shared
+PDF/Markdown/text conversion pipeline. An imported source retains its original
+document checksum, parser warnings, page count, normalized hierarchy, and per-chunk
+page ranges. `RuleService.citation()` resolves a chunk into canonical evidence; Core
+does not translate that evidence into system mechanics.
+
+`RulePackService` stores content-addressed, versioned definitions and branch-local
+campaign activations. System plugins own the executable IR and settlement semantics.
+Install and activation are separate operations, and snapshots/receipts preserve exact
+checksums and fingerprints. A document import is therefore evidence, never executable
+code by itself.
+
+---
+
 ## Scene Metadata Ownership
 
 A parsed scene carries both column-backed fields (always present) and a `metadata_json` JSON dict populated by the system profile at parse time. Consumers should treat this as a **best-effort enrichment** rather than a guaranteed schema.

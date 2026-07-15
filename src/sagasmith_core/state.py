@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -11,7 +12,7 @@ from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.characters import CharacterNotFoundError
 from sagasmith_core.database import Database
 from sagasmith_core.idempotency import request_hash
-from sagasmith_core.models import Campaign, Character, MutationGroup
+from sagasmith_core.models import Campaign, Character, MutationGroup, RuleResolutionReceipt
 from sagasmith_core.revisions import RevisionInfo, RevisionService
 
 
@@ -50,13 +51,17 @@ class StateMutationService:
         actor: str = "runtime",
         branch_id: str | None = None,
         idempotency_key: str | None = None,
+        rule_receipts: list[dict[str, Any]] | None = None,
     ) -> list[RevisionInfo] | None:
         updates = list(character_updates or [])
+        receipts = list(rule_receipts or [])
         ids = [item.character_id for item in updates]
         if len(ids) != len(set(ids)):
             raise ValueError("character updates must not contain duplicate ids")
         if campaign_state is None and not updates:
             raise ValueError("at least one state document must be supplied")
+        if receipts and operation is None:
+            raise ValueError("rule receipts require an audited operation")
 
         with self.database.transaction() as session:
             campaign = session.get(Campaign, campaign_id)
@@ -154,7 +159,7 @@ class StateMutationService:
                         },
                     }
                 )
-            return RevisionService(self.database).record_group_in_session(
+            revisions = RevisionService(self.database).record_group_in_session(
                 session,
                 campaign_id,
                 operation=operation,
@@ -182,3 +187,28 @@ class StateMutationService:
                 if idempotency_key
                 else None,
             )
+            mutation_group_id = revisions[0].mutation_group_id
+            if receipts and mutation_group_id is None:
+                raise RuntimeError("rule receipts require a mutation group")
+            effective_branch_id = branch_id or campaign.active_branch_id
+            for receipt in receipts:
+                fingerprint = str(receipt.get("ruleset_fingerprint") or "")
+                mechanic_id = str(receipt.get("mechanic_id") or "")
+                event = str(receipt.get("event") or "")
+                if not fingerprint or not mechanic_id or not event:
+                    raise ValueError(
+                        "rule receipts require ruleset_fingerprint, mechanic_id, and event"
+                    )
+                session.add(
+                    RuleResolutionReceipt(
+                        id=str(uuid.uuid4()),
+                        campaign_id=campaign_id,
+                        branch_id=effective_branch_id,
+                        mutation_group_id=mutation_group_id,
+                        ruleset_fingerprint=fingerprint,
+                        mechanic_id=mechanic_id,
+                        event=event,
+                        receipt=dict(receipt),
+                    )
+                )
+            return revisions

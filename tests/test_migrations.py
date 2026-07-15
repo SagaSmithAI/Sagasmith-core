@@ -22,6 +22,9 @@ def test_bundled_migration_builds_schema(tmp_path: Path) -> None:
         assert "template_id" in {
             column["name"] for column in inspector.get_columns("characters")
         }
+        assert "rule_pack_versions" in inspector.get_table_names()
+        assert "campaign_rule_activations" in inspector.get_table_names()
+        assert "rule_resolution_receipts" in inspector.get_table_names()
     finally:
         database.dispose()
 

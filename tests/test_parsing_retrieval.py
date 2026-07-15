@@ -22,6 +22,19 @@ def test_markdown_parser_preserves_heading_paths() -> None:
     assert parsed[1].chunks[0].heading_path == ("Combat", "Grapple")
 
 
+def test_markdown_parser_does_not_turn_same_level_after_a_jump_into_children() -> None:
+    parsed = MarkdownHierarchyParser().parse(
+        "# Chapter\n#### First\nText.\n#### Second\nText.\n##### Detail\nText."
+    )
+
+    assert [section.path for section in parsed] == [
+        ("Chapter",),
+        ("Chapter", "First"),
+        ("Chapter", "Second"),
+        ("Chapter", "Second", "Detail"),
+    ]
+
+
 def test_module_parser_supports_profiles_without_scene_boundary_hook() -> None:
     class LegacyProfile:
         name = "legacy"
@@ -161,4 +174,3 @@ def test_fts5_hits_produces_results_on_sqlite(database) -> None:
     api_hits = service.search(campaign_id=campaign.id, query="wolves")
     assert len(api_hits) >= 1
     assert "Gate" in api_hits[0].title
-

@@ -48,12 +48,13 @@ class MarkdownHierarchyParser:
             return [self._section(0, 1, "Document", ("Document",), content, 0, len(content))]
 
         sections: list[ParsedSection] = []
-        heading_stack: list[str] = []
+        heading_stack: list[tuple[int, str]] = []
         for ordinal, match in enumerate(matches):
             level = len(match.group(1))
             title = match.group(2).strip()
-            heading_stack = heading_stack[: level - 1]
-            heading_stack.append(title)
+            heading_stack = [item for item in heading_stack if item[0] < level]
+            heading_stack.append((level, title))
+            path = tuple(item[1] for item in heading_stack)
             start = match.end()
             end = matches[ordinal + 1].start() if ordinal + 1 < len(matches) else len(content)
             body = content[start:end].strip()
@@ -62,7 +63,7 @@ class MarkdownHierarchyParser:
                     ordinal,
                     level,
                     title,
-                    tuple(heading_stack),
+                    path,
                     body,
                     start,
                     end,

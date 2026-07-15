@@ -294,6 +294,61 @@ class CampaignRuleProfile(TimestampMixin, Base):
     options: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+class RulePack(TimestampMixin, Base):
+    """Installed rule-extension identity; executable versions are immutable rows."""
+
+    __tablename__ = "rule_packs"
+
+    id: Mapped[str] = mapped_column(String(200), primary_key=True)
+    system_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(300), nullable=False)
+    namespace: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class RulePackVersion(Base):
+    """One content-addressed, validated rule-pack version."""
+
+    __tablename__ = "rule_pack_versions"
+
+    pack_id: Mapped[str] = mapped_column(
+        ForeignKey("rule_packs.id", ondelete="CASCADE"), primary_key=True
+    )
+    version: Mapped[str] = mapped_column(String(64), primary_key=True)
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    artifacts: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    mechanics: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    checksum: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), default="draft", index=True)
+    validation_report: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class CampaignRuleActivation(TimestampMixin, Base):
+    """Exact rule-pack lock selected by one campaign branch."""
+
+    __tablename__ = "campaign_rule_activations"
+    __table_args__ = (
+        UniqueConstraint(
+            "campaign_id", "branch_id", "pack_id", name="uq_campaign_branch_rule_pack"
+        ),
+    )
+
+    campaign_id: Mapped[str] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="CASCADE"), primary_key=True
+    )
+    branch_id: Mapped[str] = mapped_column(
+        ForeignKey("campaign_branches.id", ondelete="CASCADE"), primary_key=True
+    )
+    pack_id: Mapped[str] = mapped_column(
+        ForeignKey("rule_packs.id", ondelete="RESTRICT"), primary_key=True
+    )
+    version: Mapped[str] = mapped_column(String(64), nullable=False)
+    checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    options: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
 class CampaignEvent(Base):
     __tablename__ = "campaign_events"
     __table_args__ = (
@@ -375,6 +430,32 @@ class MutationGroup(Base):
     request_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     applied: Mapped[bool] = mapped_column(Boolean, default=True)
     redoable: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class RuleResolutionReceipt(Base):
+    """Immutable evidence of the exact rules applied by one state mutation."""
+
+    __tablename__ = "rule_resolution_receipts"
+    __table_args__ = (
+        Index("ix_rule_receipt_campaign_created", "campaign_id", "created_at"),
+        Index("ix_rule_receipt_campaign_mechanic", "campaign_id", "mechanic_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    campaign_id: Mapped[str] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="CASCADE"), index=True
+    )
+    branch_id: Mapped[str | None] = mapped_column(
+        ForeignKey("campaign_branches.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    mutation_group_id: Mapped[str] = mapped_column(
+        ForeignKey("mutation_groups.id", ondelete="CASCADE"), index=True
+    )
+    ruleset_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    mechanic_id: Mapped[str] = mapped_column(String(300), nullable=False)
+    event: Mapped[str] = mapped_column(String(100), nullable=False)
+    receipt: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

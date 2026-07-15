@@ -6,11 +6,18 @@ import hashlib
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import delete, select
 
 from sagasmith_core.database import Database
+from sagasmith_core.documents import (
+    NormalizedDocument,
+    converter_for,
+    page_for_offset,
+    strip_page_markers,
+)
 from sagasmith_core.embeddings import Embedder
 from sagasmith_core.models import RuleChunk, RuleSection, RuleSource, VectorIndexJob
 from sagasmith_core.parsing import MarkdownHierarchyParser
@@ -55,9 +62,21 @@ class RuleService:
         parser: MarkdownHierarchyParser | None = None,
         embedder: Embedder | None = None,
         vector_store: VectorStore | None = None,
+        normalized_document: NormalizedDocument | None = None,
     ) -> RuleIngestResult:
         checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
         parsed = (parser or MarkdownHierarchyParser()).parse(content)
+        source_metadata = dict(metadata or {})
+        if normalized_document is not None:
+            source_metadata = {
+                **source_metadata,
+                "source_path": normalized_document.source_path,
+                "media_type": normalized_document.media_type,
+                "source_checksum": normalized_document.checksum,
+                "page_count": normalized_document.page_count,
+                "warnings": list(normalized_document.warnings),
+                **normalized_document.metadata,
+            }
         with self.database.transaction() as session:
             existing = session.scalar(
                 select(RuleSource).where(
@@ -73,7 +92,7 @@ class RuleService:
                 existing.publication_id = publication_id
                 existing.authority = authority
                 existing.canonical_source_id = canonical_source_id
-                existing.metadata_json = metadata or {}
+                existing.metadata_json = source_metadata
                 session.flush()
                 chunk_count = session.query(RuleChunk).filter_by(source_id=existing.id).count()
                 section_count = session.query(RuleSection).filter_by(source_id=existing.id).count()
@@ -96,7 +115,7 @@ class RuleService:
                     authority=authority,
                     canonical_source_id=canonical_source_id,
                     checksum=checksum,
-                    metadata_json=metadata or {},
+                    metadata_json=source_metadata,
                 )
             )
             session.flush()
@@ -127,9 +146,11 @@ class RuleService:
                     )
                 )
                 session.flush()
-                chunk_texts = [chunk.content for chunk in section.chunks]
+                chunk_texts = [strip_page_markers(chunk.content) for chunk in section.chunks]
                 vectors = embedder.encode(chunk_texts) if embedder else [None] * len(chunk_texts)
-                for chunk, vector in zip(section.chunks, vectors, strict=True):
+                for chunk, chunk_text, vector in zip(
+                    section.chunks, chunk_texts, vectors, strict=True
+                ):
                     chunk_id = str(uuid.uuid4())
                     session.add(
                         RuleChunk(
@@ -138,14 +159,16 @@ class RuleService:
                             section_id=section_id,
                             ordinal=chunk_count,
                             heading_path=list(chunk.heading_path),
-                            content=chunk.content,
-                            token_count=max(1, len(chunk.content) // 4),
+                            content=chunk_text,
+                            token_count=max(1, len(chunk_text) // 4),
                             embedding_model=embedder.model_name if embedder else None,
                             embedding_json=vector,
                             metadata_json={
                                 **chunk.metadata,
                                 "start_offset": chunk.start_offset,
                                 "end_offset": chunk.end_offset,
+                                "page_start": page_for_offset(content, chunk.start_offset),
+                                "page_end": page_for_offset(content, chunk.end_offset),
                             },
                         )
                     )
@@ -166,7 +189,7 @@ class RuleService:
                                 "section_id": section_id,
                             }
                         )
-                        vector_documents.append(chunk.content)
+                        vector_documents.append(chunk_text)
                         session.add(
                             VectorIndexJob(
                                 id=job_id,
@@ -175,7 +198,7 @@ class RuleService:
                                 entity_type="rule_chunk",
                                 entity_id=chunk_id,
                                 payload={
-                                    "document": chunk.content,
+                                    "document": chunk_text,
                                     "metadata": vector_metadata[-1],
                                     "embedding_model": embedder.model_name,
                                 },
@@ -209,6 +232,75 @@ class RuleService:
                 chunk_count,
                 embedding_count,
             )
+
+    def ingest_path(
+        self,
+        *,
+        system_id: str,
+        path: str | Path,
+        source_key: str | None = None,
+        title: str | None = None,
+        locale: str = "en",
+        edition: str = "",
+        version: str = "",
+        publication_id: str = "",
+        authority: str = "primary",
+        canonical_source_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        parser: MarkdownHierarchyParser | None = None,
+        embedder: Embedder | None = None,
+        vector_store: VectorStore | None = None,
+    ) -> RuleIngestResult:
+        """Normalize and ingest a rule document through the shared document pipeline."""
+        source_path = Path(path).expanduser().resolve()
+        document = converter_for(source_path).convert(source_path)
+        return self.ingest(
+            system_id=system_id,
+            source_key=source_key or source_path.name,
+            title=title or source_path.stem,
+            content=document.content,
+            locale=locale,
+            edition=edition,
+            version=version,
+            publication_id=publication_id,
+            authority=authority,
+            canonical_source_id=canonical_source_id,
+            metadata=metadata,
+            parser=parser,
+            embedder=embedder,
+            vector_store=vector_store,
+            normalized_document=document,
+        )
+
+    def inspect_path(
+        self,
+        path: str | Path,
+        *,
+        parser: MarkdownHierarchyParser | None = None,
+    ) -> dict[str, Any]:
+        """Normalize a rule document without writing it to the rule index."""
+        document = converter_for(path).convert(path)
+        parsed = (parser or MarkdownHierarchyParser()).parse(document.content)
+        return {
+            "source_path": document.source_path,
+            "media_type": document.media_type,
+            "checksum": document.checksum,
+            "page_count": document.page_count,
+            "warnings": list(document.warnings),
+            "metadata": dict(document.metadata),
+            "sections": len(parsed),
+            "chunks": sum(len(section.chunks) for section in parsed),
+            "outline": [
+                {
+                    "title": section.title,
+                    "level": section.level,
+                    "path": list(section.path),
+                    "page_start": page_for_offset(document.content, section.start_offset),
+                    "page_end": page_for_offset(document.content, section.end_offset),
+                }
+                for section in parsed
+            ],
+        }
 
     def search(
         self,
@@ -351,6 +443,11 @@ class RuleService:
                         "publication_id": row.RuleSource.publication_id,
                         "authority": row.RuleSource.authority,
                         "canonical_source_id": row.RuleSource.canonical_source_id,
+                        "source_checksum": dict(row.RuleSource.metadata_json or {}).get(
+                            "source_checksum", row.RuleSource.checksum
+                        ),
+                        "page_start": dict(row.RuleChunk.metadata_json or {}).get("page_start"),
+                        "page_end": dict(row.RuleChunk.metadata_json or {}).get("page_end"),
                     },
                 )
             )
@@ -370,6 +467,12 @@ class RuleService:
                 "title": row.RuleSection.title,
                 "path": list(row.RuleSection.path),
                 "content": row.RuleSection.content,
+                "chunk": {
+                    "content": row.RuleChunk.content,
+                    "heading_path": list(row.RuleChunk.heading_path),
+                    "page_start": dict(row.RuleChunk.metadata_json or {}).get("page_start"),
+                    "page_end": dict(row.RuleChunk.metadata_json or {}).get("page_end"),
+                },
                 "source": {
                     "id": row.RuleSource.id,
                     "key": row.RuleSource.source_key,
@@ -380,7 +483,55 @@ class RuleService:
                     "publication_id": row.RuleSource.publication_id,
                     "authority": row.RuleSource.authority,
                     "canonical_source_id": row.RuleSource.canonical_source_id,
+                    "checksum": row.RuleSource.checksum,
+                    "metadata": dict(row.RuleSource.metadata_json or {}),
                 },
+            }
+
+    def source(self, source_id: str) -> dict[str, Any]:
+        with self.database.transaction() as session:
+            row = session.get(RuleSource, source_id)
+            if row is None:
+                raise LookupError(source_id)
+            return {
+                "id": row.id,
+                "system_id": row.system_id,
+                "source_key": row.source_key,
+                "title": row.title,
+                "edition": row.edition,
+                "locale": row.locale,
+                "version": row.version,
+                "publication_id": row.publication_id,
+                "authority": row.authority,
+                "checksum": row.checksum,
+                "metadata": dict(row.metadata_json or {}),
+            }
+
+    def citation(self, chunk_id: str, *, source_id: str | None = None) -> dict[str, Any]:
+        """Resolve a caller-supplied chunk id into canonical, source-bound evidence."""
+        with self.database.transaction() as session:
+            row = session.execute(
+                select(RuleChunk, RuleSource)
+                .join(RuleSource, RuleSource.id == RuleChunk.source_id)
+                .where(RuleChunk.id == chunk_id)
+            ).one_or_none()
+            if row is None:
+                raise LookupError(chunk_id)
+            if source_id is not None and row.RuleSource.id != source_id:
+                raise ValueError("rule chunk does not belong to the requested source")
+            metadata = dict(row.RuleChunk.metadata_json or {})
+            source_metadata = dict(row.RuleSource.metadata_json or {})
+            return {
+                "source": f"rule-source:{row.RuleSource.source_key}",
+                "source_id": row.RuleSource.id,
+                "source_key": row.RuleSource.source_key,
+                "source_checksum": source_metadata.get(
+                    "source_checksum", row.RuleSource.checksum
+                ),
+                "chunk_id": row.RuleChunk.id,
+                "heading_path": list(row.RuleChunk.heading_path),
+                "page_start": metadata.get("page_start"),
+                "page_end": metadata.get("page_end"),
             }
 
     def sources(
@@ -406,6 +557,7 @@ class RuleService:
                     "authority": row.authority,
                     "canonical_source_id": row.canonical_source_id,
                     "checksum": row.checksum,
+                    "metadata": dict(row.metadata_json or {}),
                 }
                 for row in session.scalars(statement)
             ]

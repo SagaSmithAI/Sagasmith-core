@@ -32,11 +32,20 @@ class RuleProfileService:
         locale: str = "en",
         publications: list[str] | None = None,
         options: dict[str, Any] | None = None,
+        expected_campaign_revision: int | None = None,
     ) -> RuleProfileInfo:
         with self.database.transaction() as session:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
+            if (
+                expected_campaign_revision is not None
+                and campaign.revision != expected_campaign_revision
+            ):
+                raise ValueError(
+                    "campaign revision conflict: "
+                    f"expected {expected_campaign_revision}, found {campaign.revision}"
+                )
             row = session.get(CampaignRuleProfile, campaign_id)
             if row is None:
                 row = CampaignRuleProfile(
@@ -48,6 +57,12 @@ class RuleProfileService:
             row.locale = locale
             row.publications = list(publications or [])
             row.options = dict(options or {})
+            campaign.settings = {
+                **dict(campaign.settings or {}),
+                "edition": edition,
+                "locale": locale,
+            }
+            campaign.revision += 1
             session.flush()
             return self._info(row)
 

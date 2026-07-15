@@ -14,10 +14,96 @@ from sagasmith_core import (
     ModuleService,
     RevisionService,
     RuleProfileService,
+    RuleReceiptService,
+    RuleService,
     SnapshotService,
     StateMutationService,
 )
-from sagasmith_core.documents import DocumentBookmark, build_structured_markdown
+from sagasmith_core.documents import (
+    DocumentBookmark,
+    NormalizedDocument,
+    build_structured_markdown,
+)
+
+
+def test_rule_document_path_ingest_preserves_source_and_page_provenance(
+    database, tmp_path
+) -> None:
+    path = tmp_path / "optional-rules.md"
+    path.write_text("# Options\n## Tool Synergy\nUse both proficiencies.\n", encoding="utf-8")
+    rules = RuleService(database)
+
+    inspection = rules.inspect_path(path)
+    assert inspection["sections"] == 2
+    assert inspection["checksum"]
+    result = rules.ingest_path(
+        system_id="dnd5e",
+        path=path,
+        source_key="optional-rules",
+        title="Optional Rules",
+        edition="2014",
+        publication_id="optional",
+    )
+    hit = rules.search(system_id="dnd5e", query="Tool Synergy", top_k=1)[0]
+    citation = rules.citation(hit.id, source_id=result.source_id)
+    expanded = rules.expand(hit.id)
+    with pytest.raises(ValueError, match="does not belong"):
+        rules.citation(hit.id, source_id="another-source")
+
+    assert hit.metadata["source_checksum"] == inspection["checksum"]
+    assert citation["source"] == "rule-source:optional-rules"
+    assert citation["source_checksum"] == inspection["checksum"]
+    assert expanded["source"]["metadata"]["source_path"] == str(path.resolve())
+
+    path.write_text("# Options\n## Tool Synergy Revised\nNew procedure.\n", encoding="utf-8")
+    replaced = rules.ingest_path(
+        system_id="dnd5e",
+        path=path,
+        source_key="optional-rules",
+        title="Optional Rules",
+        edition="2014",
+        publication_id="optional",
+    )
+    assert replaced.source_id != result.source_id
+    revised = rules.search(system_id="dnd5e", query="New procedure", top_k=1)[0]
+    assert revised.source_id == replaced.source_id
+    assert "New procedure" in revised.content
+
+    paged = NormalizedDocument(
+        content=(
+            "<!-- page: 7 -->\n# Options\n## Tool Synergy\nUse both proficiencies.\n"
+            "<!-- page: 8 -->\nMore guidance.\n"
+        ),
+        media_type="application/pdf",
+        source_path=str(path.resolve()),
+        checksum="source-pdf-checksum",
+        page_count=8,
+    )
+    result = rules.ingest(
+        system_id="dnd5e",
+        source_key="paged-rules",
+        title="Paged Rules",
+        content=paged.content,
+        edition="2014",
+        normalized_document=paged,
+    )
+    hit = rules.search(system_id="dnd5e", query="More guidance", top_k=1)[0]
+    citation = rules.citation(hit.id, source_id=result.source_id)
+    assert citation["source_checksum"] == "source-pdf-checksum"
+    assert citation["page_start"] == 7
+    assert citation["page_end"] in {7, 8}
+
+
+def test_pdf_normalization_recovers_unbookmarked_all_caps_subheadings() -> None:
+    content, metadata, warnings = build_structured_markdown(
+        ["TOOL PROFICIENCIES\nIntro.\nTOOLS AND SKILLS TOGETHER\nOptional procedure."],
+        [DocumentBookmark("Tool Proficiencies", 1, 2)],
+    )
+
+    assert "#### TOOL PROFICIENCIES" in content
+    assert "##### TOOLS AND SKILLS TOGETHER" in content
+    assert metadata["heading_count"] == 2
+    assert warnings == ()
 
 
 def test_campaign_profile_events_snapshot_and_memory(database) -> None:
@@ -372,6 +458,51 @@ def test_state_mutation_exposes_committed_idempotency_recovery_without_a_receipt
             idempotency_key="recover-on-retry",
         )
     assert CampaignService(database).get(campaign.id).state == {"phase": "after"}
+
+
+def test_state_mutation_persists_rule_receipts_in_the_same_group(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Rule receipts")
+    revisions = StateMutationService(database).replace(
+        campaign.id,
+        campaign_state={"phase": "resolved"},
+        operation="test.rule.receipt",
+        rule_receipts=[
+            {
+                "mechanic_id": "dnd5e.core.activity.accounting",
+                "event": "activity.after",
+                "operations": [],
+                "citations": [{"source": "SRD", "section": "Actions"}],
+                "ruleset_fingerprint": "a" * 64,
+            }
+        ],
+    )
+
+    receipts = RuleReceiptService(database).list(campaign.id)
+    assert len(receipts) == 1
+    assert receipts[0].mutation_group_id == revisions[0].mutation_group_id
+    assert receipts[0].branch_id is not None
+    assert receipts[0].mechanic_id == "dnd5e.core.activity.accounting"
+    assert receipts[0].receipt["citations"][0]["section"] == "Actions"
+    assert receipts[0].operation == "test.rule.receipt"
+    assert receipts[0].applied is True
+
+    snapshot = SnapshotService(database).create(campaign.id, label="After settlement")
+    fork = BranchService(database).create(
+        campaign.id,
+        name="receipt-fork",
+        from_snapshot_id=snapshot.id,
+    )
+    fork_receipts = RuleReceiptService(database).list(campaign.id, branch_id=fork.id)
+    assert len(fork_receipts) == 1
+    assert fork_receipts[0].branch_id == fork.id
+    assert fork_receipts[0].mutation_group_id != receipts[0].mutation_group_id
+    assert fork_receipts[0].receipt == receipts[0].receipt
+
+    RevisionService(database).undo(campaign.id)
+    assert RuleReceiptService(database).list(
+        campaign.id, branch_id=receipts[0].branch_id
+    )[0].applied is False
+    assert RuleReceiptService(database).list(campaign.id, branch_id=fork.id)[0].applied is True
 
 
 def test_pdf_normalization_and_module_generator_structure(database) -> None:
