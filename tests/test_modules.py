@@ -48,6 +48,9 @@ def test_module_ingest_search_and_progress(database) -> None:
     assert [item["title"] for item in index] == ["Broken Gate", "Inner Hall"]
     assert index[0]["visibility"] == "keeper"
     assert index[0]["clues"] == []
+    assert index[0]["stable_key"] == "chapter-one-broken-gate"
+    assert index[0]["chapter_ordinal"] == 0
+    assert index[0]["scene_ordinal"] == 0
 
     service.set_scene_progress(
         campaign_id=campaign.id,
@@ -75,6 +78,10 @@ def test_module_ingest_search_and_progress(database) -> None:
     assert inherited["title"] == "Inner Hall"
     assert inherited["inherited_from_party"] is True
     assert service.current_scene(campaign.id)["title"] == "Inner Hall"
+    projected = service.scene_progress_index(campaign.id, scope_id="player:alice")
+    assert [item["percent"] for item in projected] == [70, 5]
+    assert projected[0]["inherited_from_party"] is False
+    assert projected[1]["inherited_from_party"] is True
 
 
 def test_module_reimport_preserves_snapshot_scene_references(database) -> None:

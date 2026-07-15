@@ -784,13 +784,18 @@ class ModuleService:
                     ModuleSource.campaign_id == campaign_id,
                 )
             ).one()
+            metadata = dict(row.ModuleScene.metadata_json or {})
             return {
                 "scene_id": row.ModuleScene.id,
+                "stable_key": metadata.get("stable_key"),
                 "title": row.ModuleScene.title,
                 "content": row.ModuleScene.content,
                 "page_start": row.ModuleScene.page_start,
                 "page_end": row.ModuleScene.page_end,
+                "chapter_id": row.ModuleChapter.id,
                 "chapter": row.ModuleChapter.title,
+                "chapter_ordinal": row.ModuleChapter.ordinal,
+                "scene_ordinal": row.ModuleScene.ordinal,
                 "module": row.ModuleSource.title,
                 "module_id": row.ModuleSource.id,
                 "start_line": row.ModuleScene.start_line,
@@ -820,9 +825,12 @@ class ModuleService:
             return [
                 {
                     "scene_id": row.ModuleScene.id,
+                    "stable_key": dict(row.ModuleScene.metadata_json or {}).get("stable_key"),
                     "title": row.ModuleScene.title,
                     "chapter_id": row.ModuleChapter.id,
                     "chapter": row.ModuleChapter.title,
+                    "chapter_ordinal": row.ModuleChapter.ordinal,
+                    "scene_ordinal": row.ModuleScene.ordinal,
                     "module_id": row.ModuleSource.id,
                     "module": row.ModuleSource.title,
                     "page_start": row.ModuleScene.page_start,
@@ -872,9 +880,14 @@ class ModuleService:
                     scope_id != "party" and row.SceneProgress.scope_id == "party"
                 ),
                 "scene_id": row.ModuleScene.id,
+                "stable_key": dict(row.ModuleScene.metadata_json or {}).get("stable_key"),
                 "title": row.ModuleScene.title,
                 "content": row.ModuleScene.content,
+                "chapter_id": row.ModuleChapter.id,
                 "chapter": row.ModuleChapter.title,
+                "chapter_ordinal": row.ModuleChapter.ordinal,
+                "scene_ordinal": row.ModuleScene.ordinal,
+                "module_id": row.ModuleSource.id,
                 "module": row.ModuleSource.title,
                 "page_start": row.ModuleScene.page_start,
                 "page_end": row.ModuleScene.page_end,
@@ -891,6 +904,70 @@ class ModuleService:
                 },
                 **self._scene_structure(row.ModuleScene),
             }
+
+    def scene_progress_index(
+        self,
+        campaign_id: str,
+        *,
+        scope_id: str = "party",
+        module_id: str | None = None,
+        fallback_to_party: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Return ordered progress projected for one audience scope.
+
+        A player/group scope overrides party progress scene by scene. Missing
+        scoped rows may inherit party progress, matching :meth:`current_scene`.
+        The response never merges mutable ``state`` dictionaries across scopes.
+        """
+        with self.database.transaction() as session:
+            statement = (
+                select(SceneProgress, ModuleScene, ModuleChapter, ModuleSource)
+                .join(ModuleScene, ModuleScene.id == SceneProgress.scene_id)
+                .join(ModuleChapter, ModuleChapter.id == ModuleScene.chapter_id)
+                .join(ModuleSource, ModuleSource.id == ModuleScene.module_id)
+                .where(ModuleSource.campaign_id == campaign_id)
+                .where(ModuleSource.active.is_(True))
+                .where(SceneProgress.scope_id.in_({scope_id, "party"}))
+                .order_by(ModuleChapter.ordinal, ModuleScene.ordinal, ModuleScene.id)
+            )
+            if module_id:
+                statement = statement.where(ModuleSource.id == module_id)
+            by_scene: dict[str, dict[str, Any]] = {}
+            for row in session.execute(statement):
+                progress = row.SceneProgress
+                inherited = progress.scope_id != scope_id
+                if inherited and (scope_id == "party" or not fallback_to_party):
+                    continue
+                existing = by_scene.get(row.ModuleScene.id)
+                if existing is not None and existing["scope_id"] == scope_id:
+                    continue
+                by_scene[row.ModuleScene.id] = {
+                    "id": progress.id,
+                    "campaign_id": campaign_id,
+                    "scene_id": row.ModuleScene.id,
+                    "stable_key": dict(row.ModuleScene.metadata_json or {}).get("stable_key"),
+                    "module_id": row.ModuleSource.id,
+                    "chapter_id": row.ModuleChapter.id,
+                    "chapter_ordinal": row.ModuleChapter.ordinal,
+                    "scene_ordinal": row.ModuleScene.ordinal,
+                    "scope_id": progress.scope_id,
+                    "requested_scope_id": scope_id,
+                    "inherited_from_party": inherited,
+                    "status": progress.status,
+                    "percent": progress.progress,
+                    "current_room": progress.current_room,
+                    "current_location_key": progress.current_location_key,
+                    "state_version": progress.state_version,
+                    "state": dict(progress.state),
+                }
+            return sorted(
+                by_scene.values(),
+                key=lambda item: (
+                    item["chapter_ordinal"],
+                    item["scene_ordinal"],
+                    item["scene_id"],
+                ),
+            )
 
     def set_active(self, campaign_id: str, module_id: str, *, active: bool) -> dict[str, Any]:
         with self.database.transaction() as session:
