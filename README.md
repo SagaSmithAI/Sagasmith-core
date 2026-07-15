@@ -1,114 +1,98 @@
-# 🏗️ SagaSmith Core
+# SagaSmith Core
 
-[中文](README.md) | [English](README-en.md)
+[中文](README.md) · [English](README-en.md) · [平台总览](https://github.com/SagaSmithAI/.github/blob/main/profile/README.md)
 
-**系统无关的 TTRPG 应用基础** — 数据库、文档、检索和战役运行时，供 `sagasmith-dnd`、`sagasmith-coc` 等系统插件使用。
+**AI 原生 TTRPG 平台的系统无关运行时。** `sagasmith-core` 为规则系统、MCP 服务和 UI 提供持久化战役、角色知识、分支时间线、内容导入、规则包与检索能力；它本身不包含 D&D 或 CoC 规则。
 
-> *"一砖一瓦，构筑万桌冒险。"*
+> 世界状态应当可验证，时间线应当可分支，每个角色只应知道自己真正知道的事。
 
-`sagasmith-core` 不包含任何 D&D 或 Call of Cthulhu 规则。它提供一组可共享的持久化服务，系统插件在此基础上注册规则和 CLI。你只会通过系统插件间接安装它。
+## 它解决什么
 
----
+普通聊天记忆无法充当长期战役数据库：它不知道哪条时间线有效，也无法可靠区分 GM、玩家、PC 和 NPC 的视角。SagaSmith Core 把这些问题建模为显式服务：
 
-## 生态
+- **战役与角色** — system-neutral campaign/character 模型、namespaced sheet、revision 和访问控制。
+- **分支与 Snapshot** — 不可变 Snapshot DAG、checkout、lineage、分支连续性和完整性校验。
+- **Actor Knowledge** — 按 actor、主体、分支和可见范围维护所知事实，不把角色知识混入全局摘要。
+- **事件与长期记忆** — 事件日志、事实身份、分支修订、continuity context 与 recap 数据面。
+- **规则包** — core/extension 包、profile 锁定、版本与来源、规则 receipt 和机械 IR。
+- **内容导入** — 可恢复 import job、文档质量门禁、PDF/Markdown 标准化、场景/空间索引。
+- **检索** — 精确与词法检索、SQLite FTS5，以及可选的 ChromaDB + sentence-transformers。
+- **插件系统** — 通过 `sagasmith.systems` entry point 注册 D&D、CoC 或新的系统实现。
 
-| 仓库 | 定位 |
-|------|------|
-| 🏗️ **sagasmith-core**（本仓库） | 通用引擎 — DB、文档、RAG、战役运行时 |
-| 🎲 [SagaSmith-agent](https://github.com/dajiaohuang/SagaSmith-agent) | 完整 AI DM 运行时 |
-| ⚔️ [sagasmith-dnd](https://github.com/dajiaohuang/sagasmith-dnd) | D&D 5e 系统插件 |
-| 🕯️ [sagasmith-coc](https://github.com/dajiaohuang/sagasmith-coc) | CoC 7e 系统插件 |
-| 📦 [SagaSmith-dnd-skills](https://github.com/dajiaohuang/SagaSmith-dnd-skills) | D&D Agent Skill 定义 |
-| 📦 [SagaSmith-coc-skills](https://github.com/dajiaohuang/SagaSmith-coc-skills) | CoC Agent Skill 定义 |
-| ✍️ [SagaSmith-module-gen-skills](https://github.com/dajiaohuang/SagaSmith-module-gen-skills) | 独立冒险模组生成器 |
+## 架构位置
 
----
-
-## 功能
-
-- 🏛️ **战役** — 身份、设置、可变状态、system_id 多租户
-- 👤 **角色** — 可扩展属性面板，通过 namespaced JSON 扩展
-- 📜 **规则文档** — 层次化章节、检索块、BGE-M3 Dense 嵌入
-- 📖 **模组管理** — PDF/Markdown 导入、结构感知分块、场景索引
-- 🧩 **场景进度** — `party` / `group:<id>` / `player:<id>` 作用域式追踪，支持继承
-- 💾 **Snapshot 系统** — 不可变 DAG 存档树、审计版本、分支感知记忆
-- 🔍 **检索** — ChromaDB HNSW 向量搜索、词法/全文混合降级
-- 🗄️ **数据库** — SQLAlchemy ORM、Alembic 迁移、SQLite/PostgreSQL 双后端
-- 🔌 **插件系统** — `sagasmith.systems` 入口点，profile 可插拔
-
----
-
-## 架构
-
-```
-系统插件 (sagasmith-dnd / sagasmith-coc)
-        │
-        ▼
-┌─────────────────────────────────┐
-│        sagasmith-core           │
-│                                 │
-│  Campaigns · Characters · Docs  │
-│  Modules · Scenes · Chunks      │
-│  Retrieval (Vector + Lexical)   │
-│  Snapshots (DAG) · Memory       │
-│  SQLAlchemy ORM · Alembic       │
-│  System Plugin Protocol         │
-└─────────────────────────────────┘
-        │
-        ├── SQLite / PostgreSQL
-        └── ChromaDB (optional)
+```mermaid
+flowchart TB
+    A[Agent / MCP Host] --> M[System MCP Server]
+    M --> R[System Runtime<br/>D&D · CoC · custom]
+    R --> C[SagaSmith Core]
+    C --> D[(SQLite / PostgreSQL)]
+    C --> F[FTS5]
+    C -. optional .-> V[ChromaDB / embeddings]
 ```
 
----
+Core 不负责主持风格、MCP 工具暴露或具体规则裁决。Agent Skills 负责工作流，系统运行时负责规则，MCP 服务负责能力与存储边界，Core 负责一致的数据语义。
+
+## 核心领域
+
+| 领域 | 主要服务 | 关键保证 |
+|---|---|---|
+| Campaign | `CampaignService`, `AccessService` | system_id 分区、principal/role 访问边界 |
+| Character | `CharacterService`, `StateMutationService` | revisioned sheet、受控状态写入 |
+| Knowledge | `ActorKnowledgeService` | actor 视角隔离、分支有效性 |
+| Timeline | `SnapshotService`, `BranchService`, `ContinuityService` | DAG 祖先链、checkout、连续性上下文 |
+| Content | `ImportJobService`, `ModuleService`, `PdfDocumentConverter` | 可恢复导入、来源、结构与质量报告 |
+| Rules | `RulePackService`, `RuleProfileService`, `RuleReceiptService` | 规则包版本、激活上下文和结算证据 |
+| Retrieval | `RuleService`, `VectorStore` | 检索可降级，权威状态不交给向量库 |
 
 ## 安装
+
+Python 3.11+：
 
 ```bash
 pip install sagasmith-core
 ```
 
-系统插件通常会作为依赖自动安装。Core 没有 Agent 平台依赖。
+系统插件通常会自动安装 Core。按需启用 extras：
 
-### 可选 extras
+```bash
+pip install "sagasmith-core[documents]"  # PDF
+pip install "sagasmith-core[vector]"     # ChromaDB
+pip install "sagasmith-core[embedding]"  # sentence-transformers
+pip install "sagasmith-core[all]"
+```
 
-| Extra | 用途 |
-|-------|------|
-| `vector` | ChromaDB 向量存储 |
-| `embedding` | sentence-transformers 嵌入 |
-| `documents` | PDF 解析 (pypdf) |
-| `all` | 全部 extras |
+最小服务构造：
 
----
+```python
+from sagasmith_core import CampaignService, Database, SystemRegistry
 
-## 稳定性契约
+db = Database("sqlite:///sagasmith.db")
+db.upgrade_schema()
+systems = SystemRegistry.discover()
+campaigns = CampaignService(db)
+```
 
-- Core 表是系统无关的，通过 `system_id` 分区。
-- 系统插件通过 namespaced JSON 数据或独立命名的扩展表扩展记录。
-- 向量和嵌入依赖惰性导入，不强制安装。
-- 运行时恰好激活一个系统 profile。
-- 这是新项目，不承担旧版数据库的兼容性义务。
+## 扩展一个新规则系统
 
----
+系统包通过 entry point 注册：
 
-## 场景元数据所有权
+```toml
+[project.entry-points."sagasmith.systems"]
+my_system = "my_package.system:get_system"
+```
 
-解析后的场景同时包含列支持字段（始终存在）和系统 profile 在解析时填充的 `metadata_json` JSON dict。消费者应将其视为 **尽力而为的丰富信息**，而非保证存在的 schema。
+系统实现提供 profile、角色 schema、模块解析与规则引擎；Core 表保持系统无关。需要新的系统字段时，优先使用 namespaced JSON 或系统包自己的明确扩展表，不向通用表塞入某一规则专属列。
 
-| 字段 | 来源 | 始终存在？ |
-|------|------|-----------|
-| `scene_type` | `ModuleScene.scene_type` 列 | 是 |
-| `headings` | `ModuleScene.headings` 列 | 是 |
-| `scene_level`, `line_count`, `subsections`, `tags` | 实现了 `scene_boundaries()` 的 profile | 如果 profile 实现了 |
-| `visibility` | profile 元数据，默认 `"keeper"` | 有默认值 |
-| `clues`, `checks` | CoC profile (`CocModuleProfile`) | 否 |
-| `sanity` | 仅 CoC profile | 否 |
-| `transitions`, `node_id` | 仅 CoC solo-scenario 解析 | 否 |
+## 稳定性与安全边界
 
-系统插件选择写入哪些字段。不填充某个丰富信息的 profile **不是 bug**——调用方必须检查空列表 / `None`，而不是假定该字段对该系统有意义。
+- Snapshot、branch 和 revision 是权威连续性；向量命中不是。
+- 写操作应携带 expected revision 与幂等键，避免 Agent 重试造成重复副作用。
+- 玩家读取只允许当前可见分支、场景作用域和角色知识；GM 权限需要显式 principal/role。
+- 文档解析结果保留来源、页码、质量警告和 parser profile；调用方必须处理缺失的富元数据。
+- 这是 Alpha 项目，当前 schema 不承诺旧版数据库迁移兼容；迁移文件只服务当前主线模型。
 
----
-
-## 贡献
+## 开发
 
 ```bash
 pip install -e ".[all,dev]"
@@ -116,8 +100,8 @@ pytest --cov
 ruff check .
 ```
 
----
+更多资料：[Architecture](docs/ARCHITECTURE.md) · [Quickstart](docs/QUICKSTART.md) · [Retrieval](docs/RETRIEVAL.md)
 
-## 许可证
+## License
 
 MIT

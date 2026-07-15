@@ -1,128 +1,87 @@
-# 🏗️ SagaSmith Core
+# SagaSmith Core
 
-[中文](README.md) | [English](README-en.md)
+[中文](README.md) · [English](README-en.md) · [Platform overview](https://github.com/SagaSmithAI/.github/blob/main/profile/README.md)
 
-**System-neutral TTRPG application base** — database, documents, retrieval, and campaign runtime for `sagasmith-dnd`, `sagasmith-coc`, and other system plugins.
+**The system-neutral runtime for an AI-native TTRPG platform.** `sagasmith-core` gives rules systems, MCP servers, and clients persistent campaigns, actor knowledge, branching timelines, content ingestion, rule packs, and retrieval. It contains no D&D or Call of Cthulhu rules.
 
-> *"One brick at a time, building adventures for a thousand tables."*
+> World state should be verifiable, timelines should branch, and every actor should know only what they actually know.
 
-`sagasmith-core` contains no D&D or Call of Cthulhu rules. It provides a shared set of durable services that system plugins build on to register their rules and CLIs. You will normally install it indirectly through a system package.
+## What it provides
 
----
+- **Campaigns and characters** — system-neutral records, namespaced sheets, revisions, principals, and roles.
+- **Branches and snapshots** — immutable snapshot DAGs, checkout, lineage, continuity, and integrity checks.
+- **Actor knowledge** — facts scoped by actor, subject, branch, and visibility instead of one global summary.
+- **Events and long-term memory** — event logs, stable fact identity, branch revisions, recaps, and continuity context.
+- **Rule packs** — core/extension packages, profile locks, provenance, rule receipts, and mechanic IR.
+- **Content ingestion** — resumable import jobs, document quality gates, PDF/Markdown normalization, and scene/spatial indexes.
+- **Retrieval** — exact and lexical search, SQLite FTS5, plus optional ChromaDB and sentence-transformers.
+- **System plugins** — D&D, CoC, and future systems register through the `sagasmith.systems` entry point.
 
-## Ecosystem
+## Where it sits
 
-| Repo | Role |
-|------|------|
-| 🏗️ **sagasmith-core** (this repo) | General engine — DB, docs, RAG, campaign runtime |
-| 🎲 [SagaSmith-agent](https://github.com/dajiaohuang/SagaSmith-agent) | Complete AI DM runtime |
-| ⚔️ [sagasmith-dnd](https://github.com/dajiaohuang/sagasmith-dnd) | D&D 5e system plugin |
-| 🕯️ [sagasmith-coc](https://github.com/dajiaohuang/sagasmith-coc) | CoC 7e system plugin |
-| 📦 [SagaSmith-dnd-skills](https://github.com/dajiaohuang/SagaSmith-dnd-skills) | D&D agent skill definitions |
-| 📦 [SagaSmith-coc-skills](https://github.com/dajiaohuang/SagaSmith-coc-skills) | CoC agent skill definitions |
-| ✍️ [SagaSmith-module-gen-skills](https://github.com/dajiaohuang/SagaSmith-module-gen-skills) | Standalone module generator |
-
----
-
-## Features
-
-- 🏛️ **Campaigns** — identity, settings, mutable state, `system_id` multi-tenancy
-- 👤 **Characters** — extensible sheets via namespaced JSON
-- 📜 **Rule Documents** — hierarchical sections, retrieval chunks, BGE-M3 dense embeddings
-- 📖 **Module Management** — PDF/Markdown import, structure-aware chunking, scene indexes
-- 🧩 **Scene Progress** — scoped to `party` / `group:<id>` / `player:<id>` with inheritance
-- 💾 **Snapshot System** — immutable DAG save tree, audited revisions, branch-aware memory
-- 🔍 **Retrieval** — ChromaDB HNSW vector search, lexical / FTS hybrid fallback
-- 🗄️ **Database** — SQLAlchemy ORM, Alembic migrations, SQLite/PostgreSQL dual backend
-- 🔌 **Plugin System** — `sagasmith.systems` entry points, pluggable profiles
-
----
-
-## Architecture
-
-```
-System Plugins (sagasmith-dnd / sagasmith-coc)
-        │
-        ▼
-┌─────────────────────────────────┐
-│        sagasmith-core           │
-│                                 │
-│  Campaigns · Characters · Docs  │
-│  Modules · Scenes · Chunks      │
-│  Retrieval (Vector + Lexical)   │
-│  Snapshots (DAG) · Memory       │
-│  SQLAlchemy ORM · Alembic       │
-│  System Plugin Protocol         │
-└─────────────────────────────────┘
-        │
-        ├── SQLite / PostgreSQL
-        └── ChromaDB (optional)
+```mermaid
+flowchart TB
+    A[Agent / MCP Host] --> M[System MCP Server]
+    M --> R[System Runtime<br/>D&D · CoC · custom]
+    R --> C[SagaSmith Core]
+    C --> D[(SQLite / PostgreSQL)]
+    C --> F[FTS5]
+    C -. optional .-> V[ChromaDB / embeddings]
 ```
 
----
+Core does not decide GM style, MCP exposure, or system-specific rules. Skills own operating guidance, system runtimes own rules, MCP servers own the capability/storage boundary, and Core owns consistent data semantics.
+
+## Domain services
+
+| Domain | Main services | Contract |
+|---|---|---|
+| Campaign | `CampaignService`, `AccessService` | system partitioning and principal/role boundaries |
+| Character | `CharacterService`, `StateMutationService` | revisioned sheets and controlled mutation |
+| Knowledge | `ActorKnowledgeService` | actor viewpoints and branch validity |
+| Timeline | `SnapshotService`, `BranchService`, `ContinuityService` | ancestry, checkout, and continuity context |
+| Content | `ImportJobService`, `ModuleService`, `PdfDocumentConverter` | resumable imports, provenance, structure, quality |
+| Rules | `RulePackService`, `RuleProfileService`, `RuleReceiptService` | versioned packs, active context, settlement evidence |
+| Retrieval | `RuleService`, `VectorStore` | graceful degradation; vectors never own truth |
 
 ## Install
 
+Requires Python 3.11+:
+
 ```bash
 pip install sagasmith-core
+pip install "sagasmith-core[documents]"  # PDF
+pip install "sagasmith-core[vector]"     # ChromaDB
+pip install "sagasmith-core[embedding]"  # sentence-transformers
+pip install "sagasmith-core[all]"
 ```
 
-System packages normally install it automatically. Core has no agent-platform dependency.
+```python
+from sagasmith_core import CampaignService, Database, SystemRegistry
 
-### Optional Extras
+db = Database("sqlite:///sagasmith.db")
+db.upgrade_schema()
+systems = SystemRegistry.discover()
+campaigns = CampaignService(db)
+```
 
-| Extra | Purpose |
-|-------|---------|
-| `vector` | ChromaDB vector store |
-| `embedding` | sentence-transformers embeddings |
-| `documents` | PDF parsing (pypdf) |
-| `all` | All extras combined |
+## Add a game system
 
----
+Register a package through an entry point:
 
-## Stability Contract
+```toml
+[project.entry-points."sagasmith.systems"]
+my_system = "my_package.system:get_system"
+```
 
-- Core tables are system-neutral and partitioned by `system_id`.
-- System packages extend records through namespaced JSON data or uniquely named extension tables.
-- Optional vector and embedding dependencies are imported lazily.
-- A runtime activates exactly one system profile.
-- This is a new project and carries no legacy database compatibility contract.
+The package supplies its profile, character schema, module parser, and rules engine. Keep Core tables system-neutral; use namespaced JSON or explicit extension tables for system-specific state.
 
----
+## Integrity boundaries
 
-## Rule-document and rule-pack boundary
-
-`RuleService.inspect_path()` and `RuleService.ingest_path()` use the shared
-PDF/Markdown/text conversion pipeline. An imported source retains its original
-document checksum, parser warnings, page count, normalized hierarchy, and per-chunk
-page ranges. `RuleService.citation()` resolves a chunk into canonical evidence; Core
-does not translate that evidence into system mechanics.
-
-`RulePackService` stores content-addressed, versioned definitions and branch-local
-campaign activations. System plugins own the executable IR and settlement semantics.
-Install and activation are separate operations, and snapshots/receipts preserve exact
-checksums and fingerprints. A document import is therefore evidence, never executable
-code by itself.
-
----
-
-## Scene Metadata Ownership
-
-A parsed scene carries both column-backed fields (always present) and a `metadata_json` JSON dict populated by the system profile at parse time. Consumers should treat this as a **best-effort enrichment** rather than a guaranteed schema.
-
-| Field | Source | Always present? |
-|-------|--------|----------------|
-| `scene_type` | `ModuleScene.scene_type` column | Yes |
-| `headings` | `ModuleScene.headings` column | Yes |
-| `scene_level`, `line_count`, `subsections`, `tags` | Any profile implementing `scene_boundaries()` | If profile does |
-| `visibility` | Profile metadata, defaults to `"keeper"` | Defaulted |
-| `clues`, `checks` | CoC profile (`CocModuleProfile`) | No |
-| `sanity` | CoC profile only | No |
-| `transitions`, `node_id` | CoC solo-scenario parsing only | No |
-
-System packages choose which fields their profile writes. A profile that omits an enrichment is **not** a bug — callers must check for empty lists / `None` rather than assuming the field carries meaning for that system.
-
----
+- Snapshots, branches, and revisions are authoritative; vector hits are not.
+- Writes should use expected revisions and idempotency keys so agent retries cannot duplicate effects.
+- Player reads are limited to visible branches, scene scopes, and actor knowledge; GM authority requires an explicit principal/role.
+- Parsed content retains provenance, pages, parser profile, and quality warnings; rich metadata is best effort.
+- This is an Alpha project. Current migrations serve the current mainline schema and do not promise legacy database compatibility.
 
 ## Development
 
@@ -132,7 +91,7 @@ pytest --cov
 ruff check .
 ```
 
----
+Further reading: [Architecture](docs/ARCHITECTURE.md) · [Quickstart](docs/QUICKSTART.md) · [Retrieval](docs/RETRIEVAL.md)
 
 ## License
 
