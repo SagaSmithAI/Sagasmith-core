@@ -25,7 +25,13 @@ def test_rule_pack_install_activation_and_branch_lock(database) -> None:
     packs = RulePackService(database)
     draft = packs.save_draft(
         manifest=_pack(),
-        artifacts=[{"id": "dnd5e.xgte.feature.test", "kind": "feature"}],
+        artifacts=[
+            {
+                "id": "dnd5e.xgte.feature.test",
+                "kind": "feature",
+                "card": {"name": "Test feature"},
+            }
+        ],
         mechanics=[
             {
                 "id": "dnd5e.xgte.mechanic.test",
@@ -37,9 +43,7 @@ def test_rule_pack_install_activation_and_branch_lock(database) -> None:
     )
     assert draft.status == "validated"
     packs.install("dnd5e.xgte", "1.0.0")
-    activation = packs.set_activation(
-        campaign.id, pack_id="dnd5e.xgte", version="1.0.0"
-    )
+    activation = packs.set_activation(campaign.id, pack_id="dnd5e.xgte", version="1.0.0")
     effective = packs.effective_ruleset(campaign.id)
     assert effective.lock[0]["checksum"] == activation.checksum
     assert effective.mechanics[0]["id"] == "dnd5e.xgte.mechanic.test"
@@ -49,8 +53,7 @@ def test_rule_pack_install_activation_and_branch_lock(database) -> None:
         campaign.id, name="without rules", from_snapshot_id=snapshot.id, checkout=True
     )
     assert (
-        packs.effective_ruleset(campaign.id, branch_id=fork.id).fingerprint
-        == effective.fingerprint
+        packs.effective_ruleset(campaign.id, branch_id=fork.id).fingerprint == effective.fingerprint
     )
     packs.remove_activation(campaign.id, "dnd5e.xgte", branch_id=fork.id)
     assert packs.effective_ruleset(campaign.id, branch_id=fork.id).lock == ()
@@ -143,10 +146,7 @@ def test_rule_pack_rejects_undeclared_events_and_unknown_artifact_refs(database)
         ],
     )
     assert missing_capability.status == "rejected"
-    assert any(
-        "not declared" in item
-        for item in missing_capability.validation_report["errors"]
-    )
+    assert any("not declared" in item for item in missing_capability.validation_report["errors"])
 
 
 def test_effective_ruleset_rechecks_edition_after_profile_change(database) -> None:

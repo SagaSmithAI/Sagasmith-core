@@ -147,9 +147,7 @@ class RulePackService:
             row.mechanics = mechanics
             row.checksum = checksum
             row.status = (
-                "installed"
-                if was_installed
-                else ("validated" if report["valid"] else "rejected")
+                "installed" if was_installed else ("validated" if report["valid"] else "rejected")
             )
             row.validation_report = report
             session.flush()
@@ -247,9 +245,7 @@ class RulePackService:
             branch = resolve_branch(session, campaign, branch_id)
             if dict(campaign.state or {}).get("combat", {}).get("active", False):
                 raise RulePackError("rule-pack activation cannot change during active combat")
-            version_row = session.get(
-                RulePackVersion, {"pack_id": pack_id, "version": version}
-            )
+            version_row = session.get(RulePackVersion, {"pack_id": pack_id, "version": version})
             if version_row is None or version_row.status != "installed":
                 raise RulePackError("the exact rule-pack version must be installed first")
             pack = session.get(RulePack, pack_id)
@@ -388,8 +384,7 @@ class RulePackService:
                 or pack.system_id != campaign.system_id
             ):
                 raise RulesetUnavailableError(
-                    f"locked rule pack unavailable: "
-                    f"{activation.pack_id}@{activation.version}"
+                    f"locked rule pack unavailable: {activation.pack_id}@{activation.version}"
                 )
             supported = [str(item) for item in version.manifest.get("editions", [])]
             if supported and edition not in supported:
@@ -422,9 +417,7 @@ class RulePackService:
             if field in manifest and not isinstance(manifest[field], list):
                 errors.append(f"manifest.{field} must be a list")
         ids: set[str] = set()
-        declared_capabilities = {
-            str(item) for item in manifest.get("capabilities", [])
-        }
+        declared_capabilities = {str(item) for item in manifest.get("capabilities", [])}
         for index, mechanic in enumerate(mechanics):
             mechanic_id = str(mechanic.get("id") or "")
             if not mechanic_id.startswith(f"{pack_id}."):
@@ -435,9 +428,7 @@ class RulePackService:
             if not str(mechanic.get("event") or ""):
                 errors.append(f"mechanics[{index}].event is required")
             elif str(mechanic["event"]) not in declared_capabilities:
-                errors.append(
-                    f"mechanics[{index}].event is not declared in manifest.capabilities"
-                )
+                errors.append(f"mechanics[{index}].event is not declared in manifest.capabilities")
             if not isinstance(mechanic.get("operations", []), list):
                 errors.append(f"mechanics[{index}].operations must be a list")
         artifact_ids = [str(item.get("id") or "") for item in artifacts]
@@ -446,21 +437,24 @@ class RulePackService:
         if any(not item.startswith(f"{pack_id}.") for item in artifact_ids):
             errors.append("artifact ids must use the pack namespace")
         for index, artifact in enumerate(artifacts):
+            if not str(artifact.get("kind") or "").strip():
+                errors.append(f"artifacts[{index}].kind is required")
+            card = artifact.get("card")
+            if not isinstance(card, dict):
+                errors.append(f"artifacts[{index}].card must be an object")
+            elif not str(card.get("name") or "").strip():
+                errors.append(f"artifacts[{index}].card.name is required")
+            for field in ("rule_refs", "source_citations"):
+                if field in artifact and not isinstance(artifact[field], list):
+                    errors.append(f"artifacts[{index}].{field} must be a list")
             refs = artifact.get("mechanic_refs", [])
             if not isinstance(refs, list):
                 errors.append(f"artifacts[{index}].mechanic_refs must be a list")
                 refs = []
-            unknown_refs = sorted(
-                {
-                    str(item)
-                    for item in refs
-                    if str(item) not in ids
-                }
-            )
+            unknown_refs = sorted({str(item) for item in refs if str(item) not in ids})
             if unknown_refs:
                 errors.append(
-                    f"artifacts[{index}].mechanic_refs are unknown: "
-                    f"{', '.join(unknown_refs)}"
+                    f"artifacts[{index}].mechanic_refs are unknown: {', '.join(unknown_refs)}"
                 )
         return {"valid": not errors, "errors": errors}
 
@@ -509,8 +503,7 @@ class RulePackService:
                 )
             dependency_items = list(version.manifest.get("dependencies", []))
             dependencies = {
-                str(item.get("id") if isinstance(item, dict) else item)
-                for item in dependency_items
+                str(item.get("id") if isinstance(item, dict) else item) for item in dependency_items
             }
             missing = sorted(dependencies - enabled_ids)
             if missing:
@@ -521,9 +514,7 @@ class RulePackService:
                 dependency_id = str(item.get("id") or "")
                 dependency = versions.get(dependency_id)
                 if dependency is not None and dependency.version != str(item["version"]):
-                    raise RulePackError(
-                        f"{pack_id} requires {dependency_id}@{item['version']}"
-                    )
+                    raise RulePackError(f"{pack_id} requires {dependency_id}@{item['version']}")
             conflicts = {
                 str(item.get("id") if isinstance(item, dict) else item)
                 for item in version.manifest.get("conflicts", [])

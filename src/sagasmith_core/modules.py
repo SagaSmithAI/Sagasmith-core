@@ -516,9 +516,15 @@ class ModuleService:
             normalized_document=document,
         )
 
-    def inspect_path(self, path: str | Path) -> dict[str, Any]:
+    def inspect_path(
+        self,
+        path: str | Path,
+        *,
+        parser: MarkdownModuleParser | None = None,
+    ) -> dict[str, Any]:
         document = converter_for(path).convert(path)
-        parsed = MarkdownModuleParser().parse(document.content)
+        selected_parser = parser or MarkdownModuleParser()
+        parsed = selected_parser.parse(document.content)
         return {
             "source_path": document.source_path,
             "media_type": document.media_type,
@@ -526,6 +532,8 @@ class ModuleService:
             "page_count": document.page_count,
             "warnings": list(document.warnings),
             "metadata": dict(document.metadata),
+            "parser_profile": getattr(selected_parser.profile, "name", "generic"),
+            "parser_version": getattr(selected_parser.profile, "version", "1"),
             "chapters": len(parsed),
             "scenes": sum(len(chapter.scenes) for chapter in parsed),
             "chunks": sum(len(scene.chunks) for chapter in parsed for scene in chapter.scenes),
