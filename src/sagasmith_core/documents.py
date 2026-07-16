@@ -136,13 +136,37 @@ def _joiner(left: str, right: str) -> str:
 def _looks_like_all_caps_heading(value: str) -> bool:
     """Recover short visual subheadings that are absent from a PDF outline."""
     text = value.strip()
-    letters = [char for char in text if char.isalpha()]
+    # ``str.upper`` is a no-op for CJK characters.  Treating every uncased
+    # alphabet as uppercase turns practically every short Chinese body line
+    # into a heading.  This heuristic is deliberately limited to scripts
+    # which actually carry case; CJK structure must come from the PDF outline
+    # or another explicit structural signal.
+    letters = [char for char in text if char.isascii() and char.isalpha()]
+    uncased_letters = [char for char in text if char.isalpha() and not char.isascii()]
     return bool(
         3 <= len(text) <= 80
         and 1 <= len(text.split()) <= 12
         and letters
+        and not uncased_letters
         and all(char == char.upper() for char in letters)
         and not _TERMINAL_RE.search(text)
+    )
+
+
+def _looks_like_toc_page(lines: list[str]) -> bool:
+    """Identify dense contents pages so their entries do not become body headings."""
+    nonempty = [line for line in lines if line]
+    if not nonempty:
+        return False
+    heading = " ".join(nonempty[:5]).casefold()
+    named_contents = "目录" in heading or bool(re.search(r"\bcontents\b", heading))
+    chapter_entries = sum(bool(_CHAPTER_RE.match(line)) for line in nonempty)
+    short_entries = sum(len(line) <= 80 for line in nonempty)
+    return bool(
+        named_contents
+        and chapter_entries >= 2
+        and len(nonempty) >= 12
+        and short_entries / len(nonempty) >= 0.75
     )
 
 
@@ -151,6 +175,8 @@ def _reflow_page(
     lines: list[str],
     heading_levels: dict[tuple[int, int], int],
     repeated_margins: set[str],
+    *,
+    structural_headings: bool = True,
 ) -> tuple[list[str], int, int]:
     output = [f"<!-- page: {page_number} -->", ""]
     paragraph: list[str] = []
@@ -170,6 +196,8 @@ def _reflow_page(
 
     nonempty = [index for index, line in enumerate(lines) if line]
     margins = set(nonempty[:3] + nonempty[-3:])
+    top_lines = set(nonempty[:5])
+    chapter_lines = sum(bool(_CHAPTER_RE.match(line)) for line in lines if line)
     for index, line in enumerate(lines):
         if not line:
             flush()
@@ -178,19 +206,30 @@ def _reflow_page(
             continue
         if index in margins and _PAGE_NUMBER_RE.fullmatch(line):
             continue
-        level = heading_levels.get((page_number, index))
+        level = heading_levels.get((page_number, index)) if structural_headings else None
         next_line = next((value for value in lines[index + 1 :] if value), "")
+        previous_line = next((value for value in reversed(lines[:index]) if value), "")
+        if (
+            structural_headings
+            and re.match(r"^Chapter\s+[0-9A-Z]", line, re.IGNORECASE)
+            and re.match(r"^第[一二三四五六七八九十百0-9]+章", previous_line)
+        ):
+            # A bilingual chapter title is frequently extracted as two adjacent
+            # lines.  The Chinese title already established the boundary.
+            continue
         chapter_confirmation = bool(
             re.match(r"^(?:Chapter|Appendix)\s+[0-9A-Z]", next_line, re.IGNORECASE)
         )
-        if _CHAPTER_RE.match(line) and (
-            level is not None or chapter_confirmation or page_number > 3
+        if structural_headings and _CHAPTER_RE.match(line) and (
+            level is not None
+            or chapter_confirmation
+            or (index in top_lines and chapter_lines == 1)
         ):
             level = 1
-        elif _ROOM_RE.match(line):
+        elif structural_headings and _ROOM_RE.match(line):
             level = level or 4
             room_count += 1
-        elif level is None and _looks_like_all_caps_heading(line):
+        elif structural_headings and level is None and _looks_like_all_caps_heading(line):
             level = 5
         if level is not None:
             flush()
@@ -216,6 +255,11 @@ def build_structured_markdown(
     pages = [[_clean_line(line) for line in text.splitlines()] for text in page_texts]
     repeated = _repeated_margin_lines(pages)
     heading_levels, matched = _match_bookmarks(pages, bookmarks)
+    toc_pages = {
+        page_number
+        for page_number, lines in enumerate(pages, start=1)
+        if _looks_like_toc_page(lines)
+    }
     output: list[str] = []
     heading_count = room_count = 0
     for page_number, lines in enumerate(pages, start=1):
@@ -224,6 +268,7 @@ def build_structured_markdown(
             lines,
             heading_levels,
             repeated,
+            structural_headings=page_number not in toc_pages,
         )
         output.extend(rendered)
         heading_count += headings
@@ -243,6 +288,7 @@ def build_structured_markdown(
             "matched_bookmarks": matched,
             "heading_count": heading_count,
             "room_heading_count": room_count,
+            "toc_pages": sorted(toc_pages),
         },
         tuple(warnings),
     )

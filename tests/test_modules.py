@@ -1,5 +1,5 @@
 from sagasmith_core.campaigns import CampaignService
-from sagasmith_core.modules import ModuleService
+from sagasmith_core.modules import MarkdownModuleParser, ModuleService
 from sagasmith_core.snapshots import SnapshotService
 
 
@@ -82,6 +82,50 @@ def test_module_ingest_search_and_progress(database) -> None:
     assert [item["percent"] for item in projected] == [70, 5]
     assert projected[0]["inherited_from_party"] is False
     assert projected[1]["inherited_from_party"] is True
+
+
+def test_module_parser_preserves_front_matter_before_first_chapter() -> None:
+    chapters = MarkdownModuleParser().parse(
+        "<!-- page: 1 -->\n## Adventure Overview\nThe city has fallen.\n"
+        "<!-- page: 2 -->\n# Chapter One\n## Arrival\nThe party arrives.\n"
+    )
+
+    assert [chapter.title for chapter in chapters] == ["Front Matter", "Chapter One"]
+    assert chapters[0].scenes[0].title == "Adventure Overview"
+    assert "city has fallen" in chapters[0].content
+
+
+def test_scene_stable_keys_preserve_cjk_chapter_identity(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="中文章节")
+    service = ModuleService(database)
+    result = service.ingest(
+        campaign_id=campaign.id,
+        source_key="chapters.md",
+        title="章节",
+        content="# 第一章\n## 发展\n甲。\n# 第二章\n## 发展\n乙。\n",
+    )
+
+    assert result.scenes == 2
+    assert [item["stable_key"] for item in service.scene_index(campaign.id)] == [
+        "第一章-发展",
+        "第二章-发展",
+    ]
+
+
+def test_scene_stable_keys_disambiguate_repeated_headings(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="重复场景")
+    service = ModuleService(database)
+    service.ingest(
+        campaign_id=campaign.id,
+        source_key="repeated.md",
+        title="Repeated",
+        content="# Chapter\n## Development\nFirst.\n## Development\nSecond.\n",
+    )
+
+    assert [item["stable_key"] for item in service.scene_index(campaign.id)] == [
+        "chapter-development",
+        "chapter-development--2",
+    ]
 
 
 def test_module_reimport_preserves_snapshot_scene_references(database) -> None:

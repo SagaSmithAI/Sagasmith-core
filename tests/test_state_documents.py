@@ -107,6 +107,49 @@ def test_pdf_normalization_recovers_unbookmarked_all_caps_subheadings() -> None:
     assert warnings == ()
 
 
+def test_pdf_normalization_does_not_treat_uncased_cjk_body_as_all_caps() -> None:
+    content, metadata, warnings = build_structured_markdown(
+        ["冒险背景 Adventure Background\n这是一行带 D&D 缩写的中文正文\n下一行继续正文。"],
+        [],
+    )
+
+    assert "##### 这是一行带 D&D 缩写的中文正文" not in content
+    assert "这是一行带 D&D 缩写的中文正文下一行继续正文。" in content
+    assert metadata["heading_count"] == 0
+    assert warnings == ("no structural headings were recovered",)
+
+
+def test_pdf_normalization_keeps_toc_entries_out_of_heading_hierarchy() -> None:
+    content, metadata, _warnings = build_structured_markdown(
+        [
+            "目录 Contents\n第一章：双城记\n第二章：坠落\n第三章：阿弗纳斯\n"
+            "地点一\n地点二\n地点三\n地点四\n地点五\n地点六\n地点七\n地点八",
+            "第一章：双城记\nChapter 1\n正文。",
+        ],
+        [],
+    )
+
+    assert metadata["toc_pages"] == [1]
+    assert content.count("# 第一章：双城记") == 1
+    assert "# 第二章：坠落" not in content
+
+
+def test_pdf_normalization_does_not_promote_chapter_references_in_body() -> None:
+    content, metadata, _warnings = build_structured_markdown(
+        [
+            "Adventure Overview\n正文从这里开始。\n第一章：双城记\n第二章：坠落\n继续说明。",
+            "第二章 埃尔托瑞尔已然坠落\nChapter 2: Elturel Has Fallen\n正文。",
+        ],
+        [],
+    )
+
+    assert "# 第一章：双城记" not in content
+    assert "# 第二章：坠落" not in content
+    assert content.count("# 第二章 埃尔托瑞尔已然坠落") == 1
+    assert "# Chapter 2" not in content
+    assert metadata["heading_count"] == 1
+
+
 def test_campaign_profile_events_snapshot_and_memory(database) -> None:
     campaigns = CampaignService(database)
     campaign = campaigns.create(system_id="dnd5e", name="Branches", state={"door": "closed"})

@@ -163,7 +163,11 @@ class MarkdownModuleParser:
         if not chapter_starts:
             chapter_starts = [(0, headings[0])]
         parsed: list[ParsedChapter] = []
-        for ordinal, (heading_index, heading) in enumerate(chapter_starts):
+        first_chapter_start = chapter_starts[0][1].start()
+        preamble = content[:first_chapter_start]
+        if chapter_starts[0][1].group(1) == "#" and strip_page_markers(preamble).strip():
+            parsed.append(self._chapter(0, "Front Matter", preamble, 0, first_chapter_start))
+        for ordinal, (_heading_index, heading) in enumerate(chapter_starts):
             start = heading.start()
             end = (
                 chapter_starts[ordinal + 1][1].start()
@@ -171,7 +175,7 @@ class MarkdownModuleParser:
                 else len(content)
             )
             title = heading.group(2).strip()
-            parsed.append(self._chapter(ordinal, title, content[start:end], start, end))
+            parsed.append(self._chapter(len(parsed), title, content[start:end], start, end))
         return parsed
 
     def _chapter(
@@ -366,6 +370,7 @@ class ModuleService:
             vector_metadata: list[dict[str, Any]] = []
             vector_documents: list[str] = []
             vector_job_ids: list[str] = []
+            stable_keys = self._scene_stable_keys(parsed)
             for chapter in parsed:
                 chapter_id = str(uuid.uuid4())
                 session.add(
@@ -387,7 +392,7 @@ class ModuleService:
                     scene_id = str(uuid.uuid4())
                     scene_metadata = {
                         **dict(scene.metadata),
-                        "stable_key": self._scene_stable_key(scene.heading_path, scene.title),
+                        "stable_key": stable_keys[(chapter.ordinal, scene.ordinal)],
                         "content_checksum": hashlib.sha256(
                             scene.content.encode("utf-8")
                         ).hexdigest(),
@@ -572,9 +577,10 @@ class ModuleService:
         scenes: list[dict[str, Any]] = []
         errors: list[str] = []
         keys: set[str] = set()
+        stable_keys = self._scene_stable_keys(parsed)
         for chapter in parsed:
             for scene in chapter.scenes:
-                stable_key = self._scene_stable_key(scene.heading_path, scene.title)
+                stable_key = stable_keys[(chapter.ordinal, scene.ordinal)]
                 if stable_key in keys:
                     errors.append(f"duplicate stable scene key: {stable_key}")
                 keys.add(stable_key)
@@ -1004,10 +1010,25 @@ class ModuleService:
             return {"module_id": row.id, "active": True, "replaced_module_ids": replaced}
 
     @staticmethod
+    def _scene_stable_keys(parsed: Sequence[ParsedChapter]) -> dict[tuple[int, int], str]:
+        """Build deterministic keys and disambiguate repeated semantic headings."""
+        result: dict[tuple[int, int], str] = {}
+        occurrences: dict[str, int] = {}
+        for chapter in parsed:
+            for scene in chapter.scenes:
+                base = ModuleService._scene_stable_key(scene.heading_path, scene.title)
+                occurrences[base] = occurrences.get(base, 0) + 1
+                occurrence = occurrences[base]
+                result[(chapter.ordinal, scene.ordinal)] = (
+                    base if occurrence == 1 else f"{base}--{occurrence}"
+                )
+        return result
+
+    @staticmethod
     def _scene_stable_key(heading_path: Sequence[str], title: str) -> str:
         source = "/".join(str(item).strip() for item in heading_path if str(item).strip())
         source = source or title
-        normalized = re.sub(r"[^a-z0-9]+", "-", source.casefold()).strip("-")
+        normalized = re.sub(r"[^\w]+", "-", source.casefold()).strip("-").replace("_", "-")
         digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:16]
         return normalized[:120] or f"scene-{digest}"
 
