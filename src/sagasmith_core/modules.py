@@ -1309,7 +1309,27 @@ class ModuleService:
                     if isinstance(item, dict) and item.get("key")
                 }
                 if locations and current_location_key not in locations:
-                    raise ValueError("current_location_key is not a location in this scene")
+                    matching_scenes = []
+                    for candidate in session.scalars(
+                        select(ModuleScene).where(
+                            ModuleScene.module_id == scene.module_id,
+                            ModuleScene.id != scene.id,
+                        )
+                    ):
+                        candidate_locations = {
+                            str(item.get("key"))
+                            for item in dict(candidate.metadata_json or {})
+                            .get("spatial", {})
+                            .get("locations", [])
+                            if isinstance(item, dict) and item.get("key")
+                        }
+                        if current_location_key in candidate_locations:
+                            matching_scenes.append(candidate.id)
+                    if len(matching_scenes) != 1:
+                        raise ValueError(
+                            "current_location_key must identify one location in the "
+                            "current scene or exactly one scene in the same module"
+                        )
                 row.current_location_key = current_location_key
             row.state_version = (row.state_version or 0) + 1
             if state is not None:

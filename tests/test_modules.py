@@ -190,6 +190,65 @@ def test_staged_module_reparses_same_content_when_parser_version_changes(databas
     assert second.skipped is False
 
 
+def test_scene_progress_can_reference_one_spatial_location_in_the_same_module(database) -> None:
+    class SpatialProfile:
+        name = "spatial-test"
+        version = "1"
+
+        def classify_chunk(self, heading: str, text: str) -> str:
+            return "narrative"
+
+        def keywords(self, title: str, text: str) -> list[str]:
+            return []
+
+        def scene_boundaries(self, chapter_title: str, chapter_content: str):
+            split = chapter_content.index("## Ambush")
+            return [
+                SceneBoundary(
+                    "Tavern Locations",
+                    0,
+                    split,
+                    metadata={
+                        "spatial": {
+                            "schema_version": 1,
+                            "locations": [{"key": "e7-upstairs", "title": "E7"}],
+                        }
+                    },
+                ),
+                SceneBoundary(
+                    "Ambush",
+                    split,
+                    len(chapter_content),
+                    metadata={
+                        "spatial": {
+                            "schema_version": 1,
+                            "locations": [{"key": "ambush", "title": "Ambush"}],
+                        }
+                    },
+                ),
+            ]
+
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Cross-scene map")
+    modules = ModuleService(database)
+    modules.ingest(
+        campaign_id=campaign.id,
+        source_key="tavern.md",
+        title="Tavern",
+        content="# Chapter\n## Locations\nE7 upstairs.\n## Ambush\nPirates arrive.\n",
+        parser=MarkdownModuleParser(profile=SpatialProfile()),
+    )
+    scenes = modules.scene_index(campaign.id)
+    ambush = next(item for item in scenes if item["title"] == "Ambush")
+
+    progress = modules.set_scene_progress(
+        campaign_id=campaign.id,
+        scene_id=ambush["scene_id"],
+        current_location_key="e7-upstairs",
+    )
+
+    assert progress["current_location_key"] == "e7-upstairs"
+
+
 def test_module_reimport_preserves_snapshot_scene_references(database) -> None:
     campaign = CampaignService(database).create(system_id="dnd5e", name="Revision")
     modules = ModuleService(database)
