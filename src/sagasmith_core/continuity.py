@@ -12,6 +12,7 @@ from sagasmith_core.knowledge import ActorKnowledgeService
 from sagasmith_core.memory import MemoryService
 from sagasmith_core.models import CampaignSnapshot
 from sagasmith_core.modules import ModuleService
+from sagasmith_core.snapshots import SnapshotService
 
 
 class ContinuityService:
@@ -88,6 +89,7 @@ class ContinuityService:
             snapshot = session.get(CampaignSnapshot, snapshot_id)
             if snapshot is None:
                 return None
+            SnapshotService._assert_integrity(session, snapshot)
             values = snapshot.payload.get("scene_progress", [])
             for effective_scope in (scope_id, "party"):
                 match = next(

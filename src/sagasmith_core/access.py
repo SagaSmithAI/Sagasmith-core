@@ -8,7 +8,15 @@ from sqlalchemy import select
 
 from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.database import Database
-from sagasmith_core.models import ActorGrant, Campaign, CampaignMembership, Character, Principal
+from sagasmith_core.models import (
+    ActorGrant,
+    Campaign,
+    CampaignBranch,
+    CampaignMembership,
+    CampaignSnapshot,
+    Character,
+    Principal,
+)
 
 
 class AccessDeniedError(PermissionError):
@@ -144,9 +152,7 @@ class AccessService:
                 {"campaign_id": campaign_id, "principal_id": principal_id},
             )
             return (
-                None
-                if row is None
-                else MembershipInfo(row.campaign_id, row.principal_id, row.role)
+                None if row is None else MembershipInfo(row.campaign_id, row.principal_id, row.role)
             )
 
     def accessible_campaign_ids(self, principal_id: str) -> set[str]:
@@ -182,14 +188,37 @@ class AccessService:
         *,
         control: bool = False,
         private: bool = False,
+        branch_id: str | None = None,
     ) -> ActorGrantInfo | MembershipInfo:
         membership = self.require_campaign(campaign_id, principal_id)
         # Campaign owners/DMs still need a real actor in this campaign.  A role
         # grants authority over actors; it must not turn an arbitrary identifier
         # into a readable or writable object.
         with self.database.transaction() as session:
-            actor = session.get(Character, actor_id)
-            if actor is None or actor.campaign_id != campaign_id:
+            campaign = session.get(Campaign, campaign_id)
+            actor_exists = False
+            if campaign is not None and (
+                branch_id is None or branch_id == campaign.active_branch_id
+            ):
+                actor = session.get(Character, actor_id)
+                actor_exists = actor is not None and actor.campaign_id == campaign_id
+            elif campaign is not None:
+                branch = session.get(CampaignBranch, branch_id)
+                if branch is not None and branch.campaign_id == campaign_id:
+                    snapshot = (
+                        session.get(CampaignSnapshot, branch.head_snapshot_id)
+                        if branch.head_snapshot_id
+                        else None
+                    )
+                    if snapshot is not None:
+                        from sagasmith_core.snapshots import SnapshotService
+
+                        SnapshotService._assert_integrity(session, snapshot)
+                    actor_exists = snapshot is not None and any(
+                        str(item.get("id")) == actor_id
+                        for item in dict(snapshot.payload).get("characters", [])
+                    )
+            if not actor_exists:
                 raise AccessDeniedError(
                     f"actor {actor_id!r} does not belong to campaign {campaign_id!r}"
                 )

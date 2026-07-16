@@ -17,6 +17,7 @@ from sagasmith_core.models import (
     Campaign,
     CampaignEvent,
     Character,
+    SnapshotEventBinding,
 )
 from sagasmith_core.retrieval import lexical_score
 
@@ -66,8 +67,10 @@ class ActorKnowledgeService:
             actor = session.get(Character, actor_id)
             if actor is None or actor.campaign_id != campaign_id:
                 raise ValueError("actor must be a live character in this campaign")
-            self._validate_event(session, source_event_id, campaign_id)
             branch = resolve_branch(session, campaign, branch_id)
+            self._validate_event(
+                session, source_event_id, campaign_id, branch.id, branch.head_snapshot_id
+            )
             existing = session.scalar(
                 select(ActorKnowledge).where(
                     ActorKnowledge.actor_id == actor_id,
@@ -75,14 +78,23 @@ class ActorKnowledgeService:
                 )
             )
             if existing is not None:
-                raise ValueError(f"knowledge key already exists for actor: {knowledge_key}")
-            knowledge = ActorKnowledge(
-                id=str(uuid.uuid4()),
-                campaign_id=campaign_id,
-                actor_id=actor_id,
-                knowledge_key=knowledge_key,
-                subject_ref=subject_ref,
-            )
+                head = session.get(
+                    BranchActorKnowledgeHead,
+                    {"branch_id": branch.id, "knowledge_id": existing.id},
+                )
+                if head is not None:
+                    raise ValueError(f"knowledge key already exists for actor: {knowledge_key}")
+                if subject_ref and existing.subject_ref and subject_ref != existing.subject_ref:
+                    raise ValueError("knowledge key has a different subject on another branch")
+                knowledge = existing
+            else:
+                knowledge = ActorKnowledge(
+                    id=str(uuid.uuid4()),
+                    campaign_id=campaign_id,
+                    actor_id=actor_id,
+                    knowledge_key=knowledge_key,
+                    subject_ref=subject_ref,
+                )
             revision = self._revision(
                 knowledge.id,
                 proposition=proposition,
@@ -121,13 +133,17 @@ class ActorKnowledgeService:
             campaign = session.get(Campaign, knowledge.campaign_id)
             if campaign is None:
                 raise CampaignNotFoundError(knowledge.campaign_id)
-            self._validate_event(session, source_event_id, campaign.id)
             branch = resolve_branch(session, campaign, branch_id)
+            self._validate_event(
+                session, source_event_id, campaign.id, branch.id, branch.head_snapshot_id
+            )
             head = session.get(
                 BranchActorKnowledgeHead,
                 {"branch_id": branch.id, "knowledge_id": knowledge.id},
             )
-            parent_id = head.revision_id if head else None
+            if head is None:
+                raise LookupError(f"knowledge {knowledge_id} is not visible on branch {branch.id}")
+            parent_id = head.revision_id
             revision = self._revision(
                 knowledge.id,
                 parent_id=parent_id,
@@ -140,16 +156,7 @@ class ActorKnowledgeService:
             )
             session.add(revision)
             session.flush()
-            if head is None:
-                session.add(
-                    BranchActorKnowledgeHead(
-                        branch_id=branch.id,
-                        knowledge_id=knowledge.id,
-                        revision_id=revision.id,
-                    )
-                )
-            else:
-                head.revision_id = revision.id
+            head.revision_id = revision.id
             return self._info(knowledge, revision)
 
     def list(
@@ -246,12 +253,29 @@ class ActorKnowledgeService:
             raise ValueError(f"invalid epistemic status: {value}")
 
     @staticmethod
-    def _validate_event(session, event_id: str | None, campaign_id: str) -> None:
+    def _validate_event(
+        session,
+        event_id: str | None,
+        campaign_id: str,
+        branch_id: str,
+        head_snapshot_id: str | None,
+    ) -> None:
         if event_id is None:
             return
         event = session.get(CampaignEvent, event_id)
         if event is None or event.campaign_id != campaign_id:
             raise LookupError(event_id)
+        visible = event.branch_id == branch_id and event.committed_snapshot_id is None
+        if not visible and head_snapshot_id:
+            visible = (
+                session.get(
+                    SnapshotEventBinding,
+                    {"snapshot_id": head_snapshot_id, "event_id": event_id},
+                )
+                is not None
+            )
+        if not visible:
+            raise LookupError(f"event {event_id} is not visible on branch {branch_id}")
 
     @staticmethod
     def _info(knowledge: ActorKnowledge, revision: ActorKnowledgeRevision) -> ActorKnowledgeInfo:

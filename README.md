@@ -87,6 +87,8 @@ my_system = "my_package.system:get_system"
 ## 稳定性与安全边界
 
 - Snapshot、branch 和 revision 是权威连续性；向量命中不是。
+- Snapshot 在语义上是可独立恢复的全量 checkpoint；`recap` 才是相对父节点的差量摘要。完整性校验同时覆盖 payload、DAG 祖先链以及 fact/event/actor-knowledge bindings。
+- checkout 不会静默丢弃工作区：当前分支有未保存变化时，必须先创建 Snapshot。
 - 写操作应携带 expected revision 与幂等键，避免 Agent 重试造成重复副作用。
 - 玩家读取只允许当前可见分支、场景作用域和角色知识；GM 权限需要显式 principal/role。
 - 文档解析结果保留来源、页码、质量警告和 parser profile；调用方必须处理缺失的富元数据。

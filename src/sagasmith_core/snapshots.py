@@ -100,7 +100,9 @@ class SnapshotService:
         parent_id: str | None = None,
     ) -> SnapshotInfo:
         branch = resolve_branch(session, campaign)
-        parent_id = parent_id if parent_id is not None else branch.head_snapshot_id
+        if parent_id is not None and parent_id != branch.head_snapshot_id:
+            raise ValueError("snapshot parent must be the checked-out branch head")
+        parent_id = branch.head_snapshot_id
         if parent_id:
             parent = session.get(CampaignSnapshot, parent_id)
             if parent is None or parent.campaign_id != campaign.id:
@@ -119,14 +121,6 @@ class SnapshotService:
                 dict(session.get(CampaignSnapshot, parent_id).payload) if parent_id else None
             )
             recap = self._build_recap(parent_payload, payload)
-        session.execute(
-            update(CampaignSnapshot)
-            .where(
-                CampaignSnapshot.campaign_id == campaign.id,
-                CampaignSnapshot.branch_id == branch.id,
-            )
-            .values(is_head=False)
-        )
         row = CampaignSnapshot(
             id=str(uuid.uuid4()),
             campaign_id=campaign.id,
@@ -144,13 +138,18 @@ class SnapshotService:
         session.flush()
         self._bind_continuity(session, row, branch)
         branch.head_snapshot_id = row.id
-        return self._info(row)
+        session.flush()
+        self._refresh_head_flags(session, campaign.id)
+        return self._info(session, row)
 
     def regenerate_recap(self, campaign_id: str, slot: int) -> dict[str, Any]:
         """Rebuild a deterministic delta recap without changing snapshot state."""
         with self.database.transaction() as session:
             row = self._row(session, campaign_id, slot)
             parent = session.get(CampaignSnapshot, row.parent_id) if row.parent_id else None
+            self._assert_integrity(session, row)
+            if parent is not None:
+                self._assert_integrity(session, parent)
             row.recap = self._build_recap(
                 dict(parent.payload) if parent else None,
                 dict(row.payload),
@@ -167,22 +166,32 @@ class SnapshotService:
                 .where(CampaignSnapshot.campaign_id == campaign_id)
                 .order_by(CampaignSnapshot.slot)
             )
-            return [self._info(row) for row in rows]
+            return [self._info(session, row) for row in rows]
 
     def get(self, campaign_id: str, slot: int) -> dict[str, Any]:
         with self.database.transaction() as session:
             row = self._row(session, campaign_id, slot)
-            return self._document(row)
+            return self._document(session, row)
 
     def get_by_id(self, campaign_id: str, snapshot_id: str) -> dict[str, Any]:
         with self.database.transaction() as session:
             row = session.get(CampaignSnapshot, snapshot_id)
             if row is None or row.campaign_id != campaign_id:
                 raise LookupError(snapshot_id)
-            return self._document(row)
+            return self._document(session, row)
 
     def verify(self, campaign_id: str, slot: int) -> bool:
-        return bool(self.get(campaign_id, slot)["valid"])
+        with self.database.transaction() as session:
+            return self._is_valid(session, self._row(session, campaign_id, slot))
+
+    def assert_clean(self, campaign_id: str) -> None:
+        """Reject branch switching when the checked-out worktree has not been saved."""
+        with self.database.transaction() as session:
+            campaign = session.get(Campaign, campaign_id)
+            if campaign is None:
+                raise CampaignNotFoundError(campaign_id)
+            branch = resolve_branch(session, campaign)
+            self._assert_clean_branch(session, campaign, branch)
 
     def restore(self, campaign_id: str, slot: int) -> SnapshotInfo:
         with self.database.transaction() as session:
@@ -190,12 +199,7 @@ class SnapshotService:
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
             target = self._row(session, campaign_id, slot)
-            if _checksum(target.payload) != target.checksum:
-                raise SnapshotIntegrityError(f"snapshot {slot} failed checksum verification")
-            if target.schema_version != self.SCHEMA_VERSION:
-                raise SnapshotIntegrityError(
-                    "snapshot schema is unsupported; create a new snapshot with the current runtime"
-                )
+            self._assert_integrity(session, target)
             self._create_in_session(session, campaign, label=f"Before restore to slot {slot}")
             branch = CampaignBranch(
                 id=str(uuid.uuid4()),
@@ -228,22 +232,25 @@ class SnapshotService:
             branch_row = session.get(CampaignBranch, branch_id)
             if branch_row is None or branch_row.campaign_id != campaign_id:
                 raise LookupError(branch_id)
+            current = resolve_branch(session, campaign)
+            if current.id == branch_row.id:
+                if branch_row.head_snapshot_id is None:
+                    return None
+                row = session.get(CampaignSnapshot, branch_row.head_snapshot_id)
+                if row is None:
+                    raise LookupError(branch_row.head_snapshot_id)
+                self._assert_integrity(session, row)
+                return self._info(session, row)
+            self._assert_clean_branch(session, campaign, current)
             if branch_row.head_snapshot_id is None:
-                BranchService._checkout(session, campaign, branch_row)
-                return None
+                raise SnapshotIntegrityError("cannot checkout a branch without a snapshot head")
             row = session.get(CampaignSnapshot, branch_row.head_snapshot_id)
             if row is None or row.campaign_id != campaign_id:
                 raise LookupError(branch_row.head_snapshot_id)
-            if _checksum(row.payload) != row.checksum:
-                raise SnapshotIntegrityError("branch head failed checksum verification")
-            if row.schema_version != self.SCHEMA_VERSION:
-                raise SnapshotIntegrityError(
-                    "branch head schema is unsupported; create a new snapshot with "
-                    "the current runtime"
-                )
+            self._assert_integrity(session, row)
             BranchService._checkout(session, campaign, branch_row)
             self._apply(session, campaign, dict(row.payload))
-            return self._info(row)
+            return self._info(session, row)
 
     def lineage(self, campaign_id: str, slot: int | None = None) -> list[SnapshotInfo]:
         with self.database.transaction() as session:
@@ -257,9 +264,16 @@ class SnapshotService:
             else:
                 row = self._row(session, campaign_id, slot)
             result: list[SnapshotInfo] = []
+            visited: set[str] = set()
             while row is not None:
-                result.append(self._info(row))
-                row = session.get(CampaignSnapshot, row.parent_id) if row.parent_id else None
+                if row.id in visited:
+                    raise SnapshotIntegrityError("snapshot lineage contains a cycle")
+                if row.campaign_id != campaign_id:
+                    raise SnapshotIntegrityError("snapshot lineage crosses campaign boundaries")
+                visited.add(row.id)
+                result.append(self._info(session, row))
+                parent_id = row.parent_id
+                row = session.get(CampaignSnapshot, parent_id) if parent_id else None
             return list(reversed(result))
 
     def export(self, campaign_id: str, slot: int, output: str | Path) -> dict[str, Any]:
@@ -282,11 +296,22 @@ class SnapshotService:
             )
             if children:
                 raise ValueError("cannot delete a snapshot that has descendants")
-            was_head = row.is_head
-            parent = session.get(CampaignSnapshot, row.parent_id) if row.parent_id else None
+            references = session.scalar(
+                select(func.count())
+                .select_from(CampaignBranch)
+                .where(
+                    CampaignBranch.campaign_id == campaign_id,
+                    or_(
+                        CampaignBranch.head_snapshot_id == row.id,
+                        CampaignBranch.base_snapshot_id == row.id,
+                    ),
+                )
+            )
+            if references:
+                raise ValueError("cannot delete a snapshot referenced by a branch")
             session.delete(row)
-            if was_head and parent is not None:
-                parent.is_head = True
+            session.flush()
+            self._refresh_head_flags(session, campaign_id)
 
     @staticmethod
     def _capture(session, campaign: Campaign, branch_id: str) -> dict[str, Any]:
@@ -651,7 +676,14 @@ class SnapshotService:
         return row
 
     @staticmethod
-    def _info(row: CampaignSnapshot) -> SnapshotInfo:
+    def _info(session, row: CampaignSnapshot) -> SnapshotInfo:
+        is_head = bool(
+            session.scalar(
+                select(func.count())
+                .select_from(CampaignBranch)
+                .where(CampaignBranch.head_snapshot_id == row.id)
+            )
+        )
         return SnapshotInfo(
             id=row.id,
             campaign_id=row.campaign_id,
@@ -659,20 +691,232 @@ class SnapshotService:
             slot=row.slot,
             label=row.label,
             checksum=row.checksum,
-            is_head=row.is_head,
+            is_head=is_head,
             created_at=row.created_at.isoformat(),
             branch_id=row.branch_id,
         )
 
     @classmethod
-    def _document(cls, row: CampaignSnapshot) -> dict[str, Any]:
+    def _document(cls, session, row: CampaignSnapshot) -> dict[str, Any]:
         return {
-            **asdict(cls._info(row)),
+            **asdict(cls._info(session, row)),
             "schema_version": row.schema_version,
             "payload": dict(row.payload),
             "recap": dict(row.recap) if row.recap else None,
-            "valid": _checksum(row.payload) == row.checksum,
+            "storage_mode": "full",
+            "valid": cls._is_valid(session, row),
         }
+
+    @classmethod
+    def _is_valid(cls, session, row: CampaignSnapshot) -> bool:
+        try:
+            cls._assert_integrity(session, row)
+        except SnapshotIntegrityError:
+            return False
+        return True
+
+    @classmethod
+    def _assert_integrity(cls, session, row: CampaignSnapshot) -> None:
+        """Verify the full payload, DAG ancestry, and indexed continuity bindings."""
+        if row.schema_version != cls.SCHEMA_VERSION:
+            raise SnapshotIntegrityError(
+                "snapshot schema is unsupported; create a new snapshot with the current runtime"
+            )
+        if _checksum(row.payload) != row.checksum:
+            raise SnapshotIntegrityError("snapshot payload failed checksum verification")
+        payload = dict(row.payload)
+        required = {
+            "campaign",
+            "rule_profile",
+            "rule_lock",
+            "characters",
+            "scene_progress",
+            "events",
+            "memories",
+            "actor_knowledge",
+            "revision_cursor",
+        }
+        if not required.issubset(payload):
+            raise SnapshotIntegrityError("snapshot payload is incomplete")
+
+        visited = {row.id}
+        parent_id = row.parent_id
+        while parent_id:
+            parent = session.get(CampaignSnapshot, parent_id)
+            if parent is None or parent.campaign_id != row.campaign_id:
+                raise SnapshotIntegrityError("snapshot lineage crosses campaign boundaries")
+            if parent.id in visited:
+                raise SnapshotIntegrityError("snapshot lineage contains a cycle")
+            visited.add(parent.id)
+            parent_id = parent.parent_id
+
+        payload_facts = {str(item.get("id")): item for item in payload.get("memories", [])}
+        expected_facts = cls._payload_revision_map(payload.get("memories", []), "memory")
+        actual_facts = {
+            item.memory_id: item.revision_id
+            for item in session.scalars(
+                select(SnapshotFactBinding).where(SnapshotFactBinding.snapshot_id == row.id)
+            )
+        }
+        if expected_facts != actual_facts:
+            raise SnapshotIntegrityError("snapshot fact bindings do not match its full payload")
+        for memory_id, revision_id in actual_facts.items():
+            memory = session.get(CampaignMemory, memory_id)
+            revision = session.get(MemoryRevision, revision_id)
+            item = payload_facts[memory_id]
+            revision_item = dict(item.get("revision") or {})
+            if (
+                memory is None
+                or revision is None
+                or revision.memory_id != memory_id
+                or memory.campaign_id != row.campaign_id
+                or memory.kind != item.get("kind")
+                or memory.subject != item.get("subject")
+                or memory.created_at.isoformat() != item.get("created_at")
+                or memory.updated_at.isoformat() != item.get("updated_at")
+                or revision.snapshot_id != revision_item.get("snapshot_id")
+                or revision.content != revision_item.get("content")
+                or dict(revision.metadata_json) != dict(revision_item.get("metadata") or {})
+                or revision.created_at.isoformat() != revision_item.get("created_at")
+            ):
+                raise SnapshotIntegrityError("snapshot fact binding targets the wrong revision")
+
+        payload_knowledge = {
+            str(item.get("id")): item for item in payload.get("actor_knowledge", [])
+        }
+        expected_knowledge = cls._payload_revision_map(
+            payload.get("actor_knowledge", []), "actor knowledge"
+        )
+        actual_knowledge = {
+            item.knowledge_id: item.revision_id
+            for item in session.scalars(
+                select(SnapshotActorKnowledgeBinding).where(
+                    SnapshotActorKnowledgeBinding.snapshot_id == row.id
+                )
+            )
+        }
+        if expected_knowledge != actual_knowledge:
+            raise SnapshotIntegrityError(
+                "snapshot actor-knowledge bindings do not match its full payload"
+            )
+        actor_ids = {str(item.get("id")) for item in payload.get("characters", [])}
+        for item in payload.get("actor_knowledge", []):
+            if str(item.get("actor_id")) not in actor_ids:
+                raise SnapshotIntegrityError("snapshot contains knowledge for a missing actor")
+        for knowledge_id, revision_id in actual_knowledge.items():
+            knowledge = session.get(ActorKnowledge, knowledge_id)
+            revision = session.get(ActorKnowledgeRevision, revision_id)
+            item = payload_knowledge[knowledge_id]
+            revision_item = dict(item.get("revision") or {})
+            if (
+                knowledge is None
+                or revision is None
+                or revision.knowledge_id != knowledge_id
+                or knowledge.campaign_id != row.campaign_id
+                or knowledge.actor_id != item.get("actor_id")
+                or knowledge.knowledge_key != item.get("knowledge_key")
+                or knowledge.subject_ref != item.get("subject_ref")
+                or revision.proposition != revision_item.get("proposition")
+                or revision.epistemic_status != revision_item.get("epistemic_status")
+                or revision.confidence != revision_item.get("confidence")
+                or revision.source_event_id != revision_item.get("source_event_id")
+                or revision.cause != revision_item.get("cause")
+                or revision.disclosure_scope != revision_item.get("disclosure_scope")
+            ):
+                raise SnapshotIntegrityError(
+                    "snapshot actor-knowledge binding targets the wrong revision"
+                )
+
+        payload_events = {str(item.get("id")): item for item in payload.get("events", [])}
+        expected_events = [str(item.get("id")) for item in payload.get("events", [])]
+        actual_events = list(
+            session.scalars(
+                select(SnapshotEventBinding.event_id).where(
+                    SnapshotEventBinding.snapshot_id == row.id
+                )
+            )
+        )
+        if len(expected_events) != len(set(expected_events)) or set(expected_events) != set(
+            actual_events
+        ):
+            raise SnapshotIntegrityError("snapshot event bindings do not match its full payload")
+        for event_id in actual_events:
+            event = session.get(CampaignEvent, event_id)
+            item = payload_events[event_id]
+            if (
+                event is None
+                or event.campaign_id != row.campaign_id
+                or event.sequence != item.get("sequence")
+                or event.event_type != item.get("event_type")
+                or event.summary != item.get("summary")
+                or dict(event.payload) != dict(item.get("payload") or {})
+                or event.audience_scope != item.get("audience_scope")
+                or event.created_at.isoformat() != item.get("created_at")
+            ):
+                raise SnapshotIntegrityError("snapshot event ledger differs from its full payload")
+
+        for item in payload.get("revision_cursor", []):
+            revision_id = str(item.get("id") or "")
+            revision = session.get(StateRevision, revision_id) if revision_id else None
+            if revision is None or revision.campaign_id != row.campaign_id:
+                raise SnapshotIntegrityError("snapshot revision cursor is incomplete")
+
+    @staticmethod
+    def _payload_revision_map(items: list[dict[str, Any]], label: str) -> dict[str, str]:
+        result: dict[str, str] = {}
+        for item in items:
+            item_id = str(item.get("id") or "")
+            revision = item.get("revision")
+            revision_id = str(revision.get("id") or "") if isinstance(revision, dict) else ""
+            if not item_id or not revision_id or item_id in result:
+                raise SnapshotIntegrityError(f"snapshot {label} payload is malformed")
+            result[item_id] = revision_id
+        return result
+
+    @staticmethod
+    def _refresh_head_flags(session, campaign_id: str) -> None:
+        """Keep the legacy flag aligned with the authoritative branch refs."""
+        session.flush()
+        head_ids = set(
+            session.scalars(
+                select(CampaignBranch.head_snapshot_id).where(
+                    CampaignBranch.campaign_id == campaign_id,
+                    CampaignBranch.head_snapshot_id.is_not(None),
+                )
+            )
+        )
+        session.execute(
+            update(CampaignSnapshot)
+            .where(CampaignSnapshot.campaign_id == campaign_id)
+            .values(is_head=False)
+        )
+        if head_ids:
+            session.execute(
+                update(CampaignSnapshot)
+                .where(CampaignSnapshot.id.in_(head_ids))
+                .values(is_head=True)
+            )
+
+    @classmethod
+    def _assert_clean_branch(cls, session, campaign: Campaign, branch: CampaignBranch) -> None:
+        if branch.head_snapshot_id is None:
+            raise ValueError("create a snapshot before switching branches")
+        head = session.get(CampaignSnapshot, branch.head_snapshot_id)
+        if head is None or head.campaign_id != campaign.id:
+            raise SnapshotIntegrityError("checked-out branch head is missing")
+        cls._assert_integrity(session, head)
+        current = cls._capture(session, campaign, branch.id)
+        expected = dict(head.payload)
+        # Campaign revision is a live optimistic-concurrency token. Checkout
+        # advances it monotonically, so it is not part of worktree dirtiness.
+        current_campaign = dict(current.get("campaign") or {})
+        expected_campaign = dict(expected.get("campaign") or {})
+        current_campaign["revision"] = expected_campaign.get("revision")
+        current["campaign"] = current_campaign
+        if current != expected:
+            raise ValueError(
+                "checked-out branch has unsaved changes; create a snapshot before switching"
+            )
 
     @staticmethod
     def _visible_events(session, campaign_id: str, branch_id: str) -> list[CampaignEvent]:

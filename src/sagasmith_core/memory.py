@@ -98,21 +98,15 @@ class MemoryService:
                 if snapshot is None or snapshot.campaign_id != memory.campaign_id:
                     raise LookupError(snapshot_id)
             head = session.get(BranchFactHead, {"branch_id": branch.id, "memory_id": memory_id})
-            current = (
-                session.get(MemoryRevision, head.revision_id)
-                if head
-                else session.scalar(
-                    select(MemoryRevision)
-                    .where(MemoryRevision.memory_id == memory_id, MemoryRevision.active.is_(True))
-                    .order_by(MemoryRevision.created_at.desc())
-                )
-            )
-            if current:
-                current.active = False
+            if head is None:
+                raise LookupError(f"memory {memory_id} is not visible on branch {branch.id}")
+            current = session.get(MemoryRevision, head.revision_id)
+            if current is None:
+                raise LookupError(head.revision_id)
             revision = MemoryRevision(
                 id=str(uuid.uuid4()),
                 memory_id=memory_id,
-                parent_id=current.id if current else None,
+                parent_id=current.id,
                 snapshot_id=snapshot_id,
                 content=content,
                 metadata_json=metadata or {},

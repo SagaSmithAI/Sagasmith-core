@@ -185,10 +185,17 @@ class BranchService:
                 raise CampaignNotFoundError(campaign_id)
             current = resolve_branch(session, campaign) if campaign.active_branch_id else None
             source_id = from_snapshot_id or (current.head_snapshot_id if current else None)
+            if current is not None and source_id is None:
+                raise ValueError("create a snapshot before branching")
             if source_id:
                 source = session.get(CampaignSnapshot, source_id)
                 if source is None or source.campaign_id != campaign_id:
                     raise LookupError(source_id)
+                from sagasmith_core.snapshots import SnapshotService
+
+                SnapshotService._assert_integrity(session, source)
+            if checkout and current is not None:
+                SnapshotService._assert_clean_branch(session, campaign, current)
             row = CampaignBranch(
                 id=str(uuid.uuid4()),
                 campaign_id=campaign_id,
@@ -217,21 +224,13 @@ class BranchService:
                     # transaction.  The local import avoids the module cycle
                     # with SnapshotService's branch helpers.
                     from sagasmith_core.snapshots import (
-                        SnapshotIntegrityError,
                         SnapshotService,
-                        _checksum,
                     )
 
                     snapshot = session.get(CampaignSnapshot, row.head_snapshot_id)
                     if snapshot is None or snapshot.campaign_id != campaign_id:
                         raise LookupError(row.head_snapshot_id)
-                    if _checksum(snapshot.payload) != snapshot.checksum:
-                        raise SnapshotIntegrityError("branch head failed checksum verification")
-                    if snapshot.schema_version != SnapshotService.SCHEMA_VERSION:
-                        raise SnapshotIntegrityError(
-                            "branch head schema is unsupported; create a new snapshot "
-                            "with the current runtime"
-                        )
+                    SnapshotService._assert_integrity(session, snapshot)
                     SnapshotService(self.database)._apply(session, campaign, dict(snapshot.payload))
             return self._info(row)
 
@@ -243,26 +242,22 @@ class BranchService:
             row = session.get(CampaignBranch, branch_id)
             if row is None or row.campaign_id != campaign_id:
                 raise LookupError(branch_id)
+            current = resolve_branch(session, campaign)
+            if current.id == row.id:
+                return self._info(row)
+            from sagasmith_core.snapshots import SnapshotIntegrityError, SnapshotService
+
+            SnapshotService._assert_clean_branch(session, campaign, current)
+            if row.head_snapshot_id is None:
+                raise SnapshotIntegrityError("cannot checkout a branch without a snapshot head")
             self._checkout(session, campaign, row)
             if row.head_snapshot_id:
                 # Direct core callers must receive the same atomic pointer plus
                 # materialized state contract as SnapshotService.checkout_branch.
-                from sagasmith_core.snapshots import (
-                    SnapshotIntegrityError,
-                    SnapshotService,
-                    _checksum,
-                )
-
                 snapshot = session.get(CampaignSnapshot, row.head_snapshot_id)
                 if snapshot is None or snapshot.campaign_id != campaign_id:
                     raise LookupError(row.head_snapshot_id)
-                if _checksum(snapshot.payload) != snapshot.checksum:
-                    raise SnapshotIntegrityError("branch head failed checksum verification")
-                if snapshot.schema_version != SnapshotService.SCHEMA_VERSION:
-                    raise SnapshotIntegrityError(
-                        "branch head schema is unsupported; create a new snapshot "
-                        "with the current runtime"
-                    )
+                SnapshotService._assert_integrity(session, snapshot)
                 SnapshotService(self.database)._apply(session, campaign, dict(snapshot.payload))
             return self._info(row)
 
@@ -324,11 +319,14 @@ class BranchService:
         )
         if not rows:
             return
-        max_sequence = session.scalar(
-            select(func.max(StateRevision.sequence)).where(
-                StateRevision.campaign_id == snapshot.campaign_id
+        max_sequence = (
+            session.scalar(
+                select(func.max(StateRevision.sequence)).where(
+                    StateRevision.campaign_id == snapshot.campaign_id
+                )
             )
-        ) or 0
+            or 0
+        )
         group_ids = {row.mutation_group_id for row in rows if row.mutation_group_id}
         group_map: dict[str, str] = {}
         for group_offset, old_group in enumerate(

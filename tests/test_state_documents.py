@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import delete, select
 
 from sagasmith_core import (
     ActorKnowledgeService,
@@ -24,11 +25,11 @@ from sagasmith_core.documents import (
     NormalizedDocument,
     build_structured_markdown,
 )
+from sagasmith_core.models import ActorKnowledgeRevision, SnapshotActorKnowledgeBinding
+from sagasmith_core.snapshots import SnapshotIntegrityError
 
 
-def test_rule_document_path_ingest_preserves_source_and_page_provenance(
-    database, tmp_path
-) -> None:
+def test_rule_document_path_ingest_preserves_source_and_page_provenance(database, tmp_path) -> None:
     path = tmp_path / "optional-rules.md"
     path.write_text("# Options\n## Tool Synergy\nUse both proficiencies.\n", encoding="utf-8")
     rules = RuleService(database)
@@ -367,6 +368,7 @@ def test_branch_scoped_facts_events_and_actor_knowledge_do_not_leak(database) ->
         epistemic_status="belief",
     )
     events.add(campaign.id, summary="The key is moved")
+    snapshots.create(campaign.id, label="Key moved")
 
     alternate = BranchService(database).create(
         campaign.id,
@@ -384,6 +386,189 @@ def test_branch_scoped_facts_events_and_actor_knowledge_do_not_leak(database) ->
     assert knowledge.list(campaign.id, actor_id=actor.id, branch_id=main.id)[
         0
     ].proposition.endswith("guard room.")
+
+
+def test_same_actor_knowledge_key_can_diverge_independently_on_sibling_branches(
+    database,
+) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Sibling beliefs")
+    actor = CharacterService(database).create(
+        system_id="dnd5e",
+        campaign_id=campaign.id,
+        name="Witness",
+        character_type="npc",
+    )
+    snapshots = SnapshotService(database)
+    branches = BranchService(database)
+    knowledge = ActorKnowledgeService(database)
+    base = snapshots.create(campaign.id, label="Before the clue")
+    main = branches.current(campaign.id)
+    alternate = branches.create(
+        campaign.id,
+        name="alternate-clue",
+        from_snapshot_id=base.id,
+    )
+
+    main_value = knowledge.add(
+        campaign.id,
+        actor_id=actor.id,
+        knowledge_key="masked-visitor",
+        subject_ref="npc:visitor",
+        proposition="The visitor wore a red mask.",
+    )
+    snapshots.create(campaign.id, label="Main sees red")
+    snapshots.checkout_branch(campaign.id, alternate.id)
+    alternate_value = knowledge.add(
+        campaign.id,
+        actor_id=actor.id,
+        knowledge_key="masked-visitor",
+        subject_ref="npc:visitor",
+        proposition="The visitor wore a blue mask.",
+    )
+
+    assert alternate_value.id == main_value.id
+    assert alternate_value.revision_id != main_value.revision_id
+    assert knowledge.list(campaign.id, actor_id=actor.id, branch_id=main.id)[
+        0
+    ].proposition.endswith("red mask.")
+    assert knowledge.list(campaign.id, actor_id=actor.id, branch_id=alternate.id)[
+        0
+    ].proposition.endswith("blue mask.")
+
+
+def test_actor_knowledge_cannot_cite_an_event_from_another_branch(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Event causality")
+    actor = CharacterService(database).create(
+        system_id="dnd5e",
+        campaign_id=campaign.id,
+        name="Witness",
+        character_type="npc",
+    )
+    snapshots = SnapshotService(database)
+    base = snapshots.create(campaign.id, label="Before split")
+    event = EventService(database).add(campaign.id, summary="Only the main branch sees this")
+    fact = MemoryService(database).add(
+        campaign.id,
+        subject="Main-only fact",
+        content="Only the main branch recorded this.",
+    )
+    snapshots.create(campaign.id, label="Main-only event")
+    alternate = BranchService(database).create(
+        campaign.id,
+        name="did-not-see-event",
+        from_snapshot_id=base.id,
+    )
+    snapshots.checkout_branch(campaign.id, alternate.id)
+
+    with pytest.raises(LookupError, match="not visible on branch"):
+        MemoryService(database).revise(
+            fact.id,
+            content="This must not import the fact into the sibling branch.",
+        )
+    with pytest.raises(LookupError, match="not visible on branch"):
+        ActorKnowledgeService(database).add(
+            campaign.id,
+            actor_id=actor.id,
+            knowledge_key="impossible-witness",
+            proposition="I saw the main-branch event.",
+            source_event_id=event.id,
+        )
+
+
+def test_snapshot_is_full_and_validates_actor_knowledge_bindings(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Full save")
+    actor = CharacterService(database).create(
+        system_id="dnd5e",
+        campaign_id=campaign.id,
+        name="Archivist",
+        character_type="npc",
+        sheet={"hp": 7},
+    )
+    ActorKnowledgeService(database).add(
+        campaign.id,
+        actor_id=actor.id,
+        knowledge_key="sealed-door",
+        proposition="The eastern door is sealed.",
+    )
+    snapshots = SnapshotService(database)
+    saved = snapshots.create(campaign.id, label="Complete state")
+    document = snapshots.get(campaign.id, saved.slot)
+
+    assert document["storage_mode"] == "full"
+    assert document["payload"]["campaign"]["name"] == "Full save"
+    assert document["payload"]["characters"][0]["sheet"] == {"hp": 7}
+    assert document["payload"]["actor_knowledge"][0]["knowledge_key"] == "sealed-door"
+    assert document["valid"] is True
+
+    with database.transaction() as session:
+        revision_id = session.scalar(
+            select(SnapshotActorKnowledgeBinding.revision_id).where(
+                SnapshotActorKnowledgeBinding.snapshot_id == saved.id
+            )
+        )
+        session.get(ActorKnowledgeRevision, revision_id).proposition = "Tampered ledger value."
+    assert snapshots.verify(campaign.id, saved.slot) is False
+    with pytest.raises(SnapshotIntegrityError, match="wrong revision"):
+        snapshots.restore(campaign.id, saved.slot)
+    with database.transaction() as session:
+        session.get(ActorKnowledgeRevision, revision_id).proposition = "The eastern door is sealed."
+    assert snapshots.verify(campaign.id, saved.slot) is True
+
+    with database.transaction() as session:
+        session.execute(
+            delete(SnapshotActorKnowledgeBinding).where(
+                SnapshotActorKnowledgeBinding.snapshot_id == saved.id
+            )
+        )
+
+    assert snapshots.verify(campaign.id, saved.slot) is False
+    with pytest.raises(SnapshotIntegrityError, match="actor-knowledge bindings"):
+        snapshots.restore(campaign.id, saved.slot)
+
+
+def test_snapshot_head_flag_tracks_all_branch_refs_and_parent_cannot_be_forged(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="DAG heads")
+    snapshots = SnapshotService(database)
+    base = snapshots.create(campaign.id, label="Base")
+    BranchService(database).create(
+        campaign.id,
+        name="still-at-base",
+        from_snapshot_id=base.id,
+    )
+    next_save = snapshots.create(campaign.id, label="Main advances")
+
+    heads = {item.id: item.is_head for item in snapshots.list(campaign.id)}
+    assert heads == {base.id: True, next_save.id: True}
+    with pytest.raises(ValueError, match="checked-out branch head"):
+        snapshots.create(campaign.id, label="Forged ancestry", parent_id=base.id)
+
+
+def test_branch_checkout_refuses_to_mix_unsaved_state_with_saved_continuity(database) -> None:
+    campaigns = CampaignService(database)
+    campaign = campaigns.create(system_id="dnd5e", name="Clean checkout", state={"clock": 0})
+    snapshots = SnapshotService(database)
+    branches = BranchService(database)
+
+    with pytest.raises(ValueError, match="snapshot before branching"):
+        branches.create(campaign.id, name="no-baseline")
+
+    base = snapshots.create(campaign.id, label="Clock zero")
+    main = branches.current(campaign.id)
+    alternate = branches.create(
+        campaign.id,
+        name="clock-zero-copy",
+        from_snapshot_id=base.id,
+    )
+    campaigns.update(campaign.id, state={"clock": 1})
+
+    with pytest.raises(ValueError, match="unsaved changes"):
+        snapshots.checkout_branch(campaign.id, alternate.id)
+    assert branches.current(campaign.id).id == main.id
+    assert campaigns.get(campaign.id).state == {"clock": 1}
+
+    snapshots.create(campaign.id, label="Clock one")
+    snapshots.checkout_branch(campaign.id, alternate.id)
+    assert campaigns.get(campaign.id).state == {"clock": 0}
 
 
 def test_state_mutation_replaces_campaign_and_character_documents_atomically(database) -> None:
@@ -499,9 +684,10 @@ def test_state_mutation_persists_rule_receipts_in_the_same_group(database) -> No
     assert fork_receipts[0].receipt == receipts[0].receipt
 
     RevisionService(database).undo(campaign.id)
-    assert RuleReceiptService(database).list(
-        campaign.id, branch_id=receipts[0].branch_id
-    )[0].applied is False
+    assert (
+        RuleReceiptService(database).list(campaign.id, branch_id=receipts[0].branch_id)[0].applied
+        is False
+    )
     assert RuleReceiptService(database).list(campaign.id, branch_id=fork.id)[0].applied is True
 
 
