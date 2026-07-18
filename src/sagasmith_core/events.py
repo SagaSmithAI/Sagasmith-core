@@ -13,6 +13,8 @@ from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.database import Database
 from sagasmith_core.models import Campaign, CampaignEvent, SnapshotEventBinding
 
+_AUDIENCE_SCOPES = {"dm", "public", "party", "player", "actor"}
+
 
 @dataclass(frozen=True)
 class CampaignEventInfo:
@@ -40,6 +42,8 @@ class EventService:
         audience_scope: str = "dm",
         branch_id: str | None = None,
     ) -> CampaignEventInfo:
+        if audience_scope not in _AUDIENCE_SCOPES:
+            raise ValueError(f"invalid event audience scope: {audience_scope}")
         with self.database.transaction() as session:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:

@@ -494,7 +494,11 @@ class SnapshotService:
             return {
                 "summary": "Campaign baseline",
                 "plot_progress": [],
-                "characters": [item["name"] for item in current.get("characters", [])],
+                "characters": [
+                    item["name"]
+                    for item in current.get("characters", [])
+                    if item.get("character_type") == "pc"
+                ],
                 "locations": [],
                 "events": [],
                 "future_impact": [],
@@ -509,10 +513,14 @@ class SnapshotService:
         old_characters = {item["id"]: item for item in previous.get("characters", [])}
         new_characters = {item["id"]: item for item in current.get("characters", [])}
         character_changes = [
-            item["name"] for key, item in new_characters.items() if old_characters.get(key) != item
+            item["name"]
+            for key, item in new_characters.items()
+            if item.get("character_type") == "pc" and old_characters.get(key) != item
         ]
         removed = [
-            item["name"] for key, item in old_characters.items() if key not in new_characters
+            item["name"]
+            for key, item in old_characters.items()
+            if item.get("character_type") == "pc" and key not in new_characters
         ]
         old_scenes = {
             (item.get("scope_id", "party"), item["scene_id"]): item
@@ -528,6 +536,15 @@ class SnapshotService:
             item["id"]
             for item in current.get("memories", [])
             if item["revision"]["id"] not in old_memories
+            and item["revision"].get("metadata", {}).get("disclosure_scope", "dm")
+            in {"public", "party", "player"}
+        ]
+        old_event_ids = {item["id"] for item in previous.get("events", [])}
+        event_changes = [
+            item["summary"]
+            for item in current.get("events", [])
+            if item["id"] not in old_event_ids
+            and item.get("audience_scope") in {"public", "party", "player"}
         ]
         summary_parts = []
         if changed:
@@ -538,13 +555,15 @@ class SnapshotService:
             summary_parts.append("advanced scenes")
         if memory_candidates:
             summary_parts.append("recorded memories")
+        if event_changes:
+            summary_parts.append("recorded events")
         return {
             "summary": "; ".join(summary_parts) or "No material state changes",
             "plot_progress": scene_changes,
             "characters": character_changes,
             "removed_characters": removed,
             "locations": [],
-            "events": [],
+            "events": event_changes,
             "future_impact": [],
             "player_choices": [],
             "memory_candidates": memory_candidates,

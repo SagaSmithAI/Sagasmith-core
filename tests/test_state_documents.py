@@ -9,6 +9,7 @@ from sagasmith_core import (
     CampaignService,
     CharacterService,
     CharacterStateUpdate,
+    ContinuityService,
     EventService,
     IdempotencyService,
     MemoryService,
@@ -455,6 +456,112 @@ def test_branch_scoped_facts_events_and_actor_knowledge_do_not_leak(database) ->
     assert knowledge.list(campaign.id, actor_id=actor.id, branch_id=main.id)[
         0
     ].proposition.endswith("guard room.")
+
+
+def test_actor_scoped_events_follow_visible_actor_knowledge(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Separate witnesses")
+    characters = CharacterService(database)
+    witness = characters.create(
+        system_id="dnd5e", campaign_id=campaign.id, name="Witness", character_type="pc"
+    )
+    unaware = characters.create(
+        system_id="dnd5e", campaign_id=campaign.id, name="Unaware", character_type="pc"
+    )
+    event = EventService(database).add(
+        campaign.id,
+        event_type="revelation",
+        summary="The witness sees the masked visitor leave.",
+        audience_scope="actor",
+    )
+    ActorKnowledgeService(database).add(
+        campaign.id,
+        actor_id=witness.id,
+        knowledge_key="masked-visitor-departed",
+        proposition="The masked visitor left by the east door.",
+        source_event_id=event.id,
+        disclosure_scope="owner",
+    )
+    continuity = ContinuityService(database)
+
+    seen = continuity.context(
+        campaign.id,
+        actor_id=witness.id,
+        audience="player",
+        query="masked visitor",
+    )
+    hidden = continuity.context(
+        campaign.id,
+        actor_id=unaware.id,
+        audience="player",
+        query="masked visitor",
+    )
+
+    assert [item["id"] for item in seen["events"]] == [event.id]
+    assert [item["knowledge_key"] for item in seen["actor_knowledge"]] == [
+        "masked-visitor-departed"
+    ]
+    assert hidden["events"] == []
+    assert hidden["actor_knowledge"] == []
+
+
+def test_event_and_actor_knowledge_reject_unknown_visibility_scopes(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Visibility enums")
+    actor = CharacterService(database).create(
+        system_id="dnd5e", campaign_id=campaign.id, name="Witness", character_type="pc"
+    )
+    with pytest.raises(ValueError, match="event audience scope"):
+        EventService(database).add(
+            campaign.id,
+            summary="Invalid audience",
+            audience_scope="somebody",
+        )
+    with pytest.raises(ValueError, match="actor-knowledge disclosure scope"):
+        ActorKnowledgeService(database).add(
+            campaign.id,
+            actor_id=actor.id,
+            knowledge_key="invalid-scope",
+            proposition="This must be rejected.",
+            disclosure_scope="somebody",
+        )
+
+
+def test_snapshot_recap_only_contains_party_safe_deltas(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Safe recap")
+    characters = CharacterService(database)
+    hero = characters.create(
+        system_id="dnd5e", campaign_id=campaign.id, name="Hero", character_type="pc"
+    )
+    hidden_npc = characters.create(
+        system_id="dnd5e", campaign_id=campaign.id, name="Hidden Spy", character_type="npc"
+    )
+    snapshots = SnapshotService(database)
+    snapshots.create(campaign.id, label="Before changes")
+
+    characters.update(hidden_npc.id, summary="The hidden spy changed plans.")
+    characters.update(hero.id, summary="The hero was wounded.")
+    EventService(database).add(
+        campaign.id,
+        summary="The party reached the bridge.",
+        audience_scope="party",
+    )
+    EventService(database).add(
+        campaign.id,
+        summary="The spy poisoned the well.",
+        audience_scope="dm",
+    )
+    MemoryService(database).add(
+        campaign.id,
+        content="The spy poisoned the well.",
+        metadata={"disclosure_scope": "dm"},
+    )
+    saved = snapshots.create(campaign.id, label="After changes")
+    recap = snapshots.get(campaign.id, saved.slot)["recap"]
+
+    assert recap["characters"] == ["Hero"]
+    assert recap["events"] == ["The party reached the bridge."]
+    assert recap["memory_candidates"] == []
+    assert "Hidden Spy" not in str(recap)
+    assert "poisoned" not in str(recap)
 
 
 def test_same_actor_knowledge_key_can_diverge_independently_on_sibling_branches(

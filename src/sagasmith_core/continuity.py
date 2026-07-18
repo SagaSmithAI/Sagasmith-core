@@ -44,15 +44,6 @@ class ContinuityService:
         )
         facts = self.facts.search(campaign_id, query or " ", limit=limit, branch_id=branch.id)
         events = self.events.list(campaign_id, limit=limit, branch_id=branch.id)
-        if audience == "player":
-            facts = [
-                item
-                for item in facts
-                if item.metadata.get("disclosure_scope", "dm") in {"public", "party", "player"}
-            ]
-            events = [
-                item for item in events if item.audience_scope in {"public", "party", "player"}
-            ]
         knowledge = []
         if actor_id:
             knowledge = self.knowledge.search(
@@ -62,12 +53,26 @@ class ContinuityService:
                 branch_id=branch.id,
                 limit=limit,
             )
-            if audience == "player":
-                knowledge = [
-                    item
-                    for item in knowledge
-                    if item.disclosure_scope in {"owner", "party", "public", "player"}
-                ]
+        if audience == "player":
+            facts = [
+                item
+                for item in facts
+                if item.metadata.get("disclosure_scope", "dm") in {"public", "party", "player"}
+            ]
+            knowledge = [
+                item
+                for item in knowledge
+                if item.disclosure_scope in {"owner", "party", "public", "player"}
+            ]
+            actor_event_ids = {
+                item.source_event_id for item in knowledge if item.source_event_id is not None
+            }
+            events = [
+                item
+                for item in events
+                if item.audience_scope in {"public", "party", "player"}
+                or (item.audience_scope == "actor" and item.id in actor_event_ids)
+            ]
         current = self.branches.current(campaign_id)
         if branch.id == current.id:
             scoped_state = self.modules.current_scene(campaign_id, scope_id=scope_id)

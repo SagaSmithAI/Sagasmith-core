@@ -22,6 +22,7 @@ from sagasmith_core.models import (
 from sagasmith_core.retrieval import lexical_score
 
 _STATUSES = {"known", "belief", "rumor", "false_belief", "forgotten", "modified", "superseded"}
+_DISCLOSURE_SCOPES = {"dm", "owner", "party", "public", "player"}
 
 
 @dataclass(frozen=True)
@@ -60,6 +61,7 @@ class ActorKnowledgeService:
         branch_id: str | None = None,
     ) -> ActorKnowledgeInfo:
         self._validate_status(epistemic_status)
+        self._validate_disclosure_scope(disclosure_scope)
         with self.database.transaction() as session:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
@@ -126,6 +128,7 @@ class ActorKnowledgeService:
         branch_id: str | None = None,
     ) -> ActorKnowledgeInfo:
         self._validate_status(epistemic_status)
+        self._validate_disclosure_scope(disclosure_scope)
         with self.database.transaction() as session:
             knowledge = session.get(ActorKnowledge, knowledge_id)
             if knowledge is None:
@@ -251,6 +254,11 @@ class ActorKnowledgeService:
     def _validate_status(value: str) -> None:
         if value not in _STATUSES:
             raise ValueError(f"invalid epistemic status: {value}")
+
+    @staticmethod
+    def _validate_disclosure_scope(value: str) -> None:
+        if value not in _DISCLOSURE_SCOPES:
+            raise ValueError(f"invalid actor-knowledge disclosure scope: {value}")
 
     @staticmethod
     def _validate_event(
