@@ -702,6 +702,50 @@ def test_snapshot_is_full_and_validates_actor_knowledge_bindings(database) -> No
         snapshots.restore(campaign.id, saved.slot)
 
 
+def test_restore_head_recaptures_materialized_actors_and_actor_knowledge(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Restore capture")
+    characters = CharacterService(database)
+    actor = characters.create(
+        system_id="dnd5e",
+        campaign_id=campaign.id,
+        name="Witness",
+        character_type="pc",
+        sheet={"hp": 7},
+    )
+    ActorKnowledgeService(database).add(
+        campaign.id,
+        actor_id=actor.id,
+        knowledge_key="sealed-door",
+        proposition="The eastern door is sealed.",
+        disclosure_scope="owner",
+    )
+    snapshots = SnapshotService(database)
+    saved = snapshots.create(campaign.id, label="Witness knows")
+    characters.update(actor.id, sheet={"hp": 1})
+
+    restored = snapshots.restore(campaign.id, saved.slot)
+    document = snapshots.get(campaign.id, restored.slot)
+
+    assert document["valid"] is True
+    assert document["payload"]["characters"] == [
+        {
+            "id": actor.id,
+            "system_id": "dnd5e",
+            "character_type": "pc",
+            "template_id": None,
+            "name": "Witness",
+            "player_name": None,
+            "summary": "",
+            "sheet": {"hp": 7},
+            "notes": {},
+            "revision": 1,
+        }
+    ]
+    assert [item["knowledge_key"] for item in document["payload"]["actor_knowledge"]] == [
+        "sealed-door"
+    ]
+
+
 def test_snapshot_head_flag_tracks_all_branch_refs_and_parent_cannot_be_forged(database) -> None:
     campaign = CampaignService(database).create(system_id="dnd5e", name="DAG heads")
     snapshots = SnapshotService(database)

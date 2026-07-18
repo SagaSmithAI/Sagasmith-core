@@ -681,6 +681,10 @@ class SnapshotService:
                 )
                 .values(applied=item["applied"], redoable=item["redoable"])
             )
+        # Database sessions deliberately disable autoflush.  A restore immediately
+        # creates its new branch-head snapshot, so materialized characters and scene
+        # progress must reach the database before that snapshot queries live state.
+        session.flush()
 
     @staticmethod
     def _row(session, campaign_id: str, slot: int) -> CampaignSnapshot:
