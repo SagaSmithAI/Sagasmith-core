@@ -806,6 +806,31 @@ class ModuleAsset(TimestampMixin, Base):
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+class ModuleContentReview(TimestampMixin, Base):
+    """Immutable source-backed transcription of content absent from the PDF text layer."""
+
+    __tablename__ = "module_content_reviews"
+    __table_args__ = (
+        Index("ix_module_content_review_key", "module_id", "content_key", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    module_id: Mapped[str] = mapped_column(
+        ForeignKey("module_sources.id", ondelete="CASCADE"),
+        index=True,
+    )
+    scene_id: Mapped[str] = mapped_column(
+        ForeignKey("module_scenes.id", ondelete="CASCADE"),
+        index=True,
+    )
+    content_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    content_kind: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    normalized_content: Mapped[str] = mapped_column(Text, nullable=False)
+    checksum: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    evidence_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
 class ImportJob(TimestampMixin, Base):
     """Durable authoring workflow state for rulebooks and adventure modules."""
 

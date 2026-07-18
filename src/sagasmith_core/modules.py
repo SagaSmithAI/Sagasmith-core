@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import uuid
 from collections.abc import Sequence
@@ -26,6 +27,7 @@ from sagasmith_core.models import (
     ModuleAsset,
     ModuleChapter,
     ModuleChunk,
+    ModuleContentReview,
     ModuleScene,
     ModuleSource,
     SceneProgress,
@@ -850,6 +852,143 @@ class ModuleService:
                 row.metadata_json = {**dict(row.metadata_json or {}), **dict(metadata or {})}
             session.flush()
             return self._asset_view(row)
+
+    def review_content(
+        self,
+        *,
+        campaign_id: str,
+        module_id: str,
+        scene_id: str,
+        content_key: str,
+        content_kind: str,
+        normalized_content: str,
+        source_asset_id: str,
+        page_number: int,
+        reviewer: str,
+        observation: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Record an immutable human/agent-reviewed transcription with page evidence."""
+        key = str(content_key).strip()
+        kind = str(content_kind).strip()
+        content = str(normalized_content).strip()
+        reviewer_value = str(reviewer).strip()
+        observation_value = " ".join(str(observation).split()).strip()
+        if not key or len(key) > 200:
+            raise ValueError("content_key must contain 1 to 200 characters")
+        if not kind or len(kind) > 100:
+            raise ValueError("content_kind must contain 1 to 100 characters")
+        if not content:
+            raise ValueError("normalized_content is required")
+        if len(content) > 200_000:
+            raise ValueError("normalized_content exceeds 200000 characters")
+        if isinstance(page_number, bool) or not isinstance(page_number, int) or page_number < 1:
+            raise ValueError("page_number must be a 1-based integer")
+        if not reviewer_value:
+            raise ValueError("reviewer is required")
+        if not observation_value or len(observation_value) > 500:
+            raise ValueError("observation must contain 1 to 500 characters")
+        metadata_value = dict(metadata or {})
+        checksum = hashlib.sha256(
+            json.dumps(
+                {
+                    "content_key": key,
+                    "content_kind": kind,
+                    "normalized_content": content,
+                    "metadata": metadata_value,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+        with self.database.transaction() as session:
+            source = session.get(ModuleSource, module_id)
+            if source is None or source.campaign_id != campaign_id:
+                raise LookupError(module_id)
+            scene = session.get(ModuleScene, scene_id)
+            if scene is None or scene.module_id != module_id:
+                raise ValueError("content review scene must belong to the module")
+            asset = session.get(ModuleAsset, source_asset_id)
+            if asset is None or asset.module_id != module_id:
+                raise ValueError("content review asset must belong to the module")
+            media_type = str(asset.media_type or "").casefold()
+            if media_type != "application/pdf" and not media_type.startswith("image/"):
+                raise ValueError("content review requires a PDF or rendered image asset")
+            asset_metadata = dict(asset.metadata_json or {})
+            if media_type == "application/pdf":
+                page_count = int(asset_metadata.get("page_count") or 0)
+                if page_count and page_number > page_count:
+                    raise ValueError(f"content review page exceeds PDF page count {page_count}")
+            else:
+                source_page = int(asset_metadata.get("source_page") or 0)
+                if source_page and source_page != page_number:
+                    raise ValueError("content review page must match rendered asset source_page")
+
+            existing = session.scalar(
+                select(ModuleContentReview).where(
+                    ModuleContentReview.module_id == module_id,
+                    ModuleContentReview.scene_id == scene_id,
+                    ModuleContentReview.content_key == key,
+                    ModuleContentReview.checksum == checksum,
+                )
+            )
+            if existing is not None:
+                return self._content_review_view(existing)
+            row = ModuleContentReview(
+                id=str(uuid.uuid4()),
+                module_id=module_id,
+                scene_id=scene_id,
+                content_key=key,
+                content_kind=kind,
+                normalized_content=content,
+                checksum=checksum,
+                evidence_json={
+                    "asset_id": asset.id,
+                    "asset_checksum": asset.checksum,
+                    "page": page_number,
+                    "reviewer": reviewer_value,
+                    "observation": observation_value,
+                    "confidence": "reviewed_image",
+                },
+                metadata_json=metadata_value,
+            )
+            session.add(row)
+            session.flush()
+            return self._content_review_view(row)
+
+    def list_content_reviews(
+        self,
+        campaign_id: str,
+        module_id: str,
+        *,
+        content_kind: str | None = None,
+        content_key: str | None = None,
+    ) -> list[dict[str, Any]]:
+        with self.database.transaction() as session:
+            source = session.get(ModuleSource, module_id)
+            if source is None or source.campaign_id != campaign_id:
+                raise LookupError(module_id)
+            query = select(ModuleContentReview).where(ModuleContentReview.module_id == module_id)
+            if content_kind is not None:
+                query = query.where(ModuleContentReview.content_kind == content_kind)
+            if content_key is not None:
+                query = query.where(ModuleContentReview.content_key == content_key)
+            rows = session.scalars(
+                query.order_by(ModuleContentReview.created_at, ModuleContentReview.id)
+            )
+            return [self._content_review_view(row) for row in rows]
+
+    def get_content_review(self, campaign_id: str, review_id: str) -> dict[str, Any]:
+        with self.database.transaction() as session:
+            row = session.get(ModuleContentReview, review_id)
+            if row is None:
+                raise LookupError(review_id)
+            source = session.get(ModuleSource, row.module_id)
+            if source is None or source.campaign_id != campaign_id:
+                raise LookupError(review_id)
+            return self._content_review_view(row)
 
     def expand(self, chunk_id: str) -> dict[str, Any]:
         with self.database.transaction() as session:
@@ -1678,6 +1817,22 @@ class ModuleService:
             "media_type": asset.media_type,
             "checksum": asset.checksum,
             "metadata": dict(asset.metadata_json or {}),
+        }
+
+    @staticmethod
+    def _content_review_view(row: ModuleContentReview) -> dict[str, Any]:
+        return {
+            "id": row.id,
+            "module_id": row.module_id,
+            "scene_id": row.scene_id,
+            "content_key": row.content_key,
+            "content_kind": row.content_kind,
+            "normalized_content": row.normalized_content,
+            "checksum": row.checksum,
+            "evidence": dict(row.evidence_json or {}),
+            "metadata": dict(row.metadata_json or {}),
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+            "updated_at": row.updated_at.isoformat() if row.updated_at else None,
         }
 
     @staticmethod

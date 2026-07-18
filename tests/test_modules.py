@@ -389,3 +389,60 @@ def test_reviewed_visual_connections_merge_and_restore_with_scene_progress(
     restored = modules.current_scene(campaign.id)
     assert restored["progress"]["state"]["spatial_review"]["connections"][0]["to"] == "d6"
     assert restored["spatial"]["review"]["connection_count"] == 1
+
+
+def test_image_only_module_content_can_be_reviewed_with_page_evidence(database, tmp_path) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Reviewed content")
+    source = tmp_path / "creatures.pdf"
+    source.write_bytes(b"test-pdf")
+    content = "# Appendix D\n## Cultists\nThe statblock is printed as an image.\n"
+    modules = ModuleService(database)
+    imported = modules.ingest(
+        campaign_id=campaign.id,
+        source_key="creatures.pdf",
+        title="Creatures",
+        content=content,
+        normalized_document=NormalizedDocument(
+            content=content,
+            media_type="application/pdf",
+            source_path=str(source),
+            checksum="b" * 64,
+            page_count=20,
+        ),
+    )
+    scene = modules.scene_index(campaign.id)[0]
+    asset = modules.list_assets(campaign.id, imported.module_id)[0]
+    markdown = "# Necromite\n\n*Medium humanoid, neutral evil*"
+    reviewed = modules.review_content(
+        campaign_id=campaign.id,
+        module_id=imported.module_id,
+        scene_id=scene["scene_id"],
+        content_key="necromite-of-myrkul",
+        content_kind="dnd5e_2014_statblock",
+        normalized_content=markdown,
+        source_asset_id=asset["id"],
+        page_number=12,
+        reviewer="dm:test",
+        observation="The creature card is visibly printed on the left side of the page.",
+        metadata={"language": "en"},
+    )
+    replay = modules.review_content(
+        campaign_id=campaign.id,
+        module_id=imported.module_id,
+        scene_id=scene["scene_id"],
+        content_key="necromite-of-myrkul",
+        content_kind="dnd5e_2014_statblock",
+        normalized_content=markdown,
+        source_asset_id=asset["id"],
+        page_number=12,
+        reviewer="dm:test",
+        observation="The creature card is visibly printed on the left side of the page.",
+        metadata={"language": "en"},
+    )
+
+    assert replay["id"] == reviewed["id"]
+    assert reviewed["evidence"]["asset_checksum"] == "b" * 64
+    assert modules.get_content_review(campaign.id, reviewed["id"])["normalized_content"] == markdown
+    assert [item["id"] for item in modules.list_content_reviews(
+        campaign.id, imported.module_id, content_kind="dnd5e_2014_statblock"
+    )] == [reviewed["id"]]
