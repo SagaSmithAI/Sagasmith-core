@@ -458,6 +458,48 @@ def test_branch_scoped_facts_events_and_actor_knowledge_do_not_leak(database) ->
     ].proposition.endswith("guard room.")
 
 
+def test_event_and_all_witness_knowledge_commit_or_rollback_together(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Atomic witnesses")
+    characters = CharacterService(database)
+    first = characters.create(
+        system_id="dnd5e", campaign_id=campaign.id, name="First", character_type="pc"
+    )
+    second = characters.create(
+        system_id="dnd5e", campaign_id=campaign.id, name="Second", character_type="pc"
+    )
+    third = characters.create(
+        system_id="dnd5e", campaign_id=campaign.id, name="Third", character_type="pc"
+    )
+    events = EventService(database)
+    knowledge = ActorKnowledgeService(database)
+
+    event, knowledge_ids = events.add_with_actor_knowledge(
+        campaign.id,
+        summary="First and second see the sigil.",
+        actor_ids=[first.id, second.id],
+        knowledge_key="sigil",
+        proposition="The sigil is blue.",
+        audience_scope="party",
+    )
+    assert len(knowledge_ids) == 2
+    assert knowledge.list(campaign.id, actor_id=first.id)[0].source_event_id == event.id
+    assert knowledge.list(campaign.id, actor_id=second.id)[0].source_event_id == event.id
+
+    with pytest.raises(ValueError, match="knowledge key already exists"):
+        events.add_with_actor_knowledge(
+            campaign.id,
+            summary="This write must fully roll back.",
+            actor_ids=[third.id, first.id],
+            knowledge_key="sigil",
+            proposition="A conflicting observation.",
+        )
+
+    assert [item.summary for item in events.list(campaign.id)] == [
+        "First and second see the sigil."
+    ]
+    assert knowledge.list(campaign.id, actor_id=third.id) == []
+
+
 def test_actor_scoped_events_follow_visible_actor_knowledge(database) -> None:
     campaign = CampaignService(database).create(system_id="dnd5e", name="Separate witnesses")
     characters = CharacterService(database)

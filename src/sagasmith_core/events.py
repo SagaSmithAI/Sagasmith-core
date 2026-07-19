@@ -11,7 +11,15 @@ from sqlalchemy import func, select
 from sagasmith_core.branches import resolve_branch
 from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.database import Database
-from sagasmith_core.models import Campaign, CampaignEvent, SnapshotEventBinding
+from sagasmith_core.models import (
+    ActorKnowledge,
+    ActorKnowledgeRevision,
+    BranchActorKnowledgeHead,
+    Campaign,
+    CampaignEvent,
+    Character,
+    SnapshotEventBinding,
+)
 
 _AUDIENCE_SCOPES = {"dm", "public", "party", "player", "actor"}
 
@@ -70,6 +78,112 @@ class EventService:
             session.add(row)
             session.flush()
             return self._info(row)
+
+    def add_with_actor_knowledge(
+        self,
+        campaign_id: str,
+        *,
+        summary: str,
+        actor_ids: list[str],
+        knowledge_key: str,
+        proposition: str,
+        event_type: str = "narrative",
+        payload: dict[str, Any] | None = None,
+        audience_scope: str = "dm",
+        disclosure_scope: str = "owner",
+        branch_id: str | None = None,
+    ) -> tuple[CampaignEventInfo, list[str]]:
+        """Append one event and every witnessed knowledge head atomically."""
+
+        if audience_scope not in _AUDIENCE_SCOPES:
+            raise ValueError(f"invalid event audience scope: {audience_scope}")
+        if disclosure_scope not in {"dm", "owner", "party", "public", "player"}:
+            raise ValueError(f"invalid actor-knowledge disclosure scope: {disclosure_scope}")
+        normalized_actor_ids = [str(item) for item in actor_ids]
+        if not normalized_actor_ids:
+            raise ValueError("actor_ids must not be empty")
+        if len(set(normalized_actor_ids)) != len(normalized_actor_ids):
+            raise ValueError("actor_ids must be unique")
+        with self.database.transaction() as session:
+            campaign = session.get(Campaign, campaign_id)
+            if campaign is None:
+                raise CampaignNotFoundError(campaign_id)
+            branch = resolve_branch(session, campaign, branch_id)
+            actors = [session.get(Character, actor_id) for actor_id in normalized_actor_ids]
+            if any(actor is None or actor.campaign_id != campaign_id for actor in actors):
+                raise ValueError("every knowledge actor must be a live character in this campaign")
+
+            knowledge_rows: list[ActorKnowledge] = []
+            for actor_id in normalized_actor_ids:
+                knowledge = session.scalar(
+                    select(ActorKnowledge).where(
+                        ActorKnowledge.actor_id == actor_id,
+                        ActorKnowledge.knowledge_key == knowledge_key,
+                    )
+                )
+                if knowledge is not None:
+                    head = session.get(
+                        BranchActorKnowledgeHead,
+                        {"branch_id": branch.id, "knowledge_id": knowledge.id},
+                    )
+                    if head is not None:
+                        raise ValueError(
+                            f"knowledge key already exists for actor: {knowledge_key}"
+                        )
+                else:
+                    knowledge = ActorKnowledge(
+                        id=str(uuid.uuid4()),
+                        campaign_id=campaign_id,
+                        actor_id=actor_id,
+                        knowledge_key=knowledge_key,
+                        subject_ref="",
+                    )
+                knowledge_rows.append(knowledge)
+
+            sequence = (
+                session.scalar(
+                    select(func.max(CampaignEvent.sequence)).where(
+                        CampaignEvent.campaign_id == campaign_id
+                    )
+                )
+                or 0
+            ) + 1
+            event = CampaignEvent(
+                id=str(uuid.uuid4()),
+                campaign_id=campaign_id,
+                sequence=sequence,
+                event_type=event_type,
+                summary=summary,
+                payload=payload or {},
+                audience_scope=audience_scope,
+                branch_id=branch.id,
+            )
+            session.add(event)
+            session.flush()
+            knowledge_ids: list[str] = []
+            for knowledge in knowledge_rows:
+                revision = ActorKnowledgeRevision(
+                    id=str(uuid.uuid4()),
+                    knowledge_id=knowledge.id,
+                    proposition=proposition,
+                    epistemic_status="known",
+                    confidence=3,
+                    source_event_id=event.id,
+                    cause="witnessed",
+                    disclosure_scope=disclosure_scope,
+                )
+                session.add_all([knowledge, revision])
+                session.flush()
+                session.add(
+                    BranchActorKnowledgeHead(
+                        branch_id=branch.id,
+                        knowledge_id=knowledge.id,
+                        revision_id=revision.id,
+                    )
+                )
+                knowledge_ids.append(knowledge.id)
+            session.flush()
+            return self._info(event), knowledge_ids
 
     def list(
         self, campaign_id: str, *, limit: int = 50, branch_id: str | None = None
