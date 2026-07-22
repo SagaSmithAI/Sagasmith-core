@@ -80,6 +80,8 @@ The package supplies its profile, character schema, module parser, and rules eng
 
 - Snapshots, branches, and revisions are authoritative; vector hits are not.
 - A snapshot is a self-contained full checkpoint; only its `recap` is a delta from the parent. Integrity covers the payload, DAG ancestry, and fact/event/actor-knowledge bindings.
+- Objective facts use stable `fact_key` identities with branch-scoped revision heads and optimistic revision checks. Subjective actor knowledge remains a separate ledger.
+- Prefer `ContinuityCommitService` at scene boundaries so the event, fact upserts, actor-knowledge changes, and optional snapshot commit as one transaction.
 - Checkout never silently discards a dirty worktree; save a snapshot before switching branches.
 - Writes should use expected revisions and idempotency keys so agent retries cannot duplicate effects.
 - Player reads are limited to visible branches, scene scopes, and actor knowledge; GM authority requires an explicit principal/role.

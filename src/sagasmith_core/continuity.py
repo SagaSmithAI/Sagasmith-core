@@ -57,16 +57,26 @@ class ContinuityService:
             facts = [
                 item
                 for item in facts
-                if item.metadata.get("disclosure_scope", "dm") in {"public", "party", "player"}
+                if item.disclosure_scope in {"public", "party", "player"}
             ]
             knowledge = [
                 item
                 for item in knowledge
                 if item.disclosure_scope in {"owner", "party", "public", "player"}
             ]
-            actor_event_ids = {
-                item.source_event_id for item in knowledge if item.source_event_id is not None
-            }
+            # Authorization must not depend on which knowledge items happened to
+            # rank in the response's top-N window.  Use the actor's complete active
+            # branch view to decide whether an actor-scoped event is visible.
+            actor_event_ids = set()
+            if actor_id:
+                actor_event_ids = {
+                    item.source_event_id
+                    for item in self.knowledge.list(
+                        campaign_id, actor_id=actor_id, branch_id=branch.id
+                    )
+                    if item.source_event_id is not None
+                    and item.disclosure_scope in {"owner", "party", "public", "player"}
+                }
             events = [
                 item
                 for item in events

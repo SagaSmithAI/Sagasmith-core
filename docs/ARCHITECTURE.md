@@ -14,6 +14,10 @@ Core owns system-neutral concepts:
   to a party, split group, or individual player;
 - parser and system-plugin protocols;
 - transactional database, migrations, and optional vector storage.
+- an objective fact ledger with stable identities and branch-local revision heads;
+- an actor-knowledge ledger for beliefs, rumors, false beliefs, and disclosure;
+- atomic continuity commits spanning an event, fact changes, actor knowledge,
+  and an optional snapshot.
 
 System packages own game semantics:
 
@@ -46,9 +50,24 @@ sagasmith-coc ├─> sagasmith-core
 custom-system ─┘
 ```
 
-Core has no Agent-platform adapter. nanobot and other platforms load a
-system-specific Skill and call the system Runtime's JSON CLI through their
-normal shell capability.
+Core has no Agent-platform adapter. Agent hosts use a system-specific MCP
+server as the authority and the MCP server composes these Core services.
+
+## Continuity ownership
+
+`CampaignMemory` stores objective world facts. Every new integration should
+supply a campaign-stable `fact_key`, normally composed from a subject reference
+and predicate. `MemoryRevision` stores lifecycle, disclosure, importance,
+valid-time, and source-event evidence; `BranchFactHead` selects the revision
+visible in one timeline.
+
+`ActorKnowledge` stores what one live actor believes or remembers. It must not
+be replaced by campaign facts or free-form character notes. Forgotten and
+superseded heads are excluded from normal recall but remain available for audit.
+
+At a scene boundary, `ContinuityCommitService` is the preferred write path. It
+allocates the event sequence atomically and either commits every requested
+ledger update and snapshot or rolls the whole unit back.
 
 Scene progress uses a stable `scope_id`: `party`, `group:<id>`, or
 `player:<character-id>`. A scoped current-scene read may inherit `party` until

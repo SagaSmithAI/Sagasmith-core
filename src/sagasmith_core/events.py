@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import select, update
 
 from sagasmith_core.branches import resolve_branch
 from sagasmith_core.campaigns import CampaignNotFoundError
@@ -57,27 +57,15 @@ class EventService:
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
             branch = resolve_branch(session, campaign, branch_id)
-            sequence = (
-                session.scalar(
-                    select(func.max(CampaignEvent.sequence)).where(
-                        CampaignEvent.campaign_id == campaign_id
-                    )
-                )
-                or 0
-            ) + 1
-            row = CampaignEvent(
-                id=str(uuid.uuid4()),
-                campaign_id=campaign_id,
-                sequence=sequence,
+            return self._add_in_session(
+                session,
+                campaign,
+                branch.id,
                 event_type=event_type,
                 summary=summary,
-                payload=payload or {},
+                payload=payload,
                 audience_scope=audience_scope,
-                branch_id=branch.id,
             )
-            session.add(row)
-            session.flush()
-            return self._info(row)
 
     def add_with_actor_knowledge(
         self,
@@ -140,26 +128,17 @@ class EventService:
                     )
                 knowledge_rows.append(knowledge)
 
-            sequence = (
-                session.scalar(
-                    select(func.max(CampaignEvent.sequence)).where(
-                        CampaignEvent.campaign_id == campaign_id
-                    )
-                )
-                or 0
-            ) + 1
-            event = CampaignEvent(
-                id=str(uuid.uuid4()),
-                campaign_id=campaign_id,
-                sequence=sequence,
+            event_info = self._add_in_session(
+                session,
+                campaign,
+                branch.id,
                 event_type=event_type,
                 summary=summary,
-                payload=payload or {},
+                payload=payload,
                 audience_scope=audience_scope,
-                branch_id=branch.id,
             )
-            session.add(event)
-            session.flush()
+            event = session.get(CampaignEvent, event_info.id)
+            assert event is not None
             knowledge_ids: list[str] = []
             for knowledge in knowledge_rows:
                 revision = ActorKnowledgeRevision(
@@ -183,7 +162,42 @@ class EventService:
                 )
                 knowledge_ids.append(knowledge.id)
             session.flush()
-            return self._info(event), knowledge_ids
+            return event_info, knowledge_ids
+
+    def _add_in_session(
+        self,
+        session,
+        campaign: Campaign,
+        branch_id: str,
+        *,
+        event_type: str,
+        summary: str,
+        payload: dict[str, Any] | None,
+        audience_scope: str,
+    ) -> CampaignEventInfo:
+        if audience_scope not in _AUDIENCE_SCOPES:
+            raise ValueError(f"invalid event audience scope: {audience_scope}")
+        sequence = session.scalar(
+            update(Campaign)
+            .where(Campaign.id == campaign.id)
+            .values(event_sequence=Campaign.event_sequence + 1)
+            .returning(Campaign.event_sequence)
+        )
+        if sequence is None:
+            raise CampaignNotFoundError(campaign.id)
+        row = CampaignEvent(
+            id=str(uuid.uuid4()),
+            campaign_id=campaign.id,
+            sequence=int(sequence),
+            event_type=event_type,
+            summary=summary,
+            payload=payload or {},
+            audience_scope=audience_scope,
+            branch_id=branch_id,
+        )
+        session.add(row)
+        session.flush()
+        return self._info(row)
 
     def list(
         self, campaign_id: str, *, limit: int = 50, branch_id: str | None = None

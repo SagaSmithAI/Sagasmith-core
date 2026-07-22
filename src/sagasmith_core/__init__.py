@@ -5,6 +5,7 @@ from sagasmith_core.branches import BranchService
 from sagasmith_core.campaigns import CampaignService
 from sagasmith_core.characters import CharacterService
 from sagasmith_core.continuity import ContinuityService
+from sagasmith_core.continuity_commit import ContinuityCommitService
 from sagasmith_core.database import Database
 from sagasmith_core.documents import (
     DOCUMENT_NORMALIZER_VERSION,
@@ -57,6 +58,7 @@ __all__ = [
     "CharacterStateUpdate",
     "CharacterService",
     "ContinuityService",
+    "ContinuityCommitService",
     "Database",
     "DocumentQualityError",
     "EmbeddingProfile",

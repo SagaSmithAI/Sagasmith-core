@@ -88,12 +88,16 @@ my_system = "my_package.system:get_system"
 ## 稳定性与安全边界
 
 - Snapshot、branch 和 revision 是权威连续性；向量命中不是。
+- 客观事实使用稳定 `fact_key`，在分支内通过 revision head 演进；修订应携带
+  `expected_revision_id`。角色的主观知识继续使用独立的 ActorKnowledge ledger。
+- 场景收尾优先使用 `ContinuityCommitService`，在同一事务中写入事件、事实、
+  角色认知和可选 Snapshot，避免产生半保存状态。
 - Snapshot 在语义上是可独立恢复的全量 checkpoint；`recap` 才是相对父节点的差量摘要。完整性校验同时覆盖 payload、DAG 祖先链以及 fact/event/actor-knowledge bindings。
 - checkout 不会静默丢弃工作区：当前分支有未保存变化时，必须先创建 Snapshot。
 - 写操作应携带 expected revision 与幂等键，避免 Agent 重试造成重复副作用。
 - 玩家读取只允许当前可见分支、场景作用域和角色知识；GM 权限需要显式 principal/role。
 - 文档解析结果保留来源、页码、质量警告和 parser profile；调用方必须处理缺失的富元数据。
-- 这是 Alpha 项目，当前 schema 不承诺旧版数据库迁移兼容；迁移文件只服务当前主线模型。
+- 这是 Alpha 项目；主线迁移会保留当前已发布 schema 的数据，但不承诺任意旧实验版本或 downgrade 路径。
 
 ## 开发
 

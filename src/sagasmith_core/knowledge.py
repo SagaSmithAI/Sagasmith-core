@@ -66,54 +66,22 @@ class ActorKnowledgeService:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
-            actor = session.get(Character, actor_id)
-            if actor is None or actor.campaign_id != campaign_id:
-                raise ValueError("actor must be a live character in this campaign")
             branch = resolve_branch(session, campaign, branch_id)
-            self._validate_event(
-                session, source_event_id, campaign_id, branch.id, branch.head_snapshot_id
-            )
-            existing = session.scalar(
-                select(ActorKnowledge).where(
-                    ActorKnowledge.actor_id == actor_id,
-                    ActorKnowledge.knowledge_key == knowledge_key,
-                )
-            )
-            if existing is not None:
-                head = session.get(
-                    BranchActorKnowledgeHead,
-                    {"branch_id": branch.id, "knowledge_id": existing.id},
-                )
-                if head is not None:
-                    raise ValueError(f"knowledge key already exists for actor: {knowledge_key}")
-                if subject_ref and existing.subject_ref and subject_ref != existing.subject_ref:
-                    raise ValueError("knowledge key has a different subject on another branch")
-                knowledge = existing
-            else:
-                knowledge = ActorKnowledge(
-                    id=str(uuid.uuid4()),
-                    campaign_id=campaign_id,
-                    actor_id=actor_id,
-                    knowledge_key=knowledge_key,
-                    subject_ref=subject_ref,
-                )
-            revision = self._revision(
-                knowledge.id,
+            return self._add_in_session(
+                session,
+                campaign,
+                branch.id,
+                branch.head_snapshot_id,
+                actor_id=actor_id,
+                knowledge_key=knowledge_key,
                 proposition=proposition,
+                subject_ref=subject_ref,
                 epistemic_status=epistemic_status,
                 confidence=confidence,
                 source_event_id=source_event_id,
                 cause=cause,
                 disclosure_scope=disclosure_scope,
             )
-            session.add_all([knowledge, revision])
-            session.flush()
-            session.add(
-                BranchActorKnowledgeHead(
-                    branch_id=branch.id, knowledge_id=knowledge.id, revision_id=revision.id
-                )
-            )
-            return self._info(knowledge, revision)
 
     def revise(
         self,
@@ -126,6 +94,7 @@ class ActorKnowledgeService:
         cause: str = "told_by",
         disclosure_scope: str = "dm",
         branch_id: str | None = None,
+        expected_revision_id: str | None = None,
     ) -> ActorKnowledgeInfo:
         self._validate_status(epistemic_status)
         self._validate_disclosure_scope(disclosure_scope)
@@ -137,40 +106,151 @@ class ActorKnowledgeService:
             if campaign is None:
                 raise CampaignNotFoundError(knowledge.campaign_id)
             branch = resolve_branch(session, campaign, branch_id)
-            self._validate_event(
-                session, source_event_id, campaign.id, branch.id, branch.head_snapshot_id
-            )
-            head = session.get(
-                BranchActorKnowledgeHead,
-                {"branch_id": branch.id, "knowledge_id": knowledge.id},
-            )
-            if head is None:
-                raise LookupError(f"knowledge {knowledge_id} is not visible on branch {branch.id}")
-            parent_id = head.revision_id
-            revision = self._revision(
-                knowledge.id,
-                parent_id=parent_id,
+            return self._revise_in_session(
+                session,
+                knowledge,
+                branch.id,
+                branch.head_snapshot_id,
                 proposition=proposition,
                 epistemic_status=epistemic_status,
                 confidence=confidence,
                 source_event_id=source_event_id,
                 cause=cause,
                 disclosure_scope=disclosure_scope,
+                expected_revision_id=expected_revision_id,
             )
-            session.add(revision)
-            session.flush()
-            head.revision_id = revision.id
-            return self._info(knowledge, revision)
+
+    def _add_in_session(
+        self,
+        session,
+        campaign: Campaign,
+        branch_id: str,
+        head_snapshot_id: str | None,
+        *,
+        actor_id: str,
+        knowledge_key: str,
+        proposition: str,
+        subject_ref: str,
+        epistemic_status: str,
+        confidence: int,
+        source_event_id: str | None,
+        cause: str,
+        disclosure_scope: str,
+    ) -> ActorKnowledgeInfo:
+        self._validate_status(epistemic_status)
+        self._validate_disclosure_scope(disclosure_scope)
+        actor = session.get(Character, actor_id)
+        if actor is None or actor.campaign_id != campaign.id:
+            raise ValueError("actor must be a live character in this campaign")
+        self._validate_event(
+            session, source_event_id, campaign.id, branch_id, head_snapshot_id
+        )
+        existing = session.scalar(
+            select(ActorKnowledge).where(
+                ActorKnowledge.actor_id == actor_id,
+                ActorKnowledge.knowledge_key == knowledge_key,
+            )
+        )
+        if existing is not None:
+            head = session.get(
+                BranchActorKnowledgeHead,
+                {"branch_id": branch_id, "knowledge_id": existing.id},
+            )
+            if head is not None:
+                raise ValueError(f"knowledge key already exists for actor: {knowledge_key}")
+            if subject_ref and existing.subject_ref and subject_ref != existing.subject_ref:
+                raise ValueError("knowledge key has a different subject on another branch")
+            knowledge = existing
+        else:
+            knowledge = ActorKnowledge(
+                id=str(uuid.uuid4()),
+                campaign_id=campaign.id,
+                actor_id=actor_id,
+                knowledge_key=knowledge_key,
+                subject_ref=subject_ref,
+            )
+        revision = self._revision(
+            knowledge.id,
+            proposition=proposition,
+            epistemic_status=epistemic_status,
+            confidence=confidence,
+            source_event_id=source_event_id,
+            cause=cause,
+            disclosure_scope=disclosure_scope,
+        )
+        session.add_all([knowledge, revision])
+        session.flush()
+        session.add(
+            BranchActorKnowledgeHead(
+                branch_id=branch_id, knowledge_id=knowledge.id, revision_id=revision.id
+            )
+        )
+        return self._info(knowledge, revision)
+
+    def _revise_in_session(
+        self,
+        session,
+        knowledge: ActorKnowledge,
+        branch_id: str,
+        head_snapshot_id: str | None,
+        *,
+        proposition: str,
+        epistemic_status: str,
+        confidence: int,
+        source_event_id: str | None,
+        cause: str,
+        disclosure_scope: str,
+        expected_revision_id: str | None,
+    ) -> ActorKnowledgeInfo:
+        self._validate_status(epistemic_status)
+        self._validate_disclosure_scope(disclosure_scope)
+        self._validate_event(
+            session,
+            source_event_id,
+            knowledge.campaign_id,
+            branch_id,
+            head_snapshot_id,
+        )
+        head = session.get(
+            BranchActorKnowledgeHead,
+            {"branch_id": branch_id, "knowledge_id": knowledge.id},
+        )
+        if head is None:
+            raise LookupError(f"knowledge {knowledge.id} is not visible on branch {branch_id}")
+        if expected_revision_id is not None and head.revision_id != expected_revision_id:
+            raise ValueError(
+                f"expected actor-knowledge revision {expected_revision_id}, "
+                f"current revision is {head.revision_id}"
+            )
+        revision = self._revision(
+            knowledge.id,
+            parent_id=head.revision_id,
+            proposition=proposition,
+            epistemic_status=epistemic_status,
+            confidence=confidence,
+            source_event_id=source_event_id,
+            cause=cause,
+            disclosure_scope=disclosure_scope,
+        )
+        session.add(revision)
+        session.flush()
+        head.revision_id = revision.id
+        return self._info(knowledge, revision)
 
     def list(
-        self, campaign_id: str, *, actor_id: str, branch_id: str | None = None
+        self,
+        campaign_id: str,
+        *,
+        actor_id: str,
+        branch_id: str | None = None,
+        include_inactive: bool = False,
     ) -> list[ActorKnowledgeInfo]:
         with self.database.transaction() as session:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
             branch = resolve_branch(session, campaign, branch_id)
-            rows = session.execute(
+            statement = (
                 select(ActorKnowledge, ActorKnowledgeRevision)
                 .join(
                     BranchActorKnowledgeHead,
@@ -186,6 +266,13 @@ class ActorKnowledgeService:
                 )
                 .order_by(ActorKnowledge.knowledge_key)
             )
+            if not include_inactive:
+                statement = statement.where(
+                    ActorKnowledgeRevision.epistemic_status.not_in(
+                        {"forgotten", "superseded"}
+                    )
+                )
+            rows = session.execute(statement)
             return [self._info(*row) for row in rows]
 
     def get(self, knowledge_id: str, *, branch_id: str | None = None) -> ActorKnowledgeInfo:
@@ -216,8 +303,14 @@ class ActorKnowledgeService:
         query: str,
         branch_id: str | None = None,
         limit: int = 8,
+        include_inactive: bool = False,
     ) -> list[ActorKnowledgeInfo]:
-        values = self.list(campaign_id, actor_id=actor_id, branch_id=branch_id)
+        values = self.list(
+            campaign_id,
+            actor_id=actor_id,
+            branch_id=branch_id,
+            include_inactive=include_inactive,
+        )
         ranked = sorted(
             values,
             key=lambda value: (

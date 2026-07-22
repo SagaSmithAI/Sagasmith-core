@@ -65,7 +65,7 @@ def _checksum(value: dict[str, Any]) -> str:
 
 
 class SnapshotService:
-    SCHEMA_VERSION = 3
+    SCHEMA_VERSION = 4
 
     def __init__(self, database: Database) -> None:
         self.database = database
@@ -444,6 +444,9 @@ class SnapshotService:
                     "id": memory.id,
                     "kind": memory.kind,
                     "subject": memory.subject,
+                    "fact_key": memory.fact_key,
+                    "subject_ref": memory.subject_ref,
+                    "predicate": memory.predicate,
                     "created_at": memory.created_at.isoformat(),
                     "updated_at": memory.updated_at.isoformat(),
                     "revision": {
@@ -451,6 +454,14 @@ class SnapshotService:
                         "snapshot_id": revision.snapshot_id,
                         "content": revision.content,
                         "metadata": dict(revision.metadata_json),
+                        "status": revision.status,
+                        "valid_from": (
+                            revision.valid_from.isoformat() if revision.valid_from else None
+                        ),
+                        "valid_to": revision.valid_to.isoformat() if revision.valid_to else None,
+                        "source_event_ids": list(revision.source_event_ids),
+                        "importance": revision.importance,
+                        "disclosure_scope": revision.disclosure_scope,
                         "created_at": revision.created_at.isoformat(),
                     },
                 }
@@ -750,7 +761,7 @@ class SnapshotService:
     @classmethod
     def _assert_integrity(cls, session, row: CampaignSnapshot) -> None:
         """Verify the full payload, DAG ancestry, and indexed continuity bindings."""
-        if row.schema_version != cls.SCHEMA_VERSION:
+        if row.schema_version not in {3, cls.SCHEMA_VERSION}:
             raise SnapshotIntegrityError(
                 "snapshot schema is unsupported; create a new snapshot with the current runtime"
             )
@@ -797,7 +808,7 @@ class SnapshotService:
             revision = session.get(MemoryRevision, revision_id)
             item = payload_facts[memory_id]
             revision_item = dict(item.get("revision") or {})
-            if (
+            invalid = (
                 memory is None
                 or revision is None
                 or revision.memory_id != memory_id
@@ -805,12 +816,33 @@ class SnapshotService:
                 or memory.kind != item.get("kind")
                 or memory.subject != item.get("subject")
                 or memory.created_at.isoformat() != item.get("created_at")
-                or memory.updated_at.isoformat() != item.get("updated_at")
+                or (
+                    row.schema_version < 4
+                    and memory.updated_at.isoformat() != item.get("updated_at")
+                )
                 or revision.snapshot_id != revision_item.get("snapshot_id")
                 or revision.content != revision_item.get("content")
                 or dict(revision.metadata_json) != dict(revision_item.get("metadata") or {})
                 or revision.created_at.isoformat() != revision_item.get("created_at")
-            ):
+            )
+            if not invalid and row.schema_version >= 4:
+                invalid = (
+                    memory.fact_key != item.get("fact_key")
+                    or memory.subject_ref != item.get("subject_ref")
+                    or memory.predicate != item.get("predicate")
+                    or revision.status != revision_item.get("status")
+                    or (
+                        revision.valid_from.isoformat() if revision.valid_from else None
+                    )
+                    != revision_item.get("valid_from")
+                    or (revision.valid_to.isoformat() if revision.valid_to else None)
+                    != revision_item.get("valid_to")
+                    or list(revision.source_event_ids)
+                    != list(revision_item.get("source_event_ids") or [])
+                    or revision.importance != revision_item.get("importance")
+                    or revision.disclosure_scope != revision_item.get("disclosure_scope")
+                )
+            if invalid:
                 raise SnapshotIntegrityError("snapshot fact binding targets the wrong revision")
 
         payload_knowledge = {

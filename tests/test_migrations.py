@@ -22,6 +22,24 @@ def test_bundled_migration_builds_schema(tmp_path: Path) -> None:
         assert "rule_pack_versions" in inspector.get_table_names()
         assert "campaign_rule_activations" in inspector.get_table_names()
         assert "rule_resolution_receipts" in inspector.get_table_names()
+        assert "event_sequence" in {
+            column["name"] for column in inspector.get_columns("campaigns")
+        }
+        memory_columns = {
+            column["name"] for column in inspector.get_columns("campaign_memories")
+        }
+        revision_columns = {
+            column["name"] for column in inspector.get_columns("memory_revisions")
+        }
+        assert {"fact_key", "subject_ref", "predicate"}.issubset(memory_columns)
+        assert {
+            "status",
+            "valid_from",
+            "valid_to",
+            "source_event_ids",
+            "importance",
+            "disclosure_scope",
+        }.issubset(revision_columns)
     finally:
         database.dispose()
 
@@ -146,5 +164,52 @@ def test_branch_continuity_does_not_backfill_existing_campaigns(tmp_path: Path) 
             ).scalar_one()
         assert active_branch_id is None
         assert branch_count == 0
+    finally:
+        database.dispose()
+
+
+def test_long_term_memory_v2_backfills_stable_legacy_fact_keys(tmp_path: Path) -> None:
+    database = Database(sqlite_database_url(tmp_path / "legacy-memory.db"))
+    config = alembic_config(database.url)
+    with database.engine.begin() as connection:
+        connection.exec_driver_sql(
+            "CREATE TABLE campaign_memories ("
+            "id VARCHAR(36) PRIMARY KEY, campaign_id VARCHAR(36) NOT NULL, "
+            "kind VARCHAR(64) NOT NULL DEFAULT 'fact', subject VARCHAR(300) NOT NULL DEFAULT '', "
+            "created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL)"
+        )
+        connection.exec_driver_sql(
+            "CREATE TABLE memory_revisions ("
+            "id VARCHAR(36) PRIMARY KEY, memory_id VARCHAR(36) NOT NULL, "
+            "parent_id VARCHAR(36), snapshot_id VARCHAR(36), content TEXT NOT NULL, "
+            "metadata_json JSON NOT NULL DEFAULT '{}', active BOOLEAN NOT NULL DEFAULT 1, "
+            "created_at DATETIME NOT NULL)"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO campaign_memories "
+            "(id, campaign_id, kind, subject, created_at, updated_at) VALUES "
+            "('memory-1', 'campaign-1', 'fact', 'Door', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO memory_revisions "
+            "(id, memory_id, content, metadata_json, active, created_at) VALUES "
+            "('revision-1', 'memory-1', 'Locked', '{}', 1, CURRENT_TIMESTAMP)"
+        )
+
+    command.stamp(config, "20260722_14")
+    database.upgrade_schema()
+
+    try:
+        with database.engine.connect() as connection:
+            row = connection.exec_driver_sql(
+                "SELECT fact_key, subject_ref, predicate FROM campaign_memories "
+                "WHERE id = 'memory-1'"
+            ).one()
+            revision = connection.exec_driver_sql(
+                "SELECT status, source_event_ids, importance, disclosure_scope "
+                "FROM memory_revisions WHERE id = 'revision-1'"
+            ).one()
+        assert tuple(row) == ("legacy:memory-1", "", "")
+        assert tuple(revision) == ("active", "[]", 3, "dm")
     finally:
         database.dispose()
