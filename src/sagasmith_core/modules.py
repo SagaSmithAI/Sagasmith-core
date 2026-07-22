@@ -17,8 +17,7 @@ from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.database import Database
 from sagasmith_core.documents import (
     NormalizedDocument,
-    OcrProvider,
-    normalize_document,
+    converter_for,
     page_for_offset,
     strip_page_markers,
 )
@@ -549,17 +548,9 @@ class ModuleService:
         vector_store: VectorStore | None = None,
         activate: bool = True,
         logical_source_key: str | None = None,
-        ocr_provider: OcrProvider | None = None,
-        document_cache_dir: str | Path | None = None,
-        expected_checksum: str | None = None,
     ) -> ModuleIngestResult:
         source_path = Path(path).expanduser().resolve()
-        document = normalize_document(
-            source_path,
-            ocr_provider=ocr_provider,
-            cache_dir=document_cache_dir,
-            expected_checksum=expected_checksum,
-        )
+        document = converter_for(source_path).convert(source_path)
         return self.ingest(
             campaign_id=campaign_id,
             source_key=source_key or source_path.name,
@@ -585,16 +576,8 @@ class ModuleService:
         path: str | Path,
         *,
         parser: MarkdownModuleParser | None = None,
-        ocr_provider: OcrProvider | None = None,
-        document_cache_dir: str | Path | None = None,
-        expected_checksum: str | None = None,
     ) -> dict[str, Any]:
-        document = normalize_document(
-            path,
-            ocr_provider=ocr_provider,
-            cache_dir=document_cache_dir,
-            expected_checksum=expected_checksum,
-        )
+        document = converter_for(path).convert(path)
         selected_parser = parser or MarkdownModuleParser()
         parsed = selected_parser.parse(document.content)
         return {
@@ -616,17 +599,9 @@ class ModuleService:
         path: str | Path,
         *,
         parser: MarkdownModuleParser | None = None,
-        ocr_provider: OcrProvider | None = None,
-        document_cache_dir: str | Path | None = None,
-        expected_checksum: str | None = None,
     ) -> dict[str, Any]:
         """Parse a module without persistence and expose stable scene/package evidence."""
-        document = normalize_document(
-            path,
-            ocr_provider=ocr_provider,
-            cache_dir=document_cache_dir,
-            expected_checksum=expected_checksum,
-        )
+        document = converter_for(path).convert(path)
         selected_parser = parser or MarkdownModuleParser()
         parsed = selected_parser.parse(document.content)
         scenes: list[dict[str, Any]] = []

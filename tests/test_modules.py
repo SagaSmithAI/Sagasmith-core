@@ -115,24 +115,6 @@ def test_module_preview_exposes_scene_page_and_line_provenance(database, tmp_pat
     assert preview["scenes"][0]["end_line"] is not None
 
 
-def test_module_preview_reuses_shared_document_cache(database, tmp_path) -> None:
-    source = tmp_path / "module.md"
-    source.write_text("# Chapter One\n\n## Arrival\n\nText.\n", encoding="utf-8")
-    cache = tmp_path / "normalized-modules"
-    service = ModuleService(database)
-
-    first = service.preview_path(source, document_cache_dir=cache)
-    second = service.preview_path(
-        source,
-        document_cache_dir=cache,
-        expected_checksum=first["checksum"],
-    )
-
-    assert first["metadata"]["normalization_cache_hit"] is False
-    assert second["metadata"]["normalization_cache_hit"] is True
-    assert second["scenes"] == first["scenes"]
-
-
 def test_scene_stable_keys_preserve_cjk_chapter_identity(database) -> None:
     campaign = CampaignService(database).create(system_id="dnd5e", name="中文章节")
     service = ModuleService(database)
