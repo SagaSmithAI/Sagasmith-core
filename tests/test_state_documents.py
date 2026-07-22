@@ -26,6 +26,7 @@ from sagasmith_core.documents import (
     NormalizedDocument,
     PageLocator,
     PdfDocumentConverter,
+    _pdf_form_metadata,
     build_structured_markdown,
     normalize_document,
 )
@@ -377,6 +378,27 @@ def test_pdf_normalization_drops_corrupt_duplicate_of_outline_chapter() -> None:
 
     assert "# Chapter 3: The Savage Frontier" in content
     assert "TuE SAVAGE" not in content
+
+
+def test_pdf_form_metadata_distinguishes_populated_values_from_blank_fields() -> None:
+    class FormReader:
+        @staticmethod
+        def get_fields():
+            return {
+                "Front_Character Name": {"/V": "Smalls"},
+                "Front_Level": {"/V": None},
+                "Front_Save Int": {"/V": "/Yes"},
+                "Unused": {"/V": "/Off"},
+            }
+
+    metadata = _pdf_form_metadata(FormReader())
+
+    assert metadata["form_field_count"] == 4
+    assert metadata["populated_form_field_count"] == 2
+    assert metadata["populated_form_fields"] == {
+        "Front_Character Name": "Smalls",
+        "Front_Save Int": "/Yes",
+    }
 
 
 def test_pdf_normalization_does_not_promote_chapter_references_in_body() -> None:

@@ -16,7 +16,7 @@ from statistics import median
 from typing import Any, Protocol
 from uuid import uuid4
 
-DOCUMENT_NORMALIZER_VERSION = "12"
+DOCUMENT_NORMALIZER_VERSION = "13"
 _DOCUMENT_CACHE_SCHEMA = 1
 _PDF_EXTRACTION_CACHE_SCHEMA = 1
 _PDF_TEXT_EXTRACTOR_VERSION = "3"
@@ -882,6 +882,37 @@ def _write_json_atomic(target: Path, value: dict[str, Any]) -> None:
     temporary.replace(target)
 
 
+def _pdf_form_metadata(reader: Any) -> dict[str, Any]:
+    """Preserve AcroForm evidence without treating blank templates as filled data."""
+    try:
+        fields = dict(reader.get_fields() or {})
+    except Exception:
+        fields = {}
+    populated: dict[str, Any] = {}
+    for raw_name, raw_field in fields.items():
+        name = str(raw_name).strip()
+        if not name or not isinstance(raw_field, dict):
+            continue
+        value = raw_field.get("/V")
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple)):
+            rendered: Any = [str(item) for item in value]
+        elif isinstance(value, (str, int, float, bool)):
+            rendered = value
+        else:
+            rendered = str(value)
+        if rendered in ("", "/Off", "Off", []):
+            continue
+        populated[name] = rendered
+    return {
+        "form_field_count": len(fields),
+        "form_field_names": sorted(str(name) for name in fields),
+        "populated_form_field_count": len(populated),
+        "populated_form_fields": populated,
+    }
+
+
 class MarkdownDocumentConverter:
     def convert(
         self,
@@ -1022,6 +1053,7 @@ class PdfDocumentConverter:
 
         reader = PdfReader(str(source))
         bookmarks = self._bookmarks(reader)
+        form_metadata = _pdf_form_metadata(reader)
         content, stats, structure_warnings = build_structured_markdown(
             pages,
             bookmarks,
@@ -1053,6 +1085,7 @@ class PdfDocumentConverter:
                 "normalizer_version": DOCUMENT_NORMALIZER_VERSION,
                 "text_extractor": "pypdfium2",
                 "outline_extractor": "pypdf",
+                **form_metadata,
                 "ocr_provider": self.ocr_provider.name if ocr_pages else None,
                 "ocr_pages": ocr_pages,
                 "extraction_cache_hit": extraction_cache_hit,
