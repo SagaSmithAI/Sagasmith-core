@@ -3,12 +3,23 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
+import unicodedata
+from bisect import bisect_right
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
+from statistics import median
 from typing import Any, Protocol
+from uuid import uuid4
+
+DOCUMENT_NORMALIZER_VERSION = "5"
+_DOCUMENT_CACHE_SCHEMA = 1
+_PDF_EXTRACTION_CACHE_SCHEMA = 1
+_PDF_TEXT_EXTRACTOR_VERSION = "3"
 
 
 class DocumentQualityError(RuntimeError):
@@ -55,13 +66,23 @@ class RenderedDocumentPage:
 
 
 class DocumentConverter(Protocol):
-    def convert(self, path: str | Path) -> NormalizedDocument: ...
+    def convert(
+        self,
+        path: str | Path,
+        *,
+        source_checksum: str | None = None,
+    ) -> NormalizedDocument: ...
 
 
 class OcrProvider(Protocol):
     name: str
 
-    def extract(self, path: str | Path) -> list[str]: ...
+    def extract(
+        self,
+        path: str | Path,
+        *,
+        page_numbers: Sequence[int] | None = None,
+    ) -> list[str]: ...
 
 
 _CHAPTER_RE = re.compile(
@@ -74,6 +95,32 @@ _LIST_RE = re.compile(r"^(?:[-*•●▪◼]|\d+[.)、]|[A-Za-z][.)])\s*")
 _PAGE_NUMBER_RE = re.compile(r"^\d{1,4}$")
 _TERMINAL_RE = re.compile(r"[。！？!?；;：:…][”’』」）》】]*$")
 _PAGE_MARKER_RE = re.compile(r"^<!-- page: \d+ -->$")
+_PAGE_MARKER_SCAN_RE = re.compile(r"(?m)^<!-- page: (\d+) -->$")
+
+
+def file_sha256(path: str | Path, *, chunk_size: int = 1024 * 1024) -> str:
+    """Hash a file without loading a complete rulebook into memory."""
+    digest = hashlib.sha256()
+    with Path(path).expanduser().resolve().open("rb") as stream:
+        while block := stream.read(chunk_size):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+class PageLocator:
+    """Resolve normalized-content offsets to pages in O(log n) time."""
+
+    def __init__(self, content: str) -> None:
+        markers = [
+            (match.start(), int(match.group(1)))
+            for match in _PAGE_MARKER_SCAN_RE.finditer(content)
+        ]
+        self._offsets = [item[0] for item in markers]
+        self._pages = [item[1] for item in markers]
+
+    def page_for_offset(self, offset: int) -> int | None:
+        index = bisect_right(self._offsets, offset) - 1
+        return self._pages[index] if index >= 0 else None
 
 
 def _normalize(value: str) -> str:
@@ -135,6 +182,34 @@ def _match_bookmarks(
             key = (bookmark.page, best_index)
             level = min(4, 2 + bookmark.depth)
             levels[key] = min(level, levels.get(key, level))
+            matched += 1
+    return levels, matched
+
+
+def _match_visual_headings(
+    pages: list[list[str]],
+    visual_headings: dict[int, list[tuple[str, int]]],
+) -> tuple[dict[tuple[int, int], int], int]:
+    levels: dict[tuple[int, int], int] = {}
+    matched = 0
+    for page_number, hints in visual_headings.items():
+        if not 1 <= page_number <= len(pages):
+            continue
+        available = set(range(len(pages[page_number - 1])))
+        for title, level in hints:
+            target = _normalize(title)
+            index = next(
+                (
+                    candidate
+                    for candidate in sorted(available)
+                    if target and _normalize(pages[page_number - 1][candidate]) == target
+                ),
+                None,
+            )
+            if index is None:
+                continue
+            available.remove(index)
+            levels[(page_number, index)] = level
             matched += 1
     return levels, matched
 
@@ -265,12 +340,16 @@ def _reflow_page(
 def build_structured_markdown(
     page_texts: list[str],
     bookmarks: list[DocumentBookmark] | None = None,
+    visual_headings: dict[int, list[tuple[str, int]]] | None = None,
 ) -> tuple[str, dict[str, Any], tuple[str, ...]]:
     """Normalize extracted PDF pages into provenance-preserving Markdown."""
     bookmarks = bookmarks or []
     pages = [[_clean_line(line) for line in text.splitlines()] for text in page_texts]
     repeated = _repeated_margin_lines(pages)
     heading_levels, matched = _match_bookmarks(pages, bookmarks)
+    visual_levels, matched_visual = _match_visual_headings(pages, visual_headings or {})
+    for key, level in visual_levels.items():
+        heading_levels.setdefault(key, level)
     toc_pages = {
         page_number
         for page_number, lines in enumerate(pages, start=1)
@@ -302,6 +381,8 @@ def build_structured_markdown(
         {
             "bookmark_count": len(bookmarks),
             "matched_bookmarks": matched,
+            "visual_heading_count": len(visual_levels),
+            "matched_visual_headings": matched_visual,
             "heading_count": heading_count,
             "room_heading_count": room_count,
             "toc_pages": sorted(toc_pages),
@@ -310,23 +391,323 @@ def build_structured_markdown(
     )
 
 
+def _page_quality(text: str) -> dict[str, Any]:
+    characters = len(text)
+    non_whitespace = sum(not char.isspace() for char in text)
+    private_use = sum(unicodedata.category(char) == "Co" for char in text)
+    control = sum(
+        unicodedata.category(char) == "Cc" and char not in "\t\r\n"
+        for char in text
+    )
+    replacement = text.count("\ufffd")
+    denominator = max(characters, 1)
+    return {
+        "characters": characters,
+        "non_whitespace_characters": non_whitespace,
+        "private_use_characters": private_use,
+        "control_characters": control,
+        "replacement_characters": replacement,
+        "private_use_ratio": private_use / denominator,
+        "control_ratio": control / denominator,
+        "replacement_ratio": replacement / denominator,
+        "sparse": non_whitespace < 20,
+        "corrupt": (
+            private_use / denominator >= 0.02
+            or control / denominator >= 0.01
+            or replacement / denominator >= 0.01
+        ),
+    }
+
+
+def _document_quality(page_texts: Sequence[str]) -> dict[str, Any]:
+    page_stats = [_page_quality(text) for text in page_texts]
+    characters = sum(int(item["characters"]) for item in page_stats)
+    non_whitespace = sum(int(item["non_whitespace_characters"]) for item in page_stats)
+    private_use = sum(int(item["private_use_characters"]) for item in page_stats)
+    control = sum(int(item["control_characters"]) for item in page_stats)
+    replacement = sum(int(item["replacement_characters"]) for item in page_stats)
+    denominator = max(characters, 1)
+    sparse_pages = [index for index, item in enumerate(page_stats, start=1) if item["sparse"]]
+    corrupt_pages = [index for index, item in enumerate(page_stats, start=1) if item["corrupt"]]
+    suspect_pages = sorted(set(sparse_pages) | set(corrupt_pages))
+    return {
+        "character_count": characters,
+        "non_whitespace_character_count": non_whitespace,
+        "text_page_count": len(page_stats) - len(sparse_pages),
+        "sparse_page_count": len(sparse_pages),
+        "sparse_pages": sparse_pages,
+        "corrupt_text_page_count": len(corrupt_pages),
+        "corrupt_text_pages": corrupt_pages,
+        "suspect_page_count": len(suspect_pages),
+        "suspect_pages": suspect_pages,
+        "private_use_character_count": private_use,
+        "private_use_ratio": round(private_use / denominator, 6),
+        "control_character_count": control,
+        "control_ratio": round(control / denominator, 6),
+        "replacement_character_count": replacement,
+        "replacement_ratio": round(replacement / denominator, 6),
+        "text_page_coverage": round(
+            (len(page_stats) - len(sparse_pages)) / max(len(page_stats), 1), 6
+        ),
+    }
+
+
+class RapidOcrProvider:
+    """Lazy local OCR for pages whose PDF text layer is empty or corrupt."""
+
+    name = "rapidocr"
+
+    def __init__(self, *, scale: float = 2.0) -> None:
+        if not 1.0 <= scale <= 4.0:
+            raise ValueError("OCR scale must be between 1.0 and 4.0")
+        self.scale = float(scale)
+        self._engine: Any | None = None
+
+    @property
+    def cache_profile(self) -> str:
+        return f"{self.name}:scale={self.scale:.2f}"
+
+    def extract(
+        self,
+        path: str | Path,
+        *,
+        page_numbers: Sequence[int] | None = None,
+    ) -> list[str]:
+        try:
+            import pypdfium2 as pdfium
+            from rapidocr import RapidOCR
+        except ImportError as exc:
+            raise RuntimeError(
+                "OCR requires `pip install sagasmith-core[documents,ocr]`"
+            ) from exc
+        if self._engine is None:
+            self._engine = RapidOCR()
+        source = Path(path).expanduser().resolve()
+        document = pdfium.PdfDocument(str(source))
+        try:
+            selected = list(page_numbers or range(1, len(document) + 1))
+            if any(not 1 <= page_number <= len(document) for page_number in selected):
+                raise ValueError("OCR page number is outside the PDF")
+            result: list[str] = []
+            for page_number in selected:
+                page = document[page_number - 1]
+                try:
+                    bitmap = page.render(scale=self.scale)
+                    try:
+                        output = self._engine(bitmap.to_numpy())
+                    finally:
+                        bitmap.close()
+                finally:
+                    page.close()
+                texts = tuple(getattr(output, "txts", ()) or ())
+                result.append("\n".join(str(item).strip() for item in texts if str(item).strip()))
+            return result
+        finally:
+            document.close()
+
+
+def _visual_headings(text_page: Any) -> list[tuple[str, int]]:
+    """Recover headings from PDF font weight and rendered glyph height."""
+    try:
+        import ctypes
+
+        import pypdfium2.raw as pdfium_c
+    except ImportError:
+        return []
+    ranged = text_page.get_text_range(force_this=True)
+    offset = 0
+    styled: list[tuple[str, float, int, str]] = []
+    for raw_line in ranged.splitlines(keepends=True):
+        line = raw_line.rstrip("\r\n")
+        first_letter = next((index for index, char in enumerate(line) if char.isalpha()), None)
+        if first_letter is not None:
+            char_index = pdfium_c.FPDFText_GetCharIndexFromTextIndex(
+                text_page.raw, offset + first_letter
+            )
+            if char_index >= 0:
+                try:
+                    box = text_page.get_charbox(char_index)
+                    height = float(box[3] - box[1])
+                    weight = int(pdfium_c.FPDFText_GetFontWeight(text_page.raw, char_index))
+                    buffer = ctypes.create_string_buffer(256)
+                    flags = ctypes.c_long()
+                    pdfium_c.FPDFText_GetFontInfo(
+                        text_page.raw,
+                        char_index,
+                        buffer,
+                        len(buffer),
+                        ctypes.byref(flags),
+                    )
+                    styled.append(
+                        (
+                            line.strip(),
+                            height,
+                            weight,
+                            buffer.value.decode("utf-8", errors="replace"),
+                        )
+                    )
+                except Exception:
+                    pass
+        offset += len(raw_line)
+    eligible = [
+        (line, height, weight, font)
+        for line, height, weight, font in styled
+        if 3 <= len(line) <= 160 and not _PAGE_NUMBER_RE.fullmatch(line)
+    ]
+    if not eligible:
+        return []
+    body_height = median(height for _line, height, _weight, _font in eligible)
+    body_weight = Counter(
+        weight for line, _height, weight, _font in eligible if len(line) >= 20
+    ).most_common(1)
+    common_weight = body_weight[0][0] if body_weight else Counter(
+        weight for _line, _height, weight, _font in eligible
+    ).most_common(1)[0][0]
+    weights_informative = bool(common_weight) and len(
+        {weight for _line, _height, weight, _font in eligible}
+    ) > 1
+    result: list[tuple[str, int]] = []
+    field_label = re.compile(
+        r"(?i)^(?:armor|weapons|tools|skills|saving throws|hit dice|hit points at|"
+        r"casting time|range|components|duration)\s*:"
+    )
+    for line, height, weight, font in eligible:
+        if _TERMINAL_RE.search(line) or _LIST_RE.match(line):
+            continue
+        if field_label.match(line):
+            continue
+        ratio = height / max(body_height, 0.1)
+        strong_size = height >= 8.0 and ratio >= 1.35
+        small_caps = "smallcaps" in font.casefold() and height >= 7.0
+        distinct_weight = weights_informative and weight != common_weight and height >= 7.0
+        if not (strong_size or small_caps or distinct_weight):
+            continue
+        level = 3 if ratio >= 1.8 else 4 if ratio >= 1.4 else 5
+        result.append((line, level))
+    return result
+
+
+def _extract_pdfium_pages(path: Path) -> tuple[list[str], dict[int, list[tuple[str, int]]]]:
+    try:
+        import pypdfium2 as pdfium
+    except ImportError as exc:
+        raise RuntimeError(
+            "PDF conversion requires `pip install sagasmith-core[documents]`"
+        ) from exc
+    document = pdfium.PdfDocument(str(path))
+    try:
+        result: list[str] = []
+        headings: dict[int, list[tuple[str, int]]] = {}
+        for index in range(len(document)):
+            page = document[index]
+            try:
+                text_page = page.get_textpage()
+                try:
+                    result.append(text_page.get_text_bounded() or "")
+                    page_headings = _visual_headings(text_page)
+                    if page_headings:
+                        headings[index + 1] = page_headings
+                finally:
+                    text_page.close()
+            finally:
+                page.close()
+        return result, headings
+    finally:
+        document.close()
+
+
+def _ocr_suspect_pages(
+    provider: OcrProvider,
+    source: Path,
+    pages: list[str],
+    page_numbers: Sequence[int],
+) -> list[int]:
+    try:
+        extracted = provider.extract(source, page_numbers=page_numbers)
+    except TypeError:
+        # Compatibility with providers implementing the original all-pages contract.
+        all_pages = provider.extract(source)
+        extracted = [all_pages[page_number - 1] for page_number in page_numbers]
+    if len(extracted) != len(page_numbers):
+        raise DocumentQualityError(
+            "pdf_ocr_page_mismatch",
+            "OCR provider returned a different number of pages than requested",
+        )
+    replaced: list[int] = []
+    for page_number, text in zip(page_numbers, extracted, strict=True):
+        if str(text).strip():
+            pages[page_number - 1] = str(text)
+            replaced.append(page_number)
+    return replaced
+
+
+def _pdf_extraction_profile(ocr_provider: OcrProvider | None) -> str:
+    ocr = getattr(ocr_provider, "cache_profile", None) or getattr(
+        ocr_provider, "name", "none"
+    )
+    return f"pypdfium2:{_PDF_TEXT_EXTRACTOR_VERSION}:ocr={ocr}"
+
+
+def _pdf_extraction_cache_path(
+    cache_dir: Path,
+    checksum: str,
+    profile: str,
+) -> Path:
+    profile_hash = hashlib.sha256(profile.encode("utf-8")).hexdigest()[:12]
+    return cache_dir / "pdf-pages" / checksum[:2] / f"{checksum}-{profile_hash}.json"
+
+
+def _write_json_atomic(target: Path, value: dict[str, Any]) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
+    temporary.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+    temporary.replace(target)
+
+
 class MarkdownDocumentConverter:
-    def convert(self, path: str | Path) -> NormalizedDocument:
+    def convert(
+        self,
+        path: str | Path,
+        *,
+        source_checksum: str | None = None,
+    ) -> NormalizedDocument:
         source = Path(path).expanduser().resolve()
         content = source.read_text(encoding="utf-8")
+        heading_count = len(re.findall(r"(?m)^#{1,6}\s+\S", content))
         return NormalizedDocument(
             content=content,
             media_type="text/markdown",
             source_path=str(source),
-            checksum=hashlib.sha256(source.read_bytes()).hexdigest(),
+            checksum=source_checksum or file_sha256(source),
+            warnings=("no structural headings were recovered",) if not heading_count else (),
+            metadata={
+                "normalizer_profile": "markdown",
+                "normalizer_version": DOCUMENT_NORMALIZER_VERSION,
+                "heading_count": heading_count,
+            },
         )
 
 
 class PdfDocumentConverter:
-    def __init__(self, *, ocr_provider: OcrProvider | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        ocr_provider: OcrProvider | None = None,
+        extraction_cache_dir: str | Path | None = None,
+    ) -> None:
         self.ocr_provider = ocr_provider
+        self.extraction_cache_dir = (
+            Path(extraction_cache_dir).expanduser().resolve()
+            if extraction_cache_dir is not None
+            else None
+        )
 
-    def convert(self, path: str | Path) -> NormalizedDocument:
+    def convert(
+        self,
+        path: str | Path,
+        *,
+        source_checksum: str | None = None,
+    ) -> NormalizedDocument:
         source = Path(path).expanduser().resolve()
         try:
             from pypdf import PdfReader
@@ -334,29 +715,131 @@ class PdfDocumentConverter:
             raise RuntimeError(
                 "PDF conversion requires `pip install sagasmith-core[documents]`"
             ) from exc
-        reader = PdfReader(str(source))
-        pages = [page.extract_text() or "" for page in reader.pages]
-        sparse = sum(len(re.sub(r"\s+", "", page)) < 20 for page in pages)
-        if pages and sparse / len(pages) >= 0.8:
+        checksum = source_checksum or file_sha256(source)
+        extraction_profile = _pdf_extraction_profile(self.ocr_provider)
+        extraction_target = (
+            _pdf_extraction_cache_path(
+                self.extraction_cache_dir,
+                checksum,
+                extraction_profile,
+            )
+            if self.extraction_cache_dir is not None
+            else None
+        )
+        extracted = None
+        if extraction_target is not None and extraction_target.is_file():
+            try:
+                cached = json.loads(extraction_target.read_text(encoding="utf-8"))
+                cached_pages = [str(item) for item in cached["pages"]]
+                if (
+                    cached.get("schema") == _PDF_EXTRACTION_CACHE_SCHEMA
+                    and cached.get("checksum") == checksum
+                    and cached.get("profile") == extraction_profile
+                    and cached.get("pages_checksum")
+                    == hashlib.sha256("\x1e".join(cached_pages).encode("utf-8")).hexdigest()
+                ):
+                    extracted = (
+                        cached_pages,
+                        {
+                            int(page): [(str(title), int(level)) for title, level in hints]
+                            for page, hints in dict(cached.get("visual_headings") or {}).items()
+                        },
+                        dict(cached["initial_quality"]),
+                        [int(item) for item in cached.get("ocr_pages", [])],
+                    )
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                pass
+        extraction_cache_hit = extracted is not None
+        if extracted is None:
+            pages, visual_headings = _extract_pdfium_pages(source)
+            initial_quality = _document_quality(pages)
+            corrupt_pages = list(initial_quality["corrupt_text_pages"])
+            sparse_pages = list(initial_quality["sparse_pages"])
+            suspect_pages = sorted(
+                set(corrupt_pages)
+                | (
+                    set(sparse_pages)
+                    if pages and len(sparse_pages) / len(pages) >= 0.8
+                    else set()
+                )
+            )
+            ocr_pages: list[int] = []
+            if suspect_pages and self.ocr_provider is not None:
+                ocr_pages = _ocr_suspect_pages(
+                    self.ocr_provider, source, pages, suspect_pages
+                )
+                for page_number in ocr_pages:
+                    visual_headings.pop(page_number, None)
+            if extraction_target is not None:
+                _write_json_atomic(
+                    extraction_target,
+                    {
+                        "schema": _PDF_EXTRACTION_CACHE_SCHEMA,
+                        "checksum": checksum,
+                        "profile": extraction_profile,
+                        "pages_checksum": hashlib.sha256(
+                            "\x1e".join(pages).encode("utf-8")
+                        ).hexdigest(),
+                        "pages": pages,
+                        "visual_headings": {
+                            str(page): hints for page, hints in visual_headings.items()
+                        },
+                        "initial_quality": initial_quality,
+                        "ocr_pages": ocr_pages,
+                    },
+                )
+        else:
+            pages, visual_headings, initial_quality, ocr_pages = extracted
+        quality = _document_quality(pages)
+        if pages and quality["suspect_page_count"] / len(pages) >= 0.8:
             if self.ocr_provider is None:
                 raise DocumentQualityError(
                     "pdf_text_unavailable",
                     "PDF has no usable text layer; configure an OCR provider",
                 )
-            pages = self.ocr_provider.extract(source)
+            raise DocumentQualityError(
+                "pdf_ocr_unusable",
+                "OCR did not recover usable text from at least 80% of PDF pages",
+            )
+
+        reader = PdfReader(str(source))
         bookmarks = self._bookmarks(reader)
-        content, stats, warnings = build_structured_markdown(pages, bookmarks)
+        content, stats, structure_warnings = build_structured_markdown(
+            pages,
+            bookmarks,
+            visual_headings,
+        )
+        warnings = list(structure_warnings)
+        unresolved_corrupt = list(quality["corrupt_text_pages"])
+        if unresolved_corrupt:
+            warnings.append(
+                "text layer remains corrupt on "
+                f"{len(unresolved_corrupt)}/{len(pages)} pages"
+            )
+        if quality["text_page_coverage"] < 0.9:
+            warnings.append(
+                "usable text covers only "
+                f"{quality['text_page_count']}/{len(pages)} pages"
+            )
         return NormalizedDocument(
             content=content,
             media_type="application/pdf",
             source_path=str(source),
-            checksum=hashlib.sha256(source.read_bytes()).hexdigest(),
+            checksum=checksum,
             page_count=len(pages),
             bookmarks=tuple(bookmarks),
-            warnings=warnings,
+            warnings=tuple(warnings),
             metadata={
                 **stats,
-                "ocr_provider": self.ocr_provider.name if self.ocr_provider else None,
+                "normalizer_profile": "pdf-layout",
+                "normalizer_version": DOCUMENT_NORMALIZER_VERSION,
+                "text_extractor": "pypdfium2",
+                "outline_extractor": "pypdf",
+                "ocr_provider": self.ocr_provider.name if ocr_pages else None,
+                "ocr_pages": ocr_pages,
+                "extraction_cache_hit": extraction_cache_hit,
+                "initial_quality": initial_quality,
+                "quality": quality,
             },
         )
 
@@ -381,6 +864,111 @@ class PdfDocumentConverter:
         if isinstance(outline, list):
             walk(outline)
         return result
+
+
+def _cache_profile(path: Path, ocr_provider: OcrProvider | None) -> str:
+    if path.suffix.casefold() == ".pdf":
+        ocr = getattr(ocr_provider, "cache_profile", None) or getattr(
+            ocr_provider, "name", "none"
+        )
+        return f"pdf-layout:{DOCUMENT_NORMALIZER_VERSION}:ocr={ocr}"
+    return f"markdown:{DOCUMENT_NORMALIZER_VERSION}"
+
+
+def _cache_path(cache_dir: Path, checksum: str, profile: str) -> Path:
+    profile_hash = hashlib.sha256(profile.encode("utf-8")).hexdigest()[:12]
+    return cache_dir / checksum[:2] / f"{checksum}-{profile_hash}.json"
+
+
+def normalize_document(
+    path: str | Path,
+    *,
+    ocr_provider: OcrProvider | None = None,
+    cache_dir: str | Path | None = None,
+    expected_checksum: str | None = None,
+) -> NormalizedDocument:
+    """Convert a document once and reuse a content-addressed normalized form."""
+    source = Path(path).expanduser().resolve()
+    checksum = file_sha256(source)
+    if expected_checksum and checksum != expected_checksum:
+        raise DocumentQualityError(
+            "source_checksum_mismatch",
+            "managed document checksum no longer matches its staged import job",
+        )
+    profile = _cache_profile(source, ocr_provider)
+    target = (
+        _cache_path(Path(cache_dir).expanduser().resolve(), checksum, profile)
+        if cache_dir is not None
+        else None
+    )
+    if target is not None and target.is_file():
+        try:
+            value = json.loads(target.read_text(encoding="utf-8"))
+            content = str(value["content"])
+            if (
+                value.get("schema") == _DOCUMENT_CACHE_SCHEMA
+                and value.get("checksum") == checksum
+                and value.get("profile") == profile
+                and value.get("content_checksum")
+                == hashlib.sha256(content.encode("utf-8")).hexdigest()
+            ):
+                return NormalizedDocument(
+                    content=content,
+                    media_type=str(value["media_type"]),
+                    source_path=str(source),
+                    checksum=checksum,
+                    page_count=int(value.get("page_count", 1)),
+                    bookmarks=tuple(
+                        DocumentBookmark(
+                            str(item["title"]), int(item["page"]), int(item["depth"])
+                        )
+                        for item in value.get("bookmarks", [])
+                    ),
+                    warnings=tuple(str(item) for item in value.get("warnings", [])),
+                    metadata={
+                        **dict(value.get("metadata") or {}),
+                        "normalization_cache_hit": True,
+                    },
+                )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            pass
+
+    document = converter_for(
+        source,
+        ocr_provider=ocr_provider,
+        extraction_cache_dir=cache_dir,
+    ).convert(
+        source,
+        source_checksum=checksum,
+    )
+    document = NormalizedDocument(
+        content=document.content,
+        media_type=document.media_type,
+        source_path=document.source_path,
+        checksum=document.checksum,
+        page_count=document.page_count,
+        bookmarks=document.bookmarks,
+        warnings=document.warnings,
+        metadata={**document.metadata, "normalization_cache_hit": False},
+    )
+    if target is not None:
+        value = {
+            "schema": _DOCUMENT_CACHE_SCHEMA,
+            "profile": profile,
+            "checksum": checksum,
+            "content_checksum": hashlib.sha256(document.content.encode("utf-8")).hexdigest(),
+            "content": document.content,
+            "media_type": document.media_type,
+            "page_count": document.page_count,
+            "bookmarks": [
+                {"title": item.title, "page": item.page, "depth": item.depth}
+                for item in document.bookmarks
+            ],
+            "warnings": list(document.warnings),
+            "metadata": document.metadata,
+        }
+        _write_json_atomic(target, value)
+    return document
 
 
 def render_pdf_page(
@@ -435,7 +1023,7 @@ def render_pdf_page(
         content=content,
         media_type="image/png",
         source_path=str(source),
-        source_checksum=hashlib.sha256(source.read_bytes()).hexdigest(),
+        source_checksum=file_sha256(source),
         page_number=page_number,
         page_count=page_count,
         width=width,
@@ -445,25 +1033,25 @@ def render_pdf_page(
     )
 
 
-def converter_for(path: str | Path, *, ocr_provider: OcrProvider | None = None):
+def converter_for(
+    path: str | Path,
+    *,
+    ocr_provider: OcrProvider | None = None,
+    extraction_cache_dir: str | Path | None = None,
+):
     suffix = Path(path).suffix.casefold()
     if suffix == ".pdf":
-        return PdfDocumentConverter(ocr_provider=ocr_provider)
+        return PdfDocumentConverter(
+            ocr_provider=ocr_provider,
+            extraction_cache_dir=extraction_cache_dir,
+        )
     if suffix in {".md", ".markdown", ".txt"}:
         return MarkdownDocumentConverter()
     raise ValueError(f"unsupported document type: {suffix}")
 
 
 def page_for_offset(content: str, offset: int) -> int | None:
-    current: int | None = None
-    cursor = 0
-    for line in content.splitlines(keepends=True):
-        if cursor > offset:
-            break
-        if match := re.match(r"<!-- page: (\d+) -->", line.strip()):
-            current = int(match.group(1))
-        cursor += len(line)
-    return current
+    return PageLocator(content).page_for_offset(offset)
 
 
 def strip_page_markers(value: str) -> str:

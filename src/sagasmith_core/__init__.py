@@ -7,10 +7,15 @@ from sagasmith_core.characters import CharacterService
 from sagasmith_core.continuity import ContinuityService
 from sagasmith_core.database import Database
 from sagasmith_core.documents import (
+    DOCUMENT_NORMALIZER_VERSION,
     DocumentQualityError,
     NormalizedDocument,
+    PageLocator,
     PdfDocumentConverter,
+    RapidOcrProvider,
     RenderedDocumentPage,
+    file_sha256,
+    normalize_document,
     render_pdf_page,
 )
 from sagasmith_core.embeddings import (
@@ -39,6 +44,7 @@ from sagasmith_core.systems import SystemDefinition, SystemRegistry
 from sagasmith_core.vector import VectorStore
 
 __all__ = [
+    "DOCUMENT_NORMALIZER_VERSION",
     "BgeEmbedder",
     "BgeM3Embedder",
     "BgeSmallEnEmbedder",
@@ -62,7 +68,9 @@ __all__ = [
     "ImportJobService",
     "ModuleService",
     "NormalizedDocument",
+    "PageLocator",
     "PdfDocumentConverter",
+    "RapidOcrProvider",
     "RenderedDocumentPage",
     "RevisionService",
     "RuleProfileService",
@@ -77,6 +85,8 @@ __all__ = [
     "configured_profiles",
     "create_embedder",
     "default_local_principal",
+    "file_sha256",
+    "normalize_document",
     "request_hash",
     "render_pdf_page",
 ]

@@ -24,7 +24,10 @@ from sagasmith_core import (
 from sagasmith_core.documents import (
     DocumentBookmark,
     NormalizedDocument,
+    PageLocator,
+    PdfDocumentConverter,
     build_structured_markdown,
+    normalize_document,
 )
 from sagasmith_core.models import ActorKnowledgeRevision, SnapshotActorKnowledgeBinding
 from sagasmith_core.snapshots import SnapshotIntegrityError
@@ -96,6 +99,92 @@ def test_rule_document_path_ingest_preserves_source_and_page_provenance(database
     assert citation["page_end"] in {7, 8}
 
 
+def test_normalized_document_cache_is_content_addressed(tmp_path) -> None:
+    source = tmp_path / "rules.md"
+    source.write_text("# Rules\n\n## Ready\n\nCached once.\n", encoding="utf-8")
+    cache = tmp_path / "cache"
+
+    first = normalize_document(source, cache_dir=cache)
+    second = normalize_document(source, cache_dir=cache, expected_checksum=first.checksum)
+
+    assert first.metadata["normalization_cache_hit"] is False
+    assert second.metadata["normalization_cache_hit"] is True
+    assert second.content == first.content
+    assert len(list(cache.rglob("*.json"))) == 1
+
+
+def test_page_locator_reuses_one_marker_index() -> None:
+    content = (
+        "<!-- page: 1 -->\nfirst\n"
+        "<!-- page: 2 -->\nsecond\n"
+        "<!-- page: 20 -->\nlast\n"
+    )
+    locator = PageLocator(content)
+
+    assert locator.page_for_offset(content.index("first")) == 1
+    assert locator.page_for_offset(content.index("second")) == 2
+    assert locator.page_for_offset(len(content)) == 20
+
+
+def test_pdf_converter_ocr_replaces_only_suspect_pages(tmp_path) -> None:
+    pypdf = pytest.importorskip("pypdf")
+    pytest.importorskip("pypdfium2")
+    source = tmp_path / "image-only.pdf"
+    writer = pypdf.PdfWriter()
+    writer.add_blank_page(width=200, height=100)
+    with source.open("wb") as stream:
+        writer.write(stream)
+
+    class FakeOcr:
+        name = "fake"
+
+        def __init__(self) -> None:
+            self.pages = []
+
+        def extract(self, path, *, page_numbers=None):
+            self.pages = list(page_numbers or [])
+            return ["RECOVERED HEADING\nRecovered body text for indexing."]
+
+    provider = FakeOcr()
+    document = PdfDocumentConverter(ocr_provider=provider).convert(source)
+
+    assert provider.pages == [1]
+    assert "RECOVERED HEADING" in document.content
+    assert document.metadata["ocr_pages"] == [1]
+    assert document.metadata["quality"]["suspect_page_count"] == 0
+
+
+def test_pdf_page_extraction_cache_survives_normalizer_cache_refresh(tmp_path) -> None:
+    pypdf = pytest.importorskip("pypdf")
+    pytest.importorskip("pypdfium2")
+    source = tmp_path / "image-only.pdf"
+    writer = pypdf.PdfWriter()
+    writer.add_blank_page(width=200, height=100)
+    with source.open("wb") as stream:
+        writer.write(stream)
+
+    class CountingOcr:
+        name = "counting"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def extract(self, path, *, page_numbers=None):
+            self.calls += 1
+            return ["RECOVERED HEADING\nRecovered body text for indexing."]
+
+    provider = CountingOcr()
+    cache = tmp_path / "cache"
+    first = normalize_document(source, ocr_provider=provider, cache_dir=cache)
+    for path in cache.glob("*/*.json"):
+        path.unlink()
+    second = normalize_document(source, ocr_provider=provider, cache_dir=cache)
+
+    assert first.metadata["extraction_cache_hit"] is False
+    assert second.metadata["extraction_cache_hit"] is True
+    assert provider.calls == 1
+
+
 def test_pdf_normalization_recovers_unbookmarked_all_caps_subheadings() -> None:
     content, metadata, warnings = build_structured_markdown(
         ["TOOL PROFICIENCIES\nIntro.\nTOOLS AND SKILLS TOGETHER\nOptional procedure."],
@@ -105,6 +194,22 @@ def test_pdf_normalization_recovers_unbookmarked_all_caps_subheadings() -> None:
     assert "#### TOOL PROFICIENCIES" in content
     assert "##### TOOLS AND SKILLS TOGETHER" in content
     assert metadata["heading_count"] == 2
+    assert warnings == ()
+
+
+def test_pdf_normalization_uses_visual_heading_hints_for_mixed_case_titles() -> None:
+    content, metadata, warnings = build_structured_markdown(
+        [
+            "Spell Descriptions\nFireball\n3rd-level evocation\n"
+            "Casting Time: 1 action\nRange: 150 feet"
+        ],
+        [],
+        {1: [("Spell Descriptions", 3), ("Fireball", 5)]},
+    )
+
+    assert "### Spell Descriptions" in content
+    assert "##### Fireball" in content
+    assert metadata["matched_visual_headings"] == 2
     assert warnings == ()
 
 

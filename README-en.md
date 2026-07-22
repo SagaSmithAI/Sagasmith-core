@@ -13,7 +13,7 @@
 - **Actor knowledge** — facts scoped by actor, subject, branch, and visibility instead of one global summary.
 - **Events and long-term memory** — event logs, stable fact identity, branch revisions, recaps, and continuity context.
 - **Rule packs** — core/extension packages, profile locks, provenance, rule receipts, and mechanic IR.
-- **Content ingestion** — resumable import jobs, document quality gates, PDF/Markdown normalization, and scene/spatial indexes.
+- **Content ingestion** — resumable import jobs, content-addressed normalization/page caches, PDFium text extraction, selective OCR quality gates, and page-aware indexes.
 - **Retrieval** — exact and lexical search, SQLite FTS5, plus optional ChromaDB and sentence-transformers.
 - **System plugins** — D&D, CoC, and future systems register through the `sagasmith.systems` entry point.
 
@@ -50,6 +50,7 @@ Requires Python 3.11+:
 ```bash
 pip install sagasmith-core
 pip install "sagasmith-core[documents]"  # PDF
+pip install "sagasmith-core[documents,ocr]"  # scanned/corrupt-text PDF recovery
 pip install "sagasmith-core[vector]"     # ChromaDB
 pip install "sagasmith-core[embedding]"  # sentence-transformers
 pip install "sagasmith-core[all]"
@@ -83,6 +84,9 @@ The package supplies its profile, character schema, module parser, and rules eng
 - Writes should use expected revisions and idempotency keys so agent retries cannot duplicate effects.
 - Player reads are limited to visible branches, scene scopes, and actor knowledge; GM authority requires an explicit principal/role.
 - Parsed content retains provenance, pages, parser profile, and quality warnings; rich metadata is best effort.
+- Document caches are checksum- and profile-bound. Corrupt cache entries are ignored, and
+  parser-version changes can reuse verified PDF page extraction/OCR without accepting stale
+  normalized structure.
 - This is an Alpha project. Current migrations serve the current mainline schema and do not promise legacy database compatibility.
 
 ## Development

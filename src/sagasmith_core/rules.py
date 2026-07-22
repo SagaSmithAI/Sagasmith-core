@@ -14,8 +14,9 @@ from sqlalchemy import delete, select
 from sagasmith_core.database import Database
 from sagasmith_core.documents import (
     NormalizedDocument,
-    converter_for,
-    page_for_offset,
+    OcrProvider,
+    PageLocator,
+    normalize_document,
     strip_page_markers,
 )
 from sagasmith_core.embeddings import Embedder
@@ -65,7 +66,6 @@ class RuleService:
         normalized_document: NormalizedDocument | None = None,
     ) -> RuleIngestResult:
         checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        parsed = (parser or MarkdownHierarchyParser()).parse(content)
         source_metadata = dict(metadata or {})
         if normalized_document is not None:
             source_metadata = {
@@ -101,6 +101,8 @@ class RuleService:
                 session.execute(delete(RuleSource).where(RuleSource.id == existing.id))
                 session.flush()
 
+            parsed = (parser or MarkdownHierarchyParser()).parse(content)
+            page_locator = PageLocator(content)
             source_id = str(uuid.uuid4())
             session.add(
                 RuleSource(
@@ -167,8 +169,10 @@ class RuleService:
                                 **chunk.metadata,
                                 "start_offset": chunk.start_offset,
                                 "end_offset": chunk.end_offset,
-                                "page_start": page_for_offset(content, chunk.start_offset),
-                                "page_end": page_for_offset(content, chunk.end_offset),
+                                "page_start": page_locator.page_for_offset(
+                                    chunk.start_offset
+                                ),
+                                "page_end": page_locator.page_for_offset(chunk.end_offset),
                             },
                         )
                     )
@@ -250,10 +254,18 @@ class RuleService:
         parser: MarkdownHierarchyParser | None = None,
         embedder: Embedder | None = None,
         vector_store: VectorStore | None = None,
+        ocr_provider: OcrProvider | None = None,
+        document_cache_dir: str | Path | None = None,
+        expected_checksum: str | None = None,
     ) -> RuleIngestResult:
         """Normalize and ingest a rule document through the shared document pipeline."""
         source_path = Path(path).expanduser().resolve()
-        document = converter_for(source_path).convert(source_path)
+        document = normalize_document(
+            source_path,
+            ocr_provider=ocr_provider,
+            cache_dir=document_cache_dir,
+            expected_checksum=expected_checksum,
+        )
         return self.ingest(
             system_id=system_id,
             source_key=source_key or source_path.name,
@@ -277,10 +289,19 @@ class RuleService:
         path: str | Path,
         *,
         parser: MarkdownHierarchyParser | None = None,
+        ocr_provider: OcrProvider | None = None,
+        document_cache_dir: str | Path | None = None,
+        expected_checksum: str | None = None,
     ) -> dict[str, Any]:
         """Normalize a rule document without writing it to the rule index."""
-        document = converter_for(path).convert(path)
+        document = normalize_document(
+            path,
+            ocr_provider=ocr_provider,
+            cache_dir=document_cache_dir,
+            expected_checksum=expected_checksum,
+        )
         parsed = (parser or MarkdownHierarchyParser()).parse(document.content)
+        page_locator = PageLocator(document.content)
         return {
             "source_path": document.source_path,
             "media_type": document.media_type,
@@ -295,8 +316,8 @@ class RuleService:
                     "title": section.title,
                     "level": section.level,
                     "path": list(section.path),
-                    "page_start": page_for_offset(document.content, section.start_offset),
-                    "page_end": page_for_offset(document.content, section.end_offset),
+                    "page_start": page_locator.page_for_offset(section.start_offset),
+                    "page_end": page_locator.page_for_offset(section.end_offset),
                 }
                 for section in parsed
             ],
@@ -310,6 +331,8 @@ class RuleService:
         edition: str | None = None,
         locale: str | None = None,
         publications: list[str] | None = None,
+        source_ids: list[str] | None = None,
+        source_keys: list[str] | None = None,
         top_k: int = 8,
         embedder: Embedder | None = None,
         vector_store: VectorStore | None = None,
@@ -329,6 +352,10 @@ class RuleService:
                 statement = statement.where(RuleSource.locale == locale)
             if publications:
                 statement = statement.where(RuleSource.publication_id.in_(publications))
+            if source_ids:
+                statement = statement.where(RuleSource.id.in_(source_ids))
+            if source_keys:
+                statement = statement.where(RuleSource.source_key.in_(source_keys))
             rows = session.execute(statement).all()
         if not rows:
             return []

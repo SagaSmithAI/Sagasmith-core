@@ -15,7 +15,7 @@
 - **Actor Knowledge** — 按 actor、主体、分支和可见范围维护所知事实，不把角色知识混入全局摘要。
 - **事件与长期记忆** — 事件日志、事实身份、分支修订、continuity context 与 recap 数据面。
 - **规则包** — core/extension 包、profile 锁定、版本与来源、规则 receipt 和机械 IR。
-- **内容导入** — 可恢复 import job、文档质量门禁、PDF/Markdown 标准化、场景/空间索引。
+- **内容导入** — 可恢复 import job、内容寻址的标准化/页面缓存、PDFium 文本提取、选择性 OCR 质量门禁与页码索引。
 - **检索** — 精确与词法检索、SQLite FTS5，以及可选的 ChromaDB + sentence-transformers。
 - **插件系统** — 通过 `sagasmith.systems` entry point 注册 D&D、CoC 或新的系统实现。
 
@@ -57,6 +57,7 @@ pip install sagasmith-core
 
 ```bash
 pip install "sagasmith-core[documents]"  # PDF
+pip install "sagasmith-core[documents,ocr]"  # 扫描版或乱码 PDF 恢复
 pip install "sagasmith-core[vector]"     # ChromaDB
 pip install "sagasmith-core[embedding]"  # sentence-transformers
 pip install "sagasmith-core[all]"

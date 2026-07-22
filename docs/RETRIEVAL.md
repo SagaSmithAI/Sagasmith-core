@@ -8,6 +8,23 @@ Rules and modules use the same retrieval pipeline:
 4. reciprocal-rank fusion across available rankings;
 5. expansion from a selected chunk to the complete section or scene.
 
+`RuleService.search` can be constrained with exact `source_ids`, `source_keys`, or
+publication ids. Import and review workflows should use one of these filters before
+expanding a hit so same-name sections from different books or editions cannot supply
+the wrong evidence.
+
+## Document normalization
+
+PDF imports use PDFium for the text layer and pypdf only for the outline. Page markers
+are indexed once, so page lookup remains logarithmic as large books are chunked. The
+quality report records sparse, corrupt-text, and OCR-recovered pages. With the `ocr`
+extra installed, RapidOCR is applied selectively to image-only documents and corrupt
+text pages; unresolved low-quality documents fail closed.
+
+There are two integrity-checked, content-addressed cache layers: raw page extraction
+(including OCR) and the final normalized document. A parser/heading version change
+invalidates only final normalization, allowing verified page/OCR work to be reused.
+
 Dense retrieval is optional. SQL JSON vectors provide a small-dataset fallback;
 `VectorStore` provides a namespaced ChromaDB implementation for larger stores.
 
