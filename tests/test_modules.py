@@ -99,6 +99,18 @@ def test_module_parser_preserves_front_matter_before_first_chapter() -> None:
     assert chapters[1].scenes[0].metadata["page_start"] == 2
 
 
+def test_module_parser_uses_global_page_offsets_for_same_page_chapters() -> None:
+    chapters = MarkdownModuleParser().parse(
+        "<!-- page: 1 -->\n# Chapter One\n## Arrival\nFirst.\n"
+        "# Same-page Appendix\n## Card\nSecond.\n"
+        "<!-- page: 2 -->\n# Chapter Two\n## Departure\nThird.\n"
+    )
+
+    assert [chapter.metadata["page_start"] for chapter in chapters] == [1, 1, 2]
+    assert [chapter.metadata["page_end"] for chapter in chapters] == [1, 1, 2]
+    assert [chapter.scenes[0].metadata["page_start"] for chapter in chapters] == [1, 1, 2]
+
+
 def test_module_preview_exposes_scene_page_and_line_provenance(database, tmp_path) -> None:
     source = tmp_path / "module.md"
     source.write_text(

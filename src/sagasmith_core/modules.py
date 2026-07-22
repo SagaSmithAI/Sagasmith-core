@@ -18,8 +18,8 @@ from sagasmith_core.database import Database
 from sagasmith_core.documents import (
     NormalizedDocument,
     OcrProvider,
+    PageLocator,
     normalize_document,
-    page_for_offset,
     strip_page_markers,
 )
 from sagasmith_core.embeddings import Embedder
@@ -158,8 +158,18 @@ class MarkdownModuleParser:
     def parse(self, content: str) -> list[ParsedChapter]:
         heading_re = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
         headings = list(heading_re.finditer(content))
+        page_locator = PageLocator(content)
         if not headings:
-            return [self._chapter(0, "Document", content, 0, len(content))]
+            return [
+                self._chapter(
+                    0,
+                    "Document",
+                    content,
+                    0,
+                    len(content),
+                    page_locator,
+                )
+            ]
         chapter_starts = [
             (index, match) for index, match in enumerate(headings) if len(match.group(1)) == 1
         ]
@@ -172,7 +182,16 @@ class MarkdownModuleParser:
         first_chapter_start = structural_starts[0]
         preamble = content[:first_chapter_start]
         if chapter_starts[0][1].group(1) == "#" and strip_page_markers(preamble).strip():
-            parsed.append(self._chapter(0, "Front Matter", preamble, 0, first_chapter_start))
+            parsed.append(
+                self._chapter(
+                    0,
+                    "Front Matter",
+                    preamble,
+                    0,
+                    first_chapter_start,
+                    page_locator,
+                )
+            )
         for ordinal, (_heading_index, heading) in enumerate(chapter_starts):
             start = structural_starts[ordinal]
             end = (
@@ -181,7 +200,16 @@ class MarkdownModuleParser:
                 else len(content)
             )
             title = heading.group(2).strip()
-            parsed.append(self._chapter(len(parsed), title, content[start:end], start, end))
+            parsed.append(
+                self._chapter(
+                    len(parsed),
+                    title,
+                    content[start:end],
+                    start,
+                    end,
+                    page_locator,
+                )
+            )
         return parsed
 
     @staticmethod
@@ -201,6 +229,7 @@ class MarkdownModuleParser:
         chapter_content: str,
         global_start: int,
         global_end: int,
+        page_locator: PageLocator,
     ) -> ParsedChapter:
         boundary_factory = getattr(self.profile, "scene_boundaries", None)
         ranges = (
@@ -230,8 +259,10 @@ class MarkdownModuleParser:
                         "start_line": chapter_content.count("\n", 0, start + chunk.start_offset)
                         + 1,
                         "end_line": chapter_content.count("\n", 0, start + chunk.end_offset) + 1,
-                        "page_start": page_for_offset(chapter_content, start + chunk.start_offset),
-                        "page_end": page_for_offset(chapter_content, start + chunk.end_offset),
+                        "page_start": page_locator.page_for_offset(absolute_start),
+                        "page_end": page_locator.page_for_offset(
+                            max(absolute_start, absolute_end - 1)
+                        ),
                         "chunk_type": self.profile.classify_chunk(section.title, text),
                         "content_hash": hashlib.sha256(text.encode("utf-8")).hexdigest(),
                         "absolute_start": absolute_start,
@@ -260,8 +291,10 @@ class MarkdownModuleParser:
                         **boundary.metadata,
                         "start_line": chapter_content.count("\n", 0, start) + 1,
                         "end_line": chapter_content.count("\n", 0, end) + 1,
-                        "page_start": page_for_offset(chapter_content, start),
-                        "page_end": page_for_offset(chapter_content, end),
+                        "page_start": page_locator.page_for_offset(scene_start),
+                        "page_end": page_locator.page_for_offset(
+                            max(scene_start, scene_end - 1)
+                        ),
                         "keywords": self.profile.keywords(scene_title, clean),
                         "absolute_start": scene_start,
                         "absolute_end": scene_end,
@@ -274,8 +307,10 @@ class MarkdownModuleParser:
             content=strip_page_markers(chapter_content),
             scenes=tuple(scenes),
             metadata={
-                "page_start": page_for_offset(chapter_content, 0),
-                "page_end": page_for_offset(chapter_content, len(chapter_content)),
+                "page_start": page_locator.page_for_offset(global_start),
+                "page_end": page_locator.page_for_offset(
+                    max(global_start, global_end - 1)
+                ),
                 "absolute_start": global_start,
                 "absolute_end": global_end,
             },
