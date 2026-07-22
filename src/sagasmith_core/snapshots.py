@@ -116,11 +116,15 @@ class SnapshotService:
             or 0
         ) + 1
         payload = self._capture(session, campaign, branch.id)
-        if recap is None:
-            parent_payload = (
-                dict(session.get(CampaignSnapshot, parent_id).payload) if parent_id else None
-            )
-            recap = self._build_recap(parent_payload, payload)
+        parent_payload = (
+            dict(session.get(CampaignSnapshot, parent_id).payload) if parent_id else None
+        )
+        canonical_recap = self._build_recap(parent_payload, payload)
+        recap = (
+            canonical_recap
+            if recap is None
+            else self._attach_presentation(canonical_recap, recap)
+        )
         row = CampaignSnapshot(
             id=str(uuid.uuid4()),
             campaign_id=campaign.id,
@@ -516,6 +520,12 @@ class SnapshotService:
                 "player_choices": [],
                 "memory_candidates": [],
                 "source": "deterministic",
+                "schema_version": 2,
+                "provenance": {
+                    "generator": "sagasmith-core",
+                    "method": "deterministic-delta",
+                    "evidence_event_ids": [],
+                },
             }
         changed: list[str] = []
         for field in ("status", "description", "settings", "state"):
@@ -547,15 +557,23 @@ class SnapshotService:
             item["id"]
             for item in current.get("memories", [])
             if item["revision"]["id"] not in old_memories
-            and item["revision"].get("metadata", {}).get("disclosure_scope", "dm")
+            and (
+                item["revision"].get("disclosure_scope")
+                or item["revision"].get("metadata", {}).get("disclosure_scope", "dm")
+            )
             in {"public", "party", "player"}
         ]
         old_event_ids = {item["id"] for item in previous.get("events", [])}
-        event_changes = [
-            item["summary"]
+        evidence_event_ids = [
+            item["id"]
             for item in current.get("events", [])
             if item["id"] not in old_event_ids
             and item.get("audience_scope") in {"public", "party", "player"}
+        ]
+        event_changes = [
+            item["summary"]
+            for item in current.get("events", [])
+            if item["id"] in evidence_event_ids
         ]
         summary_parts = []
         if changed:
@@ -580,6 +598,39 @@ class SnapshotService:
             "memory_candidates": memory_candidates,
             "changed_fields": changed,
             "source": "deterministic",
+            "schema_version": 2,
+            "provenance": {
+                "generator": "sagasmith-core",
+                "method": "deterministic-delta",
+                "evidence_event_ids": evidence_event_ids,
+            },
+        }
+
+    @staticmethod
+    def _attach_presentation(
+        canonical: dict[str, Any],
+        presentation: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Keep generated prose subordinate to an evidence-backed canonical delta."""
+        value = dict(presentation)
+        evidence = value.get("evidence_event_ids")
+        if not isinstance(evidence, list) or not all(isinstance(item, str) for item in evidence):
+            raise ValueError("presentation recap requires evidence_event_ids")
+        allowed = set(canonical["provenance"]["evidence_event_ids"])
+        unknown = sorted(set(evidence) - allowed)
+        if unknown:
+            raise ValueError(
+                "presentation recap cites events outside the player-safe delta: "
+                + ", ".join(unknown)
+            )
+        return {
+            **canonical,
+            "presentation": value,
+            "provenance": {
+                **canonical["provenance"],
+                "presentation_source": "reviewed-generated",
+                "presentation_evidence_event_ids": list(evidence),
+            },
         }
 
     @staticmethod

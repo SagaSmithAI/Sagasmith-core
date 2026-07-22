@@ -833,6 +833,73 @@ def test_actor_event_authorization_is_not_limited_by_knowledge_top_n(database) -
     assert [item["id"] for item in context["events"]] == [event.id]
 
 
+def test_continuity_context_applies_one_shared_budget_with_metrics(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Budgeted context")
+    memories = MemoryService(database)
+    for index in range(5):
+        memories.add(
+            campaign.id,
+            fact_key=f"fact:budget:{index}",
+            content=f"Matched clue {index} " + ("x" * 360),
+            importance=5 - min(index, 4),
+            disclosure_scope="party",
+        )
+
+    context = ContinuityService(database).context(
+        campaign.id,
+        query="matched clue",
+        audience="player",
+        budget_chars=1_000,
+    )
+
+    assert context["retrieval"]["strategy"] == "lexical_structured_shared_budget_v2"
+    assert context["retrieval"]["budget_chars"] == 1_000
+    assert context["retrieval"]["candidate_count"] == 5
+    assert context["retrieval"]["returned_count"] < 5
+    assert context["retrieval"]["truncated"] is True
+
+
+def test_continuity_diagnostics_reports_ledger_and_snapshot_health(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Diagnostics")
+    event = EventService(database).add(
+        campaign.id,
+        summary="The gate opens.",
+        audience_scope="party",
+    )
+    memory = MemoryService(database).add(
+        campaign.id,
+        fact_key="location:gate:state",
+        content="The gate is open.",
+        source_event_ids=[event.id, "event:missing"],
+        disclosure_scope="party",
+    )
+    SnapshotService(database).create(campaign.id, label="Gate opened")
+    MemoryService(database).revise(
+        memory.id,
+        content="The gate is no longer relevant.",
+        expected_revision_id=memory.revision_id,
+        status="superseded",
+    )
+    EventService(database).add(
+        campaign.id,
+        summary="A later event is not snapshotted.",
+        audience_scope="dm",
+    )
+
+    diagnostics = ContinuityService(database).diagnostics(campaign.id)
+
+    assert diagnostics["facts"] == {
+        "total": 1,
+        "active": 0,
+        "inactive": 1,
+        "orphan_source_event_refs": 1,
+    }
+    assert diagnostics["events"]["unsnapshotted"] == 1
+    assert diagnostics["events"]["latest_sequence"] == 2
+    assert diagnostics["snapshots"]["total_on_branch"] == 1
+    assert diagnostics["snapshots"]["latest_payload_chars"] > 0
+
+
 def test_event_and_actor_knowledge_reject_unknown_visibility_scopes(database) -> None:
     campaign = CampaignService(database).create(system_id="dnd5e", name="Visibility enums")
     actor = CharacterService(database).create(
@@ -891,6 +958,43 @@ def test_snapshot_recap_only_contains_party_safe_deltas(database) -> None:
     assert recap["memory_candidates"] == []
     assert "Hidden Spy" not in str(recap)
     assert "poisoned" not in str(recap)
+
+
+def test_snapshot_presentation_recap_is_subordinate_and_evidence_bound(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Recap evidence")
+    snapshots = SnapshotService(database)
+    snapshots.create(campaign.id, label="Baseline")
+    visible = EventService(database).add(
+        campaign.id,
+        summary="The party reaches the bridge.",
+        audience_scope="party",
+    )
+    hidden = EventService(database).add(
+        campaign.id,
+        summary="The hidden spy leaves.",
+        audience_scope="dm",
+    )
+
+    saved = snapshots.create(
+        campaign.id,
+        label="Bridge",
+        recap={
+            "summary": "We reached the bridge.",
+            "evidence_event_ids": [visible.id],
+        },
+    )
+    recap = snapshots.get(campaign.id, saved.slot)["recap"]
+
+    assert recap["source"] == "deterministic"
+    assert recap["events"] == ["The party reaches the bridge."]
+    assert recap["presentation"]["summary"] == "We reached the bridge."
+    assert recap["provenance"]["evidence_event_ids"] == [visible.id]
+    with pytest.raises(ValueError, match="outside the player-safe delta"):
+        snapshots.create(
+            campaign.id,
+            label="Unsafe presentation",
+            recap={"summary": "Leak", "evidence_event_ids": [hidden.id]},
+        )
 
 
 def test_same_actor_knowledge_key_can_diverge_independently_on_sibling_branches(
