@@ -1,6 +1,13 @@
+import pytest
+
 from sagasmith_core.campaigns import CampaignService
 from sagasmith_core.documents import NormalizedDocument
-from sagasmith_core.modules import MarkdownModuleParser, ModuleService, SceneBoundary
+from sagasmith_core.modules import (
+    GenericModuleProfile,
+    MarkdownModuleParser,
+    ModuleService,
+    SceneBoundary,
+)
 from sagasmith_core.snapshots import SnapshotService
 
 
@@ -170,6 +177,62 @@ def test_module_preview_reuses_shared_document_cache(database, tmp_path) -> None
     assert first["metadata"]["normalization_cache_hit"] is False
     assert second["metadata"]["normalization_cache_hit"] is True
     assert second["scenes"] == first["scenes"]
+
+
+def test_module_profile_metadata_is_validated_persisted_and_listed(database, tmp_path) -> None:
+    class ManifestProfile:
+        name = "manifest-test"
+        version = "1"
+
+        def classify_chunk(self, heading: str, text: str) -> str:
+            return "narrative"
+
+        def keywords(self, title: str, text: str) -> list[str]:
+            return []
+
+        def scene_boundaries(self, chapter_title: str, chapter_content: str):
+            return [SceneBoundary("Scene", 0, len(chapter_content))]
+
+        def document_metadata(self, content: str) -> dict:
+            return {"runtime_manifest": {"schema_version": 1, "module_key": "keep"}}
+
+    source = tmp_path / "manifest.md"
+    source.write_text("# Chapter\nBody.\n", encoding="utf-8")
+    parser = MarkdownModuleParser(profile=ManifestProfile())
+    preview = ModuleService(database).preview_path(source, parser=parser)
+    assert preview["profile_metadata"]["runtime_manifest"]["module_key"] == "keep"
+
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Manifest")
+    ModuleService(database).ingest_path(
+        campaign_id=campaign.id,
+        path=source,
+        source_key="manifest",
+        parser=parser,
+    )
+    listed = ModuleService(database).list(campaign.id)
+    assert listed[0]["runtime_manifest"]["module_key"] == "keep"
+
+
+def test_module_profile_metadata_errors_fail_preview_and_ingest(database, tmp_path) -> None:
+    class InvalidManifestProfile(GenericModuleProfile):
+        def document_metadata(self, content: str) -> dict:
+            return {"runtime_manifest_errors": ["duplicate id: npc:keeper"]}
+
+    source = tmp_path / "invalid-manifest.md"
+    source.write_text("# Chapter\n## Scene\nBody.\n", encoding="utf-8")
+    parser = MarkdownModuleParser(profile=InvalidManifestProfile())
+    preview = ModuleService(database).preview_path(source, parser=parser)
+    assert preview["valid"] is False
+    assert preview["errors"] == ["duplicate id: npc:keeper"]
+
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Invalid")
+    with pytest.raises(ValueError, match="invalid module runtime manifest"):
+        ModuleService(database).ingest_path(
+            campaign_id=campaign.id,
+            path=source,
+            source_key="invalid",
+            parser=parser,
+        )
 
 
 def test_scene_stable_keys_preserve_cjk_chapter_identity(database) -> None:
