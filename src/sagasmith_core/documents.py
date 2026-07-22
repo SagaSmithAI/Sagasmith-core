@@ -16,7 +16,7 @@ from statistics import median
 from typing import Any, Protocol
 from uuid import uuid4
 
-DOCUMENT_NORMALIZER_VERSION = "11"
+DOCUMENT_NORMALIZER_VERSION = "12"
 _DOCUMENT_CACHE_SCHEMA = 1
 _PDF_EXTRACTION_CACHE_SCHEMA = 1
 _PDF_TEXT_EXTRACTOR_VERSION = "3"
@@ -189,6 +189,17 @@ def _chapter_identity(value: str) -> str:
         r"^App(?:endix)?\s*\.?\s*", "appendix ", text, flags=re.IGNORECASE
     )
     return _normalize(text)
+
+
+def _chapter_label(value: str) -> str | None:
+    identity = _chapter_identity(value)
+    matched = re.match(
+        r"^(chapter|appendix|part|episodes?)(\d+(?:and\d+)?|[a-z])", identity
+    )
+    if not matched:
+        return None
+    kind = "episode" if matched.group(1).startswith("episode") else matched.group(1)
+    return f"{kind}:{matched.group(2)}"
 
 
 def _looks_like_automatic_chapter_heading(value: str) -> bool:
@@ -474,6 +485,13 @@ def _reflow_page(
                 len(trusted) >= 12
                 and len(identity) > len(trusted)
                 and identity.startswith(trusted)
+            )
+            or (
+                len(identity) >= 12
+                and len(trusted) >= 12
+                and _chapter_label(identity) == _chapter_label(trusted)
+                and _chapter_label(identity) is not None
+                and SequenceMatcher(None, identity, trusted).ratio() >= 0.88
             )
             for trusted in trusted_chapter_titles
         )

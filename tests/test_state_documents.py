@@ -362,6 +362,23 @@ def test_pdf_normalization_moves_late_outline_chapter_anchor_to_page_start() -> 
     assert metadata["synthetic_outline_headings"] == 1
 
 
+def test_pdf_normalization_drops_corrupt_duplicate_of_outline_chapter() -> None:
+    content, _metadata, _warnings = build_structured_markdown(
+        [
+            "CHAPTER 3: THE SAVAGE FRONTIER\nBody.",
+            "CHAPTER 3: TuE SAVAGE FRONTIER\nContinued body.",
+        ],
+        [DocumentBookmark("Chapter 3: The Savage Frontier", 1, 0)],
+        {
+            1: [("CHAPTER 3: THE SAVAGE FRONTIER", 2)],
+            2: [("CHAPTER 3: TuE SAVAGE FRONTIER", 3)],
+        },
+    )
+
+    assert "# Chapter 3: The Savage Frontier" in content
+    assert "TuE SAVAGE" not in content
+
+
 def test_pdf_normalization_does_not_promote_chapter_references_in_body() -> None:
     content, metadata, _warnings = build_structured_markdown(
         [
