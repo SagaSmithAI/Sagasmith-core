@@ -79,6 +79,35 @@ class MemoryService:
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
             branch = resolve_branch(session, campaign, branch_id)
+            if fact_key is not None:
+                normalized_key = self._validate_fact_key(fact_key)
+                existing = session.scalar(
+                    select(CampaignMemory).where(
+                        CampaignMemory.campaign_id == campaign_id,
+                        CampaignMemory.fact_key == normalized_key,
+                    )
+                )
+                if existing is not None:
+                    head = session.get(
+                        BranchFactHead,
+                        {"branch_id": branch.id, "memory_id": existing.id},
+                    )
+                    if head is not None:
+                        raise ValueError(f"campaign fact already exists: {normalized_key}")
+                    return self._add_branch_revision_in_session(
+                        session,
+                        existing,
+                        branch.id,
+                        content=content,
+                        metadata=metadata,
+                        snapshot_id=snapshot_id,
+                        status=status,
+                        valid_from=valid_from,
+                        valid_to=valid_to,
+                        source_event_ids=source_event_ids,
+                        importance=importance,
+                        disclosure_scope=disclosure_scope,
+                    )
             return self._add_in_session(
                 session,
                 campaign_id,
@@ -194,6 +223,27 @@ class MemoryService:
                     importance=importance,
                     disclosure_scope=disclosure_scope,
                 )
+            head = session.get(
+                BranchFactHead,
+                {"branch_id": branch.id, "memory_id": memory.id},
+            )
+            if head is None:
+                if expected_revision_id is not None:
+                    raise ValueError("expected revision cannot target a missing branch fact")
+                return self._add_branch_revision_in_session(
+                    session,
+                    memory,
+                    branch.id,
+                    content=content,
+                    metadata=metadata,
+                    snapshot_id=snapshot_id,
+                    status=status,
+                    valid_from=valid_from,
+                    valid_to=valid_to,
+                    source_event_ids=source_event_ids,
+                    importance=importance,
+                    disclosure_scope=disclosure_scope,
+                )
             return self._revise_in_session(
                 session,
                 memory,
@@ -292,10 +342,7 @@ class MemoryService:
         importance: int,
         disclosure_scope: str | None,
     ) -> MemoryInfo:
-        self._validate_snapshot(session, campaign_id, snapshot_id)
-        self._validate_revision_fields(status, importance, disclosure_scope, metadata)
         memory_id = str(uuid.uuid4())
-        resolved_scope = disclosure_scope or str((metadata or {}).get("disclosure_scope", "dm"))
         memory = CampaignMemory(
             id=memory_id,
             campaign_id=campaign_id,
@@ -305,6 +352,42 @@ class MemoryService:
             subject_ref=subject_ref,
             predicate=predicate,
         )
+        session.add(memory)
+        session.flush()
+        return self._add_branch_revision_in_session(
+            session,
+            memory,
+            branch_id,
+            content=content,
+            metadata=metadata,
+            snapshot_id=snapshot_id,
+            status=status,
+            valid_from=valid_from,
+            valid_to=valid_to,
+            source_event_ids=source_event_ids,
+            importance=importance,
+            disclosure_scope=disclosure_scope,
+        )
+
+    def _add_branch_revision_in_session(
+        self,
+        session,
+        memory: CampaignMemory,
+        branch_id: str,
+        *,
+        content: str,
+        metadata: dict[str, Any] | None,
+        snapshot_id: str | None,
+        status: str,
+        valid_from: datetime | None,
+        valid_to: datetime | None,
+        source_event_ids: list[str] | None,
+        importance: int,
+        disclosure_scope: str | None,
+    ) -> MemoryInfo:
+        self._validate_snapshot(session, memory.campaign_id, snapshot_id)
+        self._validate_revision_fields(status, importance, disclosure_scope, metadata)
+        resolved_scope = disclosure_scope or str((metadata or {}).get("disclosure_scope", "dm"))
         revision = MemoryRevision(
             id=str(uuid.uuid4()),
             memory_id=memory.id,
@@ -319,11 +402,12 @@ class MemoryService:
             importance=importance,
             disclosure_scope=resolved_scope,
         )
-        session.add_all([memory, revision])
+        session.add(revision)
         session.flush()
         session.add(
             BranchFactHead(branch_id=branch_id, memory_id=memory.id, revision_id=revision.id)
         )
+        memory.updated_at = utcnow()
         return self._info(memory, revision)
 
     def _revise_in_session(

@@ -13,7 +13,12 @@ from sagasmith_core.database import Database
 from sagasmith_core.events import EventService
 from sagasmith_core.knowledge import ActorKnowledgeService
 from sagasmith_core.memory import MemoryService
-from sagasmith_core.models import ActorKnowledge, Campaign, CampaignMemory
+from sagasmith_core.models import (
+    ActorKnowledge,
+    BranchFactHead,
+    Campaign,
+    CampaignMemory,
+)
 from sagasmith_core.snapshots import SnapshotService
 
 
@@ -133,8 +138,29 @@ class ContinuityCommitService:
             )
         )
         if memory is not None:
-            if action == "add":
+            head = session.get(
+                BranchFactHead,
+                {"branch_id": branch_id, "memory_id": memory.id},
+            )
+            if action == "add" and head is not None:
                 raise ValueError(f"campaign fact already exists: {fact_key}")
+            if head is None:
+                if data.get("expected_revision_id") is not None:
+                    raise ValueError("expected revision cannot target a missing branch fact")
+                return self.facts._add_branch_revision_in_session(
+                    session,
+                    memory,
+                    branch_id,
+                    content=content,
+                    metadata=data.get("metadata"),
+                    snapshot_id=data.get("snapshot_id"),
+                    status=str(data.get("status", "active")),
+                    valid_from=data.get("valid_from"),
+                    valid_to=data.get("valid_to"),
+                    source_event_ids=source_event_ids,
+                    importance=int(data.get("importance", 3)),
+                    disclosure_scope=data.get("disclosure_scope"),
+                )
             return self.facts._revise_in_session(
                 session,
                 memory,

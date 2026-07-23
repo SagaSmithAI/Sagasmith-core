@@ -552,6 +552,38 @@ def test_campaign_memory_upsert_has_stable_identity_and_optimistic_revision(data
         )
 
 
+def test_campaign_memory_upsert_reuses_identity_on_a_sibling_branch(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Branch facts")
+    memories = MemoryService(database)
+    snapshots = SnapshotService(database)
+    branches = BranchService(database)
+    base = snapshots.create(campaign.id, label="Before either branch learns the fact")
+    main = branches.current(campaign.id)
+    alternate = branches.create(
+        campaign.id,
+        name="alternate-fact",
+        from_snapshot_id=base.id,
+    )
+
+    main_value = memories.upsert(
+        campaign.id,
+        fact_key="location:cellar:door-state",
+        content="The cellar door is open.",
+    )
+    snapshots.create(campaign.id, label="Main branch fact")
+    snapshots.checkout_branch(campaign.id, alternate.id)
+    alternate_value = memories.upsert(
+        campaign.id,
+        fact_key="location:cellar:door-state",
+        content="The cellar door is still locked.",
+    )
+
+    assert alternate_value.id == main_value.id
+    assert alternate_value.revision_id != main_value.revision_id
+    assert memories.list(campaign.id, branch_id=main.id)[0].content.endswith("open.")
+    assert memories.list(campaign.id, branch_id=alternate.id)[0].content.endswith("locked.")
+
+
 def test_campaign_memory_hides_inactive_heads_by_default(database) -> None:
     campaign = CampaignService(database).create(system_id="dnd5e", name="Fact lifecycle")
     memories = MemoryService(database)
@@ -614,6 +646,53 @@ def test_continuity_commit_persists_event_facts_knowledge_and_snapshot_atomicall
     assert result["actor_knowledge"][0]["source_event_id"] == result["event"]["id"]
     assert result["snapshot"] is not None
     assert SnapshotService(database).verify(campaign.id, result["snapshot"]["slot"])
+
+
+def test_continuity_commit_upserts_same_fact_key_on_a_sibling_branch(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Branch continuity")
+    snapshots = SnapshotService(database)
+    branches = BranchService(database)
+    base = snapshots.create(campaign.id, label="Before the branch fact")
+    main = branches.current(campaign.id)
+    alternate = branches.create(
+        campaign.id,
+        name="alternate-continuity",
+        from_snapshot_id=base.id,
+    )
+    commits = ContinuityCommitService(database)
+
+    main_result = commits.commit(
+        campaign.id,
+        event={"summary": "The main branch alerts the guards."},
+        facts=[
+            {
+                "fact_key": "hideout:guards:alerted",
+                "content": "The guards are alerted on the main branch.",
+            }
+        ],
+    )
+    snapshots.create(campaign.id, label="Main branch continuity")
+    snapshots.checkout_branch(campaign.id, alternate.id)
+    alternate_result = commits.commit(
+        campaign.id,
+        event={"summary": "The alternate branch alerts the guards."},
+        facts=[
+            {
+                "fact_key": "hideout:guards:alerted",
+                "content": "The guards are alerted independently on the alternate branch.",
+            }
+        ],
+    )
+
+    main_fact = main_result["facts"][0]
+    alternate_fact = alternate_result["facts"][0]
+    assert alternate_fact["id"] == main_fact["id"]
+    assert alternate_fact["revision_id"] != main_fact["revision_id"]
+    facts = MemoryService(database)
+    assert facts.list(campaign.id, branch_id=main.id)[0].content.endswith("main branch.")
+    assert facts.list(campaign.id, branch_id=alternate.id)[0].content.endswith(
+        "alternate branch."
+    )
 
 
 def test_continuity_commit_rolls_back_every_ledger_on_failure(database) -> None:
