@@ -9,6 +9,7 @@ from sagasmith_core import (
     CampaignService,
     CharacterService,
     CharacterStateUpdate,
+    ContinuityCommitService,
     ContinuityService,
     EventService,
     IdempotencyService,
@@ -308,6 +309,8 @@ def test_campaign_profile_events_snapshot_and_memory(database) -> None:
     payload = saves.get(campaign.id, first.slot)["payload"]
     assert payload["events"][0]["summary"] == "The door is found"
     assert payload["memories"][0]["revision"]["content"].endswith("locked.")
+    assert payload["memories"][0]["fact_key"].startswith("legacy:")
+    assert payload["memories"][0]["revision"]["status"] == "active"
     campaigns.update(campaign.id, state={"door": "open"})
     CharacterService(database).update(character.id, sheet={"hp": 4}, notes={"memories": []})
     MemoryService(database).revise(memory.id, content="The cellar door is open.")
@@ -341,6 +344,144 @@ def test_campaign_profile_events_snapshot_and_memory(database) -> None:
     assert [item.slot for item in saves.lineage(campaign.id)] == [first.slot, restored.slot]
     recap = saves.regenerate_recap(campaign.id, restored.slot)
     assert recap["source"] == "deterministic"
+
+
+def test_campaign_memory_upsert_has_stable_identity_and_optimistic_revision(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Stable facts")
+    memories = MemoryService(database)
+    created = memories.upsert(
+        campaign.id,
+        fact_key="location:cellar:door-state",
+        subject="Cellar door",
+        subject_ref="location:cellar",
+        predicate="door-state",
+        content="The cellar door is locked.",
+        importance=4,
+        disclosure_scope="party",
+    )
+
+    updated = memories.upsert(
+        campaign.id,
+        fact_key="location:cellar:door-state",
+        subject="Ignored immutable label",
+        content="The cellar door is open.",
+        expected_revision_id=created.revision_id,
+        source_event_ids=["event:door-opened"],
+        importance=5,
+        disclosure_scope="public",
+    )
+
+    assert updated.id == created.id
+    assert updated.revision_id != created.revision_id
+    assert updated.fact_key == "location:cellar:door-state"
+    assert updated.subject == "Cellar door"
+    assert updated.subject_ref == "location:cellar"
+    assert updated.predicate == "door-state"
+    assert updated.source_event_ids == ["event:door-opened"]
+    assert updated.importance == 5
+    assert updated.disclosure_scope == "public"
+    assert len(memories.list(campaign.id)) == 1
+
+    with pytest.raises(ValueError, match="current revision"):
+        memories.upsert(
+            campaign.id,
+            fact_key="location:cellar:door-state",
+            content="A stale writer tries to close it.",
+            expected_revision_id=created.revision_id,
+        )
+
+
+def test_campaign_memory_hides_inactive_heads_by_default(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Fact lifecycle")
+    memories = MemoryService(database)
+    created = memories.upsert(
+        campaign.id,
+        fact_key="quest:bell:status",
+        content="The bell quest is active.",
+    )
+    retracted = memories.revise(
+        created.id,
+        content="The bell quest was based on false information.",
+        status="retracted",
+        expected_revision_id=created.revision_id,
+    )
+
+    assert memories.list(campaign.id) == []
+    assert memories.search(campaign.id, "bell") == []
+    inactive = memories.list(campaign.id, include_inactive=True)
+    assert [item.id for item in inactive] == [retracted.id]
+    assert [item.revision_id for item in inactive] == [retracted.revision_id]
+    assert [item.status for item in inactive] == ["retracted"]
+
+
+def test_continuity_commit_persists_event_facts_knowledge_and_snapshot_atomically(
+    database,
+) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Atomic continuity")
+    actor = CharacterService(database).create(
+        system_id="dnd5e", campaign_id=campaign.id, name="Witness", character_type="pc"
+    )
+
+    result = ContinuityCommitService(database).commit(
+        campaign.id,
+        event={
+            "summary": "The witness opens the sealed eastern door.",
+            "audience_scope": "actor",
+        },
+        facts=[
+            {
+                "fact_key": "location:east-door:state",
+                "subject": "Eastern door",
+                "subject_ref": "location:east-door",
+                "predicate": "state",
+                "content": "The eastern door is open.",
+                "disclosure_scope": "party",
+            }
+        ],
+        actor_knowledge=[
+            {
+                "actor_id": actor.id,
+                "knowledge_key": "east-door-open",
+                "proposition": "I opened the eastern door.",
+                "disclosure_scope": "owner",
+            }
+        ],
+        snapshot={"label": "Eastern door opened"},
+    )
+
+    assert result["facts"][0]["source_event_ids"] == [result["event"]["id"]]
+    assert result["actor_knowledge"][0]["source_event_id"] == result["event"]["id"]
+    assert result["snapshot"] is not None
+    assert SnapshotService(database).verify(campaign.id, result["snapshot"]["slot"])
+
+
+def test_continuity_commit_rolls_back_every_ledger_on_failure(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Rollback continuity")
+    service = ContinuityCommitService(database)
+
+    with pytest.raises(ValueError, match="live character"):
+        service.commit(
+            campaign.id,
+            event={"summary": "This event must roll back."},
+            facts=[
+                {
+                    "fact_key": "rollback:test",
+                    "content": "This fact must roll back.",
+                }
+            ],
+            actor_knowledge=[
+                {
+                    "actor_id": "missing-actor",
+                    "knowledge_key": "impossible",
+                    "proposition": "This must fail.",
+                }
+            ],
+        )
+
+    assert EventService(database).list(campaign.id) == []
+    assert MemoryService(database).list(campaign.id, include_inactive=True) == []
+    event = EventService(database).add(campaign.id, summary="The first committed event")
+    assert event.sequence == 1
 
 
 def test_revision_undo_and_redo(database) -> None:
@@ -651,6 +792,114 @@ def test_actor_scoped_events_follow_visible_actor_knowledge(database) -> None:
     assert hidden["actor_knowledge"] == []
 
 
+def test_actor_event_authorization_is_not_limited_by_knowledge_top_n(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Recall window")
+    actor = CharacterService(database).create(
+        system_id="dnd5e", campaign_id=campaign.id, name="Witness", character_type="pc"
+    )
+    knowledge = ActorKnowledgeService(database)
+    knowledge.add(
+        campaign.id,
+        actor_id=actor.id,
+        knowledge_key="decoy-query-match",
+        proposition="The decoy query is memorable.",
+        disclosure_scope="owner",
+    )
+    event = EventService(database).add(
+        campaign.id,
+        summary="A masked courier leaves through the east door.",
+        audience_scope="actor",
+    )
+    knowledge.add(
+        campaign.id,
+        actor_id=actor.id,
+        knowledge_key="courier-departure",
+        proposition="The masked courier left through the east door.",
+        source_event_id=event.id,
+        disclosure_scope="owner",
+    )
+
+    context = ContinuityService(database).context(
+        campaign.id,
+        actor_id=actor.id,
+        audience="player",
+        query="decoy query",
+        limit=1,
+    )
+
+    assert [item["knowledge_key"] for item in context["actor_knowledge"]] == [
+        "decoy-query-match"
+    ]
+    assert [item["id"] for item in context["events"]] == [event.id]
+
+
+def test_continuity_context_applies_one_shared_budget_with_metrics(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Budgeted context")
+    memories = MemoryService(database)
+    for index in range(5):
+        memories.add(
+            campaign.id,
+            fact_key=f"fact:budget:{index}",
+            content=f"Matched clue {index} " + ("x" * 360),
+            importance=5 - min(index, 4),
+            disclosure_scope="party",
+        )
+
+    context = ContinuityService(database).context(
+        campaign.id,
+        query="matched clue",
+        audience="player",
+        budget_chars=1_000,
+    )
+
+    assert context["retrieval"]["strategy"] == "lexical_structured_shared_budget_v2"
+    assert context["retrieval"]["budget_chars"] == 1_000
+    assert context["retrieval"]["candidate_count"] == 5
+    assert context["retrieval"]["returned_count"] < 5
+    assert context["retrieval"]["truncated"] is True
+
+
+def test_continuity_diagnostics_reports_ledger_and_snapshot_health(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Diagnostics")
+    event = EventService(database).add(
+        campaign.id,
+        summary="The gate opens.",
+        audience_scope="party",
+    )
+    memory = MemoryService(database).add(
+        campaign.id,
+        fact_key="location:gate:state",
+        content="The gate is open.",
+        source_event_ids=[event.id, "event:missing"],
+        disclosure_scope="party",
+    )
+    SnapshotService(database).create(campaign.id, label="Gate opened")
+    MemoryService(database).revise(
+        memory.id,
+        content="The gate is no longer relevant.",
+        expected_revision_id=memory.revision_id,
+        status="superseded",
+    )
+    EventService(database).add(
+        campaign.id,
+        summary="A later event is not snapshotted.",
+        audience_scope="dm",
+    )
+
+    diagnostics = ContinuityService(database).diagnostics(campaign.id)
+
+    assert diagnostics["facts"] == {
+        "total": 1,
+        "active": 0,
+        "inactive": 1,
+        "orphan_source_event_refs": 1,
+    }
+    assert diagnostics["events"]["unsnapshotted"] == 1
+    assert diagnostics["events"]["latest_sequence"] == 2
+    assert diagnostics["snapshots"]["total_on_branch"] == 1
+    assert diagnostics["snapshots"]["latest_payload_chars"] > 0
+
+
 def test_event_and_actor_knowledge_reject_unknown_visibility_scopes(database) -> None:
     campaign = CampaignService(database).create(system_id="dnd5e", name="Visibility enums")
     actor = CharacterService(database).create(
@@ -709,6 +958,43 @@ def test_snapshot_recap_only_contains_party_safe_deltas(database) -> None:
     assert recap["memory_candidates"] == []
     assert "Hidden Spy" not in str(recap)
     assert "poisoned" not in str(recap)
+
+
+def test_snapshot_presentation_recap_is_subordinate_and_evidence_bound(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Recap evidence")
+    snapshots = SnapshotService(database)
+    snapshots.create(campaign.id, label="Baseline")
+    visible = EventService(database).add(
+        campaign.id,
+        summary="The party reaches the bridge.",
+        audience_scope="party",
+    )
+    hidden = EventService(database).add(
+        campaign.id,
+        summary="The hidden spy leaves.",
+        audience_scope="dm",
+    )
+
+    saved = snapshots.create(
+        campaign.id,
+        label="Bridge",
+        recap={
+            "summary": "We reached the bridge.",
+            "evidence_event_ids": [visible.id],
+        },
+    )
+    recap = snapshots.get(campaign.id, saved.slot)["recap"]
+
+    assert recap["source"] == "deterministic"
+    assert recap["events"] == ["The party reaches the bridge."]
+    assert recap["presentation"]["summary"] == "We reached the bridge."
+    assert recap["provenance"]["evidence_event_ids"] == [visible.id]
+    with pytest.raises(ValueError, match="outside the player-safe delta"):
+        snapshots.create(
+            campaign.id,
+            label="Unsafe presentation",
+            recap={"summary": "Leak", "evidence_event_ids": [hidden.id]},
+        )
 
 
 def test_same_actor_knowledge_key_can_diverge_independently_on_sibling_branches(

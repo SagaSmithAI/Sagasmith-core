@@ -52,6 +52,7 @@ class Campaign(TimestampMixin, Base):
     settings: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     state: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     revision: Mapped[int] = mapped_column(Integer, default=1)
+    event_sequence: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     active_branch_id: Mapped[str | None] = mapped_column(
         ForeignKey("campaign_branches.id", ondelete="SET NULL"), nullable=True, index=True
     )
@@ -594,6 +595,10 @@ class CampaignSnapshot(Base):
 
 class CampaignMemory(TimestampMixin, Base):
     __tablename__ = "campaign_memories"
+    __table_args__ = (
+        UniqueConstraint("campaign_id", "fact_key", name="uq_campaign_memory_fact_key"),
+        Index("ix_campaign_memory_subject_ref", "campaign_id", "subject_ref"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     campaign_id: Mapped[str] = mapped_column(
@@ -602,6 +607,9 @@ class CampaignMemory(TimestampMixin, Base):
     )
     kind: Mapped[str] = mapped_column(String(64), default="fact")
     subject: Mapped[str] = mapped_column(String(300), default="")
+    fact_key: Mapped[str] = mapped_column(String(300), nullable=False)
+    subject_ref: Mapped[str] = mapped_column(String(300), default="")
+    predicate: Mapped[str] = mapped_column(String(200), default="")
 
 
 class MemoryRevision(Base):
@@ -623,6 +631,12 @@ class MemoryRevision(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    status: Mapped[str] = mapped_column(String(32), default="active")
+    valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    valid_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    source_event_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    importance: Mapped[int] = mapped_column(Integer, default=3)
+    disclosure_scope: Mapped[str] = mapped_column(String(32), default="dm")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

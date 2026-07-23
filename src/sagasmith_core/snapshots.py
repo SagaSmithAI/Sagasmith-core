@@ -65,7 +65,7 @@ def _checksum(value: dict[str, Any]) -> str:
 
 
 class SnapshotService:
-    SCHEMA_VERSION = 3
+    SCHEMA_VERSION = 4
 
     def __init__(self, database: Database) -> None:
         self.database = database
@@ -116,11 +116,15 @@ class SnapshotService:
             or 0
         ) + 1
         payload = self._capture(session, campaign, branch.id)
-        if recap is None:
-            parent_payload = (
-                dict(session.get(CampaignSnapshot, parent_id).payload) if parent_id else None
-            )
-            recap = self._build_recap(parent_payload, payload)
+        parent_payload = (
+            dict(session.get(CampaignSnapshot, parent_id).payload) if parent_id else None
+        )
+        canonical_recap = self._build_recap(parent_payload, payload)
+        recap = (
+            canonical_recap
+            if recap is None
+            else self._attach_presentation(canonical_recap, recap)
+        )
         row = CampaignSnapshot(
             id=str(uuid.uuid4()),
             campaign_id=campaign.id,
@@ -444,6 +448,9 @@ class SnapshotService:
                     "id": memory.id,
                     "kind": memory.kind,
                     "subject": memory.subject,
+                    "fact_key": memory.fact_key,
+                    "subject_ref": memory.subject_ref,
+                    "predicate": memory.predicate,
                     "created_at": memory.created_at.isoformat(),
                     "updated_at": memory.updated_at.isoformat(),
                     "revision": {
@@ -451,6 +458,14 @@ class SnapshotService:
                         "snapshot_id": revision.snapshot_id,
                         "content": revision.content,
                         "metadata": dict(revision.metadata_json),
+                        "status": revision.status,
+                        "valid_from": (
+                            revision.valid_from.isoformat() if revision.valid_from else None
+                        ),
+                        "valid_to": revision.valid_to.isoformat() if revision.valid_to else None,
+                        "source_event_ids": list(revision.source_event_ids),
+                        "importance": revision.importance,
+                        "disclosure_scope": revision.disclosure_scope,
                         "created_at": revision.created_at.isoformat(),
                     },
                 }
@@ -505,6 +520,12 @@ class SnapshotService:
                 "player_choices": [],
                 "memory_candidates": [],
                 "source": "deterministic",
+                "schema_version": 2,
+                "provenance": {
+                    "generator": "sagasmith-core",
+                    "method": "deterministic-delta",
+                    "evidence_event_ids": [],
+                },
             }
         changed: list[str] = []
         for field in ("status", "description", "settings", "state"):
@@ -536,15 +557,23 @@ class SnapshotService:
             item["id"]
             for item in current.get("memories", [])
             if item["revision"]["id"] not in old_memories
-            and item["revision"].get("metadata", {}).get("disclosure_scope", "dm")
+            and (
+                item["revision"].get("disclosure_scope")
+                or item["revision"].get("metadata", {}).get("disclosure_scope", "dm")
+            )
             in {"public", "party", "player"}
         ]
         old_event_ids = {item["id"] for item in previous.get("events", [])}
-        event_changes = [
-            item["summary"]
+        evidence_event_ids = [
+            item["id"]
             for item in current.get("events", [])
             if item["id"] not in old_event_ids
             and item.get("audience_scope") in {"public", "party", "player"}
+        ]
+        event_changes = [
+            item["summary"]
+            for item in current.get("events", [])
+            if item["id"] in evidence_event_ids
         ]
         summary_parts = []
         if changed:
@@ -569,6 +598,39 @@ class SnapshotService:
             "memory_candidates": memory_candidates,
             "changed_fields": changed,
             "source": "deterministic",
+            "schema_version": 2,
+            "provenance": {
+                "generator": "sagasmith-core",
+                "method": "deterministic-delta",
+                "evidence_event_ids": evidence_event_ids,
+            },
+        }
+
+    @staticmethod
+    def _attach_presentation(
+        canonical: dict[str, Any],
+        presentation: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Keep generated prose subordinate to an evidence-backed canonical delta."""
+        value = dict(presentation)
+        evidence = value.get("evidence_event_ids")
+        if not isinstance(evidence, list) or not all(isinstance(item, str) for item in evidence):
+            raise ValueError("presentation recap requires evidence_event_ids")
+        allowed = set(canonical["provenance"]["evidence_event_ids"])
+        unknown = sorted(set(evidence) - allowed)
+        if unknown:
+            raise ValueError(
+                "presentation recap cites events outside the player-safe delta: "
+                + ", ".join(unknown)
+            )
+        return {
+            **canonical,
+            "presentation": value,
+            "provenance": {
+                **canonical["provenance"],
+                "presentation_source": "reviewed-generated",
+                "presentation_evidence_event_ids": list(evidence),
+            },
         }
 
     @staticmethod
@@ -750,7 +812,7 @@ class SnapshotService:
     @classmethod
     def _assert_integrity(cls, session, row: CampaignSnapshot) -> None:
         """Verify the full payload, DAG ancestry, and indexed continuity bindings."""
-        if row.schema_version != cls.SCHEMA_VERSION:
+        if row.schema_version not in {3, cls.SCHEMA_VERSION}:
             raise SnapshotIntegrityError(
                 "snapshot schema is unsupported; create a new snapshot with the current runtime"
             )
@@ -797,7 +859,7 @@ class SnapshotService:
             revision = session.get(MemoryRevision, revision_id)
             item = payload_facts[memory_id]
             revision_item = dict(item.get("revision") or {})
-            if (
+            invalid = (
                 memory is None
                 or revision is None
                 or revision.memory_id != memory_id
@@ -805,12 +867,33 @@ class SnapshotService:
                 or memory.kind != item.get("kind")
                 or memory.subject != item.get("subject")
                 or memory.created_at.isoformat() != item.get("created_at")
-                or memory.updated_at.isoformat() != item.get("updated_at")
+                or (
+                    row.schema_version < 4
+                    and memory.updated_at.isoformat() != item.get("updated_at")
+                )
                 or revision.snapshot_id != revision_item.get("snapshot_id")
                 or revision.content != revision_item.get("content")
                 or dict(revision.metadata_json) != dict(revision_item.get("metadata") or {})
                 or revision.created_at.isoformat() != revision_item.get("created_at")
-            ):
+            )
+            if not invalid and row.schema_version >= 4:
+                invalid = (
+                    memory.fact_key != item.get("fact_key")
+                    or memory.subject_ref != item.get("subject_ref")
+                    or memory.predicate != item.get("predicate")
+                    or revision.status != revision_item.get("status")
+                    or (
+                        revision.valid_from.isoformat() if revision.valid_from else None
+                    )
+                    != revision_item.get("valid_from")
+                    or (revision.valid_to.isoformat() if revision.valid_to else None)
+                    != revision_item.get("valid_to")
+                    or list(revision.source_event_ids)
+                    != list(revision_item.get("source_event_ids") or [])
+                    or revision.importance != revision_item.get("importance")
+                    or revision.disclosure_scope != revision_item.get("disclosure_scope")
+                )
+            if invalid:
                 raise SnapshotIntegrityError("snapshot fact binding targets the wrong revision")
 
         payload_knowledge = {

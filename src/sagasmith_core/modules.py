@@ -86,6 +86,8 @@ class ModuleStructureProfile(Protocol):
         chapter_content: str,
     ) -> list[SceneBoundary]: ...
 
+    def document_metadata(self, content: str) -> dict[str, Any]: ...
+
 
 class GenericModuleProfile:
     name = "generic"
@@ -141,6 +143,10 @@ class GenericModuleProfile:
             for index, heading in enumerate(scene_headings)
         ]
 
+    def document_metadata(self, content: str) -> dict[str, Any]:
+        """Return profile-owned document metadata without interpreting generic prose."""
+        return {}
+
 
 class MarkdownModuleParser:
     """Interpret H1 as chapters and recover scene-sized H2/H3 boundaries."""
@@ -182,6 +188,10 @@ class MarkdownModuleParser:
             title = heading.group(2).strip()
             parsed.append(self._chapter(len(parsed), title, content[start:end], start, end))
         return parsed
+
+    def document_metadata(self, content: str) -> dict[str, Any]:
+        factory = getattr(self.profile, "document_metadata", None)
+        return dict(factory(content)) if callable(factory) else {}
 
     @staticmethod
     def _structural_start(content: str, heading: re.Match[str]) -> int:
@@ -314,6 +324,10 @@ class ModuleService:
         checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
         selected_parser = parser or MarkdownModuleParser()
         parsed = selected_parser.parse(content)
+        profile_metadata = selected_parser.document_metadata(content)
+        manifest_errors = list(profile_metadata.get("runtime_manifest_errors") or [])
+        if manifest_errors:
+            raise ValueError("invalid module runtime manifest: " + "; ".join(manifest_errors))
         profile = getattr(selected_parser, "profile", GenericModuleProfile())
         parser_profile = getattr(profile, "name", "generic")
         parser_version = getattr(profile, "version", "1")
@@ -370,6 +384,7 @@ class ModuleService:
                 warnings=list(normalized_document.warnings) if normalized_document else [],
                 metadata_json={
                     **dict(metadata or {}),
+                    **profile_metadata,
                     "logical_source_key": logical_key,
                     "import_state": "active" if activate else "staged",
                 },
@@ -580,6 +595,7 @@ class ModuleService:
         document = converter_for(path).convert(path)
         selected_parser = parser or MarkdownModuleParser()
         parsed = selected_parser.parse(document.content)
+        profile_metadata = selected_parser.document_metadata(document.content)
         return {
             "source_path": document.source_path,
             "media_type": document.media_type,
@@ -587,6 +603,7 @@ class ModuleService:
             "page_count": document.page_count,
             "warnings": list(document.warnings),
             "metadata": dict(document.metadata),
+            "profile_metadata": profile_metadata,
             "parser_profile": getattr(selected_parser.profile, "name", "generic"),
             "parser_version": getattr(selected_parser.profile, "version", "1"),
             "chapters": len(parsed),
@@ -604,8 +621,9 @@ class ModuleService:
         document = converter_for(path).convert(path)
         selected_parser = parser or MarkdownModuleParser()
         parsed = selected_parser.parse(document.content)
+        profile_metadata = selected_parser.document_metadata(document.content)
         scenes: list[dict[str, Any]] = []
-        errors: list[str] = []
+        errors: list[str] = list(profile_metadata.get("runtime_manifest_errors") or [])
         keys: set[str] = set()
         stable_keys = self._scene_stable_keys(parsed)
         for chapter in parsed:
@@ -662,6 +680,7 @@ class ModuleService:
             "page_count": document.page_count,
             "warnings": list(document.warnings),
             "metadata": dict(document.metadata),
+            "profile_metadata": profile_metadata,
             "parser_profile": getattr(selected_parser.profile, "name", "generic"),
             "parser_version": getattr(selected_parser.profile, "version", "1"),
             "scenes": scenes,
@@ -782,6 +801,9 @@ class ModuleService:
                     "parser_profile": row.parser_profile,
                     "parser_version": row.parser_version,
                     "warnings": list(row.warnings),
+                    "runtime_manifest": dict(row.metadata_json or {}).get(
+                        "runtime_manifest"
+                    ),
                     "chapters": self._counts(session, row.id)[0],
                     "scenes": self._counts(session, row.id)[1],
                     "chunks": self._counts(session, row.id)[2],
