@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -224,6 +225,70 @@ class SnapshotService:
                 session,
                 campaign,
                 label=f"Restored from slot {slot}",
+                parent_id=target.id,
+            )
+
+    def restore_with_rule_profile_conversion(
+        self,
+        campaign_id: str,
+        slot: int,
+        *,
+        rule_profile: dict[str, Any],
+        branch_name: str,
+        label: str,
+    ) -> SnapshotInfo:
+        """Fork an immutable snapshot while explicitly replacing its rule profile.
+
+        The source snapshot remains byte-for-byte unchanged. The converted profile
+        is materialized only on a new branch and immediately captured in a child
+        snapshot, so later checkout never depends on an implicit runtime upgrade.
+        """
+        profile_value = deepcopy(dict(rule_profile or {}))
+        required = {"system_id", "edition", "locale", "publications", "options"}
+        if set(profile_value) != required:
+            raise ValueError("converted rule profile must contain the exact snapshot fields")
+        name = str(branch_name or "").strip()
+        if not name:
+            raise ValueError("converted snapshot branch_name is required")
+        converted_label = str(label or "").strip()
+        if not converted_label:
+            raise ValueError("converted snapshot label is required")
+        with self.database.transaction() as session:
+            campaign = session.get(Campaign, campaign_id)
+            if campaign is None:
+                raise CampaignNotFoundError(campaign_id)
+            if profile_value["system_id"] != campaign.system_id:
+                raise ValueError("converted rule profile system_id does not match the campaign")
+            target = self._row(session, campaign_id, slot)
+            self._assert_integrity(session, target)
+            target_payload = deepcopy(dict(target.payload))
+            if target_payload.get("rule_profile") is None:
+                raise ValueError("source snapshot has no rule profile to convert")
+            self._create_in_session(
+                session,
+                campaign,
+                label=f"Before converted restore to slot {slot}",
+            )
+            branch = CampaignBranch(
+                id=str(uuid.uuid4()),
+                campaign_id=campaign_id,
+                name=name,
+                base_snapshot_id=target.id,
+                head_snapshot_id=target.id,
+                is_current=False,
+            )
+            session.add(branch)
+            session.flush()
+            branch_service = BranchService(self.database)
+            branch_service._copy_snapshot_heads(session, target.id, branch.id)
+            branch_service._copy_snapshot_revisions(session, target.id, branch.id)
+            branch_service._checkout(session, campaign, branch)
+            target_payload["rule_profile"] = profile_value
+            self._apply(session, campaign, target_payload)
+            return self._create_in_session(
+                session,
+                campaign,
+                label=converted_label,
                 parent_id=target.id,
             )
 

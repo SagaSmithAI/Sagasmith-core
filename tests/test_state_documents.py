@@ -890,6 +890,49 @@ def test_snapshot_restore_rolls_back_every_step_when_materialization_fails(
     assert branches.current(campaign.id).id == original_branch.id
 
 
+def test_snapshot_rule_profile_conversion_forks_without_mutating_source(database) -> None:
+    campaigns = CampaignService(database)
+    campaign = campaigns.create(system_id="dnd5e", name="Core conversion", state={"step": 1})
+    profiles = RuleProfileService(database)
+    profiles.set(
+        campaign.id,
+        edition="2014",
+        locale="zh-CN",
+        publications=["srd-5.1"],
+        options={"_core_rule_pack_lock": {"version": "old"}, "house_rule": True},
+    )
+    snapshots = SnapshotService(database)
+    source = snapshots.create(campaign.id, label="Old core")
+    source_document = snapshots.get(campaign.id, source.slot)
+    campaigns.update(campaign.id, state={"step": 2})
+
+    converted_profile = {
+        **source_document["payload"]["rule_profile"],
+        "options": {
+            "_core_rule_pack_lock": {"version": "new"},
+            "house_rule": True,
+        },
+    }
+    converted = snapshots.restore_with_rule_profile_conversion(
+        campaign.id,
+        source.slot,
+        rule_profile=converted_profile,
+        branch_name="converted-core",
+        label="Converted old core snapshot",
+    )
+
+    assert converted.parent_id == source.id
+    assert campaigns.get(campaign.id).state == {"step": 1}
+    assert BranchService(database).current(campaign.id).name == "converted-core"
+    assert profiles.get(campaign.id).options == converted_profile["options"]
+    source_after = snapshots.get(campaign.id, source.slot)
+    assert source_after["payload"] == source_document["payload"]
+    assert source_after["checksum"] == source_document["checksum"]
+    converted_document = snapshots.get(campaign.id, converted.slot)
+    assert converted_document["payload"]["rule_profile"] == converted_profile
+    assert converted_document["valid"] is True
+
+
 def test_branch_scoped_facts_events_and_actor_knowledge_do_not_leak(database) -> None:
     campaign = CampaignService(database).create(system_id="dnd5e", name="Knowledge branches")
     actor = CharacterService(database).create(
