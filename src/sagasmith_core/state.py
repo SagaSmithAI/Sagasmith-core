@@ -51,6 +51,7 @@ class StateMutationService:
         actor: str = "runtime",
         branch_id: str | None = None,
         idempotency_key: str | None = None,
+        idempotency_request_hash: str | None = None,
         rule_receipts: list[dict[str, Any]] | None = None,
     ) -> list[RevisionInfo] | None:
         updates = list(character_updates or [])
@@ -62,6 +63,14 @@ class StateMutationService:
             raise ValueError("at least one state document must be supplied")
         if receipts and operation is None:
             raise ValueError("rule receipts require an audited operation")
+        if idempotency_request_hash is not None:
+            if not idempotency_key:
+                raise ValueError("idempotency_request_hash requires an idempotency_key")
+            if (
+                len(idempotency_request_hash) != 64
+                or any(character not in "0123456789abcdef" for character in idempotency_request_hash)
+            ):
+                raise ValueError("idempotency_request_hash must be a SHA-256 hex digest")
 
         with self.database.transaction() as session:
             campaign = session.get(Campaign, campaign_id)
@@ -169,7 +178,8 @@ class StateMutationService:
                 actor=actor,
                 branch_id=branch_id,
                 idempotency_key=idempotency_key,
-                request_hash=request_hash(
+                request_hash=idempotency_request_hash
+                or request_hash(
                     {
                         "campaign_state": campaign_state,
                         "character_updates": [

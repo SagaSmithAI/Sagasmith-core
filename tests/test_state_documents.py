@@ -31,6 +31,7 @@ from sagasmith_core.documents import (
     build_structured_markdown,
     normalize_document,
 )
+from sagasmith_core.idempotency import request_hash
 from sagasmith_core.models import (
     ActorKnowledgeRevision,
     AuditLog,
@@ -1669,13 +1670,30 @@ def test_state_mutation_replaces_campaign_and_character_documents_atomically(dat
 
 def test_state_mutation_exposes_committed_idempotency_recovery_without_a_receipt(database) -> None:
     campaign = CampaignService(database).create(system_id="dnd5e", name="Receipt recovery")
+    public_request = {
+        "operation": "test.receipt.recovery",
+        "campaign_id": campaign.id,
+        "phase": "after",
+    }
     StateMutationService(database).replace(
         campaign.id,
         campaign_state={"phase": "after"},
         operation="test.receipt.recovery",
         idempotency_key="recover-on-retry",
+        idempotency_request_hash=request_hash(public_request),
     )
-    assert IdempotencyService(database).mutation_committed(campaign.id, "recover-on-retry")
+    idempotency = IdempotencyService(database)
+    assert idempotency.mutation_committed(
+        campaign.id,
+        "recover-on-retry",
+        public_request,
+    )
+    with pytest.raises(ValueError, match="different request"):
+        idempotency.mutation_committed(
+            campaign.id,
+            "recover-on-retry",
+            {**public_request, "phase": "different"},
+        )
     with pytest.raises(ValueError, match="committed mutation group"):
         StateMutationService(database).replace(
             campaign.id,
