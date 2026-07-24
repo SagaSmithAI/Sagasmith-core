@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import event
 
 from sagasmith_core import (
     AccessDeniedError,
@@ -126,3 +127,48 @@ def test_campaign_idempotency_receipt_recovers_response_without_stale_request(da
     ]
     with pytest.raises(LookupError, match="not found"):
         service.receipt(campaign.id, "missing")
+
+
+def test_revision_head_queries_are_bounded_in_sql(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Bounded history")
+    mutations = StateMutationService(database)
+    mutations.replace(
+        campaign.id,
+        campaign_state={"step": 1},
+        expected_campaign_revision=campaign.revision,
+        operation="test.step",
+        idempotency_key="step-1",
+    )
+    campaign = CampaignService(database).get(campaign.id)
+    statements: list[str] = []
+
+    def capture_statement(
+        _connection,
+        _cursor,
+        statement: str,
+        _parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        statements.append(" ".join(statement.upper().split()))
+
+    event.listen(database.engine, "before_cursor_execute", capture_statement)
+    try:
+        mutations.replace(
+            campaign.id,
+            campaign_state={"step": 2},
+            expected_campaign_revision=campaign.revision,
+            operation="test.step",
+            idempotency_key="step-2",
+        )
+    finally:
+        event.remove(database.engine, "before_cursor_execute", capture_statement)
+
+    head_queries = [
+        statement
+        for statement in statements
+        if "FROM STATE_REVISIONS JOIN MUTATION_GROUPS" in statement
+        and "ORDER BY STATE_REVISIONS.SEQUENCE DESC" in statement
+    ]
+    assert head_queries
+    assert all(" LIMIT " in statement for statement in head_queries)

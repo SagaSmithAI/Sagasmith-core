@@ -114,6 +114,7 @@ class RevisionService:
                 MutationGroup.branch_id == effective_branch_id,
             )
             .order_by(StateRevision.sequence.desc())
+            .limit(1)
         )
         max_sequence = (
             session.scalar(
@@ -192,6 +193,7 @@ class RevisionService:
                     self._visible_branch_revision_clause(session, campaign),
                 )
                 .order_by(StateRevision.sequence.desc())
+                .limit(1)
             )
             if row is None:
                 raise LookupError("nothing to undo")
@@ -222,6 +224,7 @@ class RevisionService:
                     self._visible_branch_revision_clause(session, campaign),
                 )
                 .order_by(StateRevision.sequence.desc())
+                .limit(1)
             )
             current_group_id = current.mutation_group_id if current else None
             statement = select(MutationGroup).where(
@@ -237,7 +240,7 @@ class RevisionService:
                     .scalar_subquery()
                 )
                 statement = statement.where(MutationGroup.sequence > current_sequence)
-            group = session.scalar(statement.order_by(MutationGroup.sequence))
+            group = session.scalar(statement.order_by(MutationGroup.sequence).limit(1))
             if group is None:
                 raise LookupError("nothing to redo")
             rows = self._group_rows(session, group_id=group.id)
