@@ -311,14 +311,37 @@ class BranchService:
         if not cursor:
             return
         rows = list(
-            session.scalars(
-                select(StateRevision)
+            session.execute(
+                select(
+                    StateRevision.id,
+                    StateRevision.mutation_group_id,
+                    StateRevision.campaign_id,
+                    StateRevision.parent_id,
+                    StateRevision.sequence,
+                    StateRevision.branch_key,
+                    StateRevision.operation,
+                    StateRevision.entity_type,
+                    StateRevision.entity_id,
+                )
                 .where(StateRevision.id.in_(cursor))
                 .order_by(StateRevision.sequence)
             )
         )
         if not rows:
             return
+        payload_source_ids = set(
+            session.scalars(
+                select(StateRevision.id).where(
+                    StateRevision.id.in_(
+                        {
+                            str(row.branch_key)
+                            for row in rows
+                            if str(row.branch_key or "")
+                        }
+                    )
+                )
+            )
+        )
         max_sequence = (
             session.scalar(
                 select(func.max(StateRevision.sequence)).where(
@@ -373,6 +396,11 @@ class BranchService:
         revision_map = {row.id: str(uuid.uuid4()) for row in rows}
         for offset, old in enumerate(rows, start=1):
             cursor_item = cursor[old.id]
+            payload_revision_id = (
+                old.branch_key
+                if old.branch_key in payload_source_ids
+                else old.id
+            )
             session.add(
                 StateRevision(
                     id=revision_map[old.id],
@@ -380,13 +408,15 @@ class BranchService:
                     campaign_id=old.campaign_id,
                     parent_id=revision_map.get(old.parent_id),
                     sequence=max_sequence + offset,
-                    # Preserve the source revision id as a snapshot-cursor alias.
-                    branch_key=old.id,
+                    # Branch cursors share immutable payloads with their source
+                    # revisions. Undo/redo resolves this id without duplicating
+                    # potentially large campaign and character JSON documents.
+                    branch_key=payload_revision_id,
                     operation=old.operation,
                     entity_type=old.entity_type,
                     entity_id=old.entity_id,
-                    before=dict(old.before) if old.before else None,
-                    after=dict(old.after) if old.after else None,
+                    before=None,
+                    after=None,
                     applied=bool(cursor_item.get("applied", True)),
                     redoable=bool(cursor_item.get("redoable", True)),
                 )

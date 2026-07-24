@@ -429,8 +429,12 @@ class SnapshotService:
             .order_by(ActorKnowledge.actor_id, ActorKnowledge.knowledge_key)
         )
         revisions = list(
-            session.scalars(
-                select(StateRevision)
+            session.execute(
+                select(
+                    StateRevision.id,
+                    StateRevision.applied,
+                    StateRevision.redoable,
+                )
                 .join(MutationGroup, MutationGroup.id == StateRevision.mutation_group_id)
                 .where(StateRevision.campaign_id == campaign.id)
                 .where(MutationGroup.branch_id == branch_id)

@@ -31,7 +31,13 @@ from sagasmith_core.documents import (
     build_structured_markdown,
     normalize_document,
 )
-from sagasmith_core.models import ActorKnowledgeRevision, SnapshotActorKnowledgeBinding
+from sagasmith_core.models import (
+    ActorKnowledgeRevision,
+    AuditLog,
+    MutationGroup,
+    SnapshotActorKnowledgeBinding,
+    StateRevision,
+)
 from sagasmith_core.snapshots import SnapshotIntegrityError
 
 
@@ -1524,11 +1530,56 @@ def test_branch_checkout_bulk_restores_large_revision_cursor(database) -> None:
             idempotency_key=f"bulk-cursor-{step}",
         )
     base = snapshots.create(campaign.id, label="Sixty revisions")
-    alternate = branches.create(
-        campaign.id,
-        name="bulk-cursor-copy",
-        from_snapshot_id=base.id,
+    copy_statements: list[str] = []
+
+    def record_copy_statement(
+        _conn, _cursor, statement, _parameters, _context, _many
+    ) -> None:
+        copy_statements.append(" ".join(statement.upper().split()))
+
+    event.listen(database.engine, "before_cursor_execute", record_copy_statement)
+    try:
+        alternate = branches.create(
+            campaign.id,
+            name="bulk-cursor-copy",
+            from_snapshot_id=base.id,
+        )
+    finally:
+        event.remove(
+            database.engine,
+            "before_cursor_execute",
+            record_copy_statement,
+        )
+    revision_copy_selects = [
+        statement
+        for statement in copy_statements
+        if statement.startswith("SELECT") and "FROM STATE_REVISIONS" in statement
+    ]
+    assert revision_copy_selects
+    assert all(
+        "STATE_REVISIONS.BEFORE" not in statement
+        and "STATE_REVISIONS.AFTER" not in statement
+        for statement in revision_copy_selects
     )
+    with database.session_factory() as session:
+        cloned_revisions = list(
+            session.scalars(
+                select(StateRevision)
+                .join(
+                    MutationGroup,
+                    MutationGroup.id == StateRevision.mutation_group_id,
+                )
+                .where(MutationGroup.branch_id == alternate.id)
+            )
+        )
+        audit_rows = list(session.scalars(select(AuditLog)))
+    assert len(cloned_revisions) == 60
+    assert all(
+        row.before is None and row.after is None
+        for row in cloned_revisions
+    )
+    assert audit_rows
+    assert all(row.before is None and row.after is None for row in audit_rows)
     current = campaigns.get(campaign.id)
     mutations.replace(
         campaign.id,
@@ -1551,6 +1602,8 @@ def test_branch_checkout_bulk_restores_large_revision_cursor(database) -> None:
         event.remove(database.engine, "before_cursor_execute", record_statement)
 
     assert campaigns.get(campaign.id).state == {"step": 59}
+    RevisionService(database).undo(campaign.id)
+    assert campaigns.get(campaign.id).state == {"step": 58}
     revision_statements = [
         statement
         for statement in statements

@@ -199,7 +199,11 @@ class RevisionService:
                 raise LookupError("nothing to undo")
             rows = self._group_rows(session, row)
             for member in sorted(rows, key=lambda item: item.sequence, reverse=True):
-                self._apply(session, member, member.before)
+                self._apply(
+                    session,
+                    member,
+                    self._payload_value(session, member, before=True),
+                )
                 member.applied = False
                 self._audit(session, member, actor="undo", reverse=True)
             if row.mutation_group_id:
@@ -245,7 +249,11 @@ class RevisionService:
                 raise LookupError("nothing to redo")
             rows = self._group_rows(session, group_id=group.id)
             for member in sorted(rows, key=lambda item: item.sequence):
-                self._apply(session, member, member.after)
+                self._apply(
+                    session,
+                    member,
+                    self._payload_value(session, member, before=False),
+                )
                 member.applied = True
                 self._audit(session, member, actor="redo")
             group.applied = True
@@ -324,6 +332,31 @@ class RevisionService:
             setattr(row, key, item)
 
     @staticmethod
+    def _payload_value(
+        session,
+        revision: StateRevision,
+        *,
+        before: bool,
+    ) -> dict[str, Any] | None:
+        value = revision.before if before else revision.after
+        if value is not None:
+            return dict(value)
+        source_id = str(revision.branch_key or "")
+        visited = {revision.id}
+        while source_id and source_id not in visited:
+            visited.add(source_id)
+            source = session.get(StateRevision, source_id)
+            if source is None:
+                break
+            value = source.before if before else source.after
+            if value is not None:
+                return dict(value)
+            source_id = str(source.branch_key or "")
+        raise RuntimeError(
+            f"revision payload source is unavailable: {revision.id}"
+        )
+
+    @staticmethod
     def _audit(session, row: StateRevision, *, actor: str, reverse: bool = False) -> None:
         session.add(
             AuditLog(
@@ -334,8 +367,11 @@ class RevisionService:
                 entity_type=row.entity_type,
                 entity_id=row.entity_id,
                 actor=actor,
-                before=row.after if reverse else row.before,
-                after=row.before if reverse else row.after,
+                # The immutable revision row owns the reversible payload. Audit
+                # entries retain its id and operation metadata without storing a
+                # second copy of the same potentially large JSON documents.
+                before=None,
+                after=None,
             )
         )
 
