@@ -68,7 +68,10 @@ class StateMutationService:
                 raise ValueError("idempotency_request_hash requires an idempotency_key")
             if (
                 len(idempotency_request_hash) != 64
-                or any(character not in "0123456789abcdef" for character in idempotency_request_hash)
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in idempotency_request_hash
+                )
             ):
                 raise ValueError("idempotency_request_hash must be a SHA-256 hex digest")
 
