@@ -10,7 +10,9 @@ from sagasmith_core import (
     IdempotencyConflictError,
     IdempotencyService,
     RevisionService,
+    StateMutationService,
 )
+from sagasmith_core.idempotency import request_hash
 
 
 def test_grouped_revision_undo_redo_is_atomic(database) -> None:
@@ -89,6 +91,14 @@ def test_idempotency_rejects_key_reuse_with_different_payload(database) -> None:
 def test_campaign_idempotency_receipt_recovers_response_without_stale_request(database) -> None:
     campaign = CampaignService(database).create(system_id="dnd5e", name="Receipt")
     service = IdempotencyService(database)
+    revisions = StateMutationService(database).replace(
+        campaign.id,
+        campaign_state={"rested": True},
+        expected_campaign_revision=campaign.revision,
+        operation="campaign.party.rest.long_rest",
+        idempotency_key="long-rest-1",
+    )
+    assert revisions is not None
     service.remember(
         f"campaign:{campaign.id}",
         "long-rest-1",
@@ -104,5 +114,15 @@ def test_campaign_idempotency_receipt_recovers_response_without_stale_request(da
         "status": "committed",
         "world_time": {"elapsed_minutes": 480},
     }
+    assert receipt.request_hash == request_hash({"expected_revision": 4})
+    assert receipt.mutation_group_id == revisions[0].mutation_group_id
+    assert receipt.entity_revisions == [
+        {
+            "entity_type": "campaign",
+            "entity_id": campaign.id,
+            "before_revision": campaign.revision,
+            "after_revision": campaign.revision + 1,
+        }
+    ]
     with pytest.raises(LookupError, match="not found"):
         service.receipt(campaign.id, "missing")

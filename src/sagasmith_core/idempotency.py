@@ -11,7 +11,7 @@ from typing import Any
 from sqlalchemy import select
 
 from sagasmith_core.database import Database
-from sagasmith_core.models import IdempotencyRecord, MutationGroup
+from sagasmith_core.models import IdempotencyRecord, MutationGroup, StateRevision
 
 
 class IdempotencyConflictError(ValueError):
@@ -24,6 +24,17 @@ class IdempotencyResult:
     replayed: bool
     response: dict[str, Any] | None
     mutation_group_id: str | None
+
+
+@dataclass(frozen=True)
+class IdempotencyReceipt:
+    key: str
+    replayed: bool
+    response: dict[str, Any]
+    mutation_group_id: str | None
+    request_hash: str
+    branch_id: str | None
+    entity_revisions: list[dict[str, Any]]
 
 
 def request_hash(payload: Any) -> str:
@@ -39,7 +50,7 @@ class IdempotencyService:
         with self.database.transaction() as session:
             return self.lookup_in_session(session, scope, key, payload)
 
-    def receipt(self, campaign_id: str, key: str) -> IdempotencyResult:
+    def receipt(self, campaign_id: str, key: str) -> IdempotencyReceipt:
         """Read one campaign-owned replay receipt without reconstructing its request."""
         with self.database.transaction() as session:
             rows = list(
@@ -55,7 +66,50 @@ class IdempotencyService:
             if len(rows) != 1:
                 raise RuntimeError(f"idempotency receipt is ambiguous: {key}")
             row = rows[0]
-            return IdempotencyResult(key, True, dict(row.response), row.mutation_group_id)
+            group = (
+                session.get(MutationGroup, row.mutation_group_id)
+                if row.mutation_group_id
+                else None
+            )
+            if group is None:
+                groups = list(
+                    session.scalars(
+                        select(MutationGroup).where(
+                            MutationGroup.campaign_id == campaign_id,
+                            MutationGroup.idempotency_key == key,
+                        )
+                    )
+                )
+                if len(groups) > 1:
+                    raise RuntimeError(f"idempotency mutation group is ambiguous: {key}")
+                group = groups[0] if groups else None
+            entity_revisions = []
+            if group is not None:
+                revision_rows = session.scalars(
+                    select(StateRevision)
+                    .where(StateRevision.mutation_group_id == group.id)
+                    .order_by(StateRevision.sequence)
+                )
+                for revision in revision_rows:
+                    before = dict(revision.before or {})
+                    after = dict(revision.after or {})
+                    entity_revisions.append(
+                        {
+                            "entity_type": revision.entity_type,
+                            "entity_id": revision.entity_id,
+                            "before_revision": before.get("revision"),
+                            "after_revision": after.get("revision"),
+                        }
+                    )
+            return IdempotencyReceipt(
+                key,
+                True,
+                dict(row.response),
+                group.id if group is not None else row.mutation_group_id,
+                row.request_hash,
+                group.branch_id if group is not None else None,
+                entity_revisions,
+            )
 
     def lookup_in_session(
         self, session, scope: str, key: str, payload: Any
