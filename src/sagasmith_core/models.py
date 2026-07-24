@@ -417,7 +417,10 @@ class MutationGroup(Base):
     __table_args__ = (
         Index("ix_mutation_group_campaign_sequence", "campaign_id", "sequence"),
         UniqueConstraint(
-            "campaign_id", "idempotency_key", name="uq_mutation_group_campaign_idempotency"
+            "campaign_id",
+            "branch_id",
+            "idempotency_key",
+            name="uq_mutation_group_branch_idempotency",
         ),
     )
 

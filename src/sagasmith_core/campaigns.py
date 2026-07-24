@@ -233,9 +233,11 @@ class CampaignService:
             row = session.get(Campaign, campaign_id)
             if row is None:
                 raise CampaignNotFoundError(campaign_id)
+            effective_branch_id = branch_id or row.active_branch_id
             if idempotency_key and session.scalar(
                 select(MutationGroup.id).where(
                     MutationGroup.campaign_id == campaign_id,
+                    MutationGroup.branch_id == effective_branch_id,
                     MutationGroup.idempotency_key == idempotency_key,
                     MutationGroup.applied.is_(True),
                 )

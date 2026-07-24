@@ -11,7 +11,7 @@ from typing import Any
 from sqlalchemy import select
 
 from sagasmith_core.database import Database
-from sagasmith_core.models import IdempotencyRecord, MutationGroup, StateRevision
+from sagasmith_core.models import Campaign, IdempotencyRecord, MutationGroup, StateRevision
 
 
 class IdempotencyConflictError(ValueError):
@@ -50,9 +50,19 @@ class IdempotencyService:
         with self.database.transaction() as session:
             return self.lookup_in_session(session, scope, key, payload)
 
-    def receipt(self, campaign_id: str, key: str) -> IdempotencyReceipt:
+    def receipt(
+        self,
+        campaign_id: str,
+        key: str,
+        *,
+        branch_id: str | None = None,
+    ) -> IdempotencyReceipt:
         """Read one campaign-owned replay receipt without reconstructing its request."""
         with self.database.transaction() as session:
+            campaign = session.get(Campaign, campaign_id)
+            if campaign is None:
+                raise LookupError(campaign_id)
+            effective_branch_id = branch_id or campaign.active_branch_id
             rows = list(
                 session.scalars(
                     select(IdempotencyRecord).where(
@@ -63,19 +73,41 @@ class IdempotencyService:
             )
             if not rows:
                 raise LookupError(f"idempotency receipt not found: {key}")
-            if len(rows) != 1:
-                raise RuntimeError(f"idempotency receipt is ambiguous: {key}")
-            row = rows[0]
-            group = (
-                session.get(MutationGroup, row.mutation_group_id)
-                if row.mutation_group_id
-                else None
-            )
+            matched: list[tuple[IdempotencyRecord, MutationGroup | None]] = []
+            for candidate in rows:
+                candidate_group = (
+                    session.get(MutationGroup, candidate.mutation_group_id)
+                    if candidate.mutation_group_id
+                    else None
+                )
+                if candidate_group is None:
+                    candidate_group = session.scalar(
+                        select(MutationGroup).where(
+                            MutationGroup.campaign_id == campaign_id,
+                            MutationGroup.branch_id == effective_branch_id,
+                            MutationGroup.idempotency_key == key,
+                        )
+                    )
+                if candidate_group is not None:
+                    if candidate_group.branch_id == effective_branch_id:
+                        matched.append((candidate, candidate_group))
+                elif len(rows) == 1:
+                    matched.append((candidate, None))
+            if not matched:
+                raise LookupError(
+                    f"idempotency receipt not found on branch {effective_branch_id}: {key}"
+                )
+            if len(matched) != 1:
+                raise RuntimeError(
+                    f"idempotency receipt is ambiguous on branch {effective_branch_id}: {key}"
+                )
+            row, group = matched[0]
             if group is None:
                 groups = list(
                     session.scalars(
                         select(MutationGroup).where(
                             MutationGroup.campaign_id == campaign_id,
+                            MutationGroup.branch_id == effective_branch_id,
                             MutationGroup.idempotency_key == key,
                         )
                     )
@@ -129,12 +161,24 @@ class IdempotencyService:
             )
         return IdempotencyResult(key, True, dict(row.response), row.mutation_group_id)
 
-    def mutation_committed(self, campaign_id: str, key: str, payload: Any | None = None) -> bool:
+    def mutation_committed(
+        self,
+        campaign_id: str,
+        key: str,
+        payload: Any | None = None,
+        *,
+        branch_id: str | None = None,
+    ) -> bool:
         """Check for a state commit whose richer replay receipt is absent."""
         with self.database.transaction() as session:
+            campaign = session.get(Campaign, campaign_id)
+            if campaign is None:
+                return False
+            effective_branch_id = branch_id or campaign.active_branch_id
             row = session.scalar(
                 select(MutationGroup).where(
                     MutationGroup.campaign_id == campaign_id,
+                    MutationGroup.branch_id == effective_branch_id,
                     MutationGroup.idempotency_key == key,
                     MutationGroup.applied.is_(True),
                 )
@@ -196,6 +240,26 @@ class IdempotencyService:
                     f"idempotency key reused with a different request: {key}"
                 )
             return IdempotencyResult(key, True, dict(row.response), row.mutation_group_id)
+        if mutation_group_id is None and campaign_id is not None:
+            groups = list(
+                session.scalars(
+                    select(MutationGroup).where(
+                        MutationGroup.campaign_id == campaign_id,
+                        MutationGroup.idempotency_key == key,
+                        MutationGroup.applied.is_(True),
+                    )
+                )
+            )
+            scope_parts = set(scope.split(":"))
+            scoped_groups = [
+                group
+                for group in groups
+                if group.branch_id is not None and group.branch_id in scope_parts
+            ]
+            if len(scoped_groups) == 1:
+                mutation_group_id = scoped_groups[0].id
+            elif len(groups) == 1:
+                mutation_group_id = groups[0].id
         row = IdempotencyRecord(
             id=str(uuid.uuid4()),
             scope=scope,

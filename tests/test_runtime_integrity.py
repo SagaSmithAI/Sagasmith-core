@@ -6,11 +6,13 @@ from sqlalchemy import event
 from sagasmith_core import (
     AccessDeniedError,
     AccessService,
+    BranchService,
     CampaignService,
     CharacterService,
     IdempotencyConflictError,
     IdempotencyService,
     RevisionService,
+    SnapshotService,
     StateMutationService,
 )
 from sagasmith_core.idempotency import request_hash
@@ -127,6 +129,74 @@ def test_campaign_idempotency_receipt_recovers_response_without_stale_request(da
     ]
     with pytest.raises(LookupError, match="not found"):
         service.receipt(campaign.id, "missing")
+
+
+def test_mutation_idempotency_is_isolated_per_campaign_branch(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Branch receipts")
+    branches = BranchService(database)
+    main = branches.current(campaign.id)
+    mutations = StateMutationService(database)
+    service = IdempotencyService(database)
+
+    mutations.replace(
+        campaign.id,
+        campaign_state={"roll": 1},
+        expected_campaign_revision=campaign.revision,
+        operation="dnd.dice.roll",
+        branch_id=main.id,
+        idempotency_key="same-source-roll",
+    )
+    service.remember(
+        f"campaign-random:{campaign.id}:{main.id}:system:local",
+        "same-source-roll",
+        {"expression": "1d20"},
+        {"total": 11},
+        campaign_id=campaign.id,
+    )
+    snapshot = SnapshotService(database).create(campaign.id, label="Fork point")
+    fork = branches.create(
+        campaign.id,
+        name="alternate",
+        from_snapshot_id=snapshot.id,
+        checkout=True,
+    )
+    fork_campaign = CampaignService(database).get(campaign.id)
+    mutations.replace(
+        campaign.id,
+        campaign_state={"roll": 2},
+        expected_campaign_revision=fork_campaign.revision,
+        operation="dnd.dice.roll",
+        branch_id=fork.id,
+        idempotency_key="same-source-roll",
+    )
+    service.remember(
+        f"campaign-random:{campaign.id}:{fork.id}:system:local",
+        "same-source-roll",
+        {"expression": "1d20"},
+        {"total": 11, "branch": "alternate"},
+        campaign_id=campaign.id,
+    )
+
+    assert service.receipt(
+        campaign.id,
+        "same-source-roll",
+        branch_id=main.id,
+    ).response == {"total": 11}
+    assert service.receipt(
+        campaign.id,
+        "same-source-roll",
+        branch_id=fork.id,
+    ).response == {"total": 11, "branch": "alternate"}
+    assert service.mutation_committed(
+        campaign.id,
+        "same-source-roll",
+        branch_id=main.id,
+    )
+    assert service.mutation_committed(
+        campaign.id,
+        "same-source-roll",
+        branch_id=fork.id,
+    )
 
 
 def test_revision_head_queries_are_bounded_in_sql(database) -> None:

@@ -22,6 +22,12 @@ def test_bundled_migration_builds_schema(tmp_path: Path) -> None:
         assert "rule_pack_versions" in inspector.get_table_names()
         assert "campaign_rule_activations" in inspector.get_table_names()
         assert "rule_resolution_receipts" in inspector.get_table_names()
+        assert any(
+            constraint["name"] == "uq_mutation_group_branch_idempotency"
+            and constraint["column_names"]
+            == ["campaign_id", "branch_id", "idempotency_key"]
+            for constraint in inspector.get_unique_constraints("mutation_groups")
+        )
         assert "event_sequence" in {
             column["name"] for column in inspector.get_columns("campaigns")
         }

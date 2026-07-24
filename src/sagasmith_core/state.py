@@ -67,6 +67,7 @@ class StateMutationService:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
+            effective_branch_id = branch_id or campaign.active_branch_id
 
             rows: list[tuple[Character, CharacterStateUpdate]] = []
             before_campaign = {
@@ -84,6 +85,7 @@ class StateMutationService:
             if idempotency_key and session.scalar(
                 select(MutationGroup.id).where(
                     MutationGroup.campaign_id == campaign_id,
+                    MutationGroup.branch_id == effective_branch_id,
                     MutationGroup.idempotency_key == idempotency_key,
                     MutationGroup.applied.is_(True),
                 )
@@ -190,7 +192,6 @@ class StateMutationService:
             mutation_group_id = revisions[0].mutation_group_id
             if receipts and mutation_group_id is None:
                 raise RuntimeError("rule receipts require a mutation group")
-            effective_branch_id = branch_id or campaign.active_branch_id
             for receipt in receipts:
                 fingerprint = str(receipt.get("ruleset_fingerprint") or "")
                 mechanic_id = str(receipt.get("mechanic_id") or "")
