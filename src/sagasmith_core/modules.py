@@ -225,12 +225,30 @@ class MarkdownModuleParser:
     @staticmethod
     def _structural_start(content: str, heading: re.Match[str]) -> int:
         """Keep a page marker immediately preceding a chapter with that chapter."""
-        prefix = content[: heading.start()]
-        markers = list(re.finditer(r"^<!-- page: \d+ -->\s*$", prefix, re.MULTILINE))
-        if not markers:
-            return heading.start()
-        marker = markers[-1]
-        return marker.start() if not prefix[marker.end() :].strip() else heading.start()
+        cursor = heading.start()
+        while cursor and content[cursor - 1].isspace():
+            cursor -= 1
+        line_start = content.rfind("\n", 0, cursor) + 1
+        candidate = content[line_start:cursor]
+        return (
+            line_start
+            if re.fullmatch(r"<!-- page: \d+ -->", candidate)
+            else heading.start()
+        )
+
+    @staticmethod
+    def _last_content_offset(content: str, start: int, end: int) -> int:
+        """Skip whitespace and trailing page markers when resolving an inclusive end."""
+        cursor = end
+        while cursor > start:
+            while cursor > start and content[cursor - 1].isspace():
+                cursor -= 1
+            line_start = max(start, content.rfind("\n", start, cursor) + 1)
+            if re.fullmatch(r"<!-- page: \d+ -->", content[line_start:cursor]):
+                cursor = line_start
+                continue
+            break
+        return max(start, cursor - 1)
 
     def _chapter(
         self,
@@ -253,8 +271,8 @@ class MarkdownModuleParser:
             scene_title = boundary.title
             start = boundary.start
             end = boundary.end
-            raw = chapter_content[start:end].strip()
-            clean = strip_page_markers(raw)
+            raw = chapter_content[start:end]
+            clean = strip_page_markers(raw).strip()
             sections = self.hierarchy_parser.parse(raw)
             chunks = []
             for section in sections:
@@ -262,16 +280,22 @@ class MarkdownModuleParser:
                     text = strip_page_markers(chunk.content)
                     if not text:
                         continue
-                    absolute_start = global_start + start + chunk.start_offset
-                    absolute_end = global_start + start + chunk.end_offset
+                    local_start = start + chunk.start_offset
+                    local_end = start + chunk.end_offset
+                    absolute_start = global_start + local_start
+                    absolute_end = global_start + local_end
                     metadata = {
                         **chunk.metadata,
-                        "start_line": chapter_content.count("\n", 0, start + chunk.start_offset)
-                        + 1,
-                        "end_line": chapter_content.count("\n", 0, start + chunk.end_offset) + 1,
+                        "start_line": chapter_content.count("\n", 0, local_start) + 1,
+                        "end_line": chapter_content.count("\n", 0, local_end) + 1,
                         "page_start": page_locator.page_for_offset(absolute_start),
                         "page_end": page_locator.page_for_offset(
-                            max(absolute_start, absolute_end - 1)
+                            global_start
+                            + self._last_content_offset(
+                                chapter_content,
+                                local_start,
+                                local_end,
+                            )
                         ),
                         "chunk_type": self.profile.classify_chunk(section.title, text),
                         "content_hash": hashlib.sha256(text.encode("utf-8")).hexdigest(),
@@ -303,7 +327,12 @@ class MarkdownModuleParser:
                         "end_line": chapter_content.count("\n", 0, end) + 1,
                         "page_start": page_locator.page_for_offset(scene_start),
                         "page_end": page_locator.page_for_offset(
-                            max(scene_start, scene_end - 1)
+                            global_start
+                            + self._last_content_offset(
+                                chapter_content,
+                                start,
+                                end,
+                            )
                         ),
                         "keywords": self.profile.keywords(scene_title, clean),
                         "absolute_start": scene_start,
@@ -319,7 +348,12 @@ class MarkdownModuleParser:
             metadata={
                 "page_start": page_locator.page_for_offset(global_start),
                 "page_end": page_locator.page_for_offset(
-                    max(global_start, global_end - 1)
+                    global_start
+                    + self._last_content_offset(
+                        chapter_content,
+                        0,
+                        len(chapter_content),
+                    )
                 ),
                 "absolute_start": global_start,
                 "absolute_end": global_end,

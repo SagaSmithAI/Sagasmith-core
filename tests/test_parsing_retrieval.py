@@ -35,6 +35,25 @@ def test_markdown_parser_does_not_turn_same_level_after_a_jump_into_children() -
     ]
 
 
+def test_markdown_parser_offsets_match_trimmed_source_and_exclude_next_page_marker() -> None:
+    content = (
+        "<!-- page: 1 -->\n"
+        "# First\n\n"
+        "  Exact text.  \n"
+        "<!-- page: 2 -->\n"
+        "# Second\n"
+        "Next text.\n"
+    )
+    parsed = MarkdownHierarchyParser().parse(content)
+
+    first = parsed[0]
+    chunk = first.chunks[0]
+
+    assert content[chunk.start_offset : chunk.end_offset] == "Exact text."
+    assert "<!-- page: 2 -->" not in first.content
+    assert parsed[1].start_offset == content.index("Next text.")
+
+
 def test_module_parser_supports_profiles_without_scene_boundary_hook() -> None:
     class LegacyProfile:
         name = "legacy"

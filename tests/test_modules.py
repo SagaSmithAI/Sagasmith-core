@@ -160,6 +160,50 @@ def test_module_parser_uses_global_page_offsets_for_same_page_chapters() -> None
     assert [chapter.scenes[0].metadata["page_start"] for chapter in chapters] == [1, 1, 2]
 
 
+def test_module_parser_excludes_page_marker_before_next_heading_from_chunk() -> None:
+    chapters = MarkdownModuleParser().parse(
+        "<!-- page: 204 -->\n"
+        "# Appendix B\n"
+        "## Monsters\n"
+        "##### Gazer\n"
+        "Tiny aberration.\n"
+        "##### Actions\n"
+        "Eye Rays. The gazer shoots two magical rays.\n"
+        "<!-- page: 205 -->\n"
+        "#### Hlam\n"
+        "Medium humanoid.\n"
+    )
+
+    chunks = [
+        chunk
+        for chapter in chapters
+        for scene in chapter.scenes
+        for chunk in scene.chunks
+    ]
+    eye_rays = next(chunk for chunk in chunks if "Eye Rays" in chunk.content)
+    hlam = next(chunk for chunk in chunks if "Medium humanoid" in chunk.content)
+
+    assert eye_rays.metadata["page_start"] == 204
+    assert eye_rays.metadata["page_end"] == 204
+    assert hlam.metadata["page_start"] == 205
+    assert "<!-- page: 205 -->" not in eye_rays.content
+
+
+def test_module_parser_excludes_page_marker_before_next_scene_from_scene_end() -> None:
+    chapters = MarkdownModuleParser().parse(
+        "<!-- page: 1 -->\n"
+        "# Chapter\n"
+        "## Arrival\n"
+        "First scene.\n"
+        "<!-- page: 2 -->\n"
+        "## Departure\n"
+        "Second scene.\n"
+    )
+
+    assert chapters[0].scenes[0].metadata["page_end"] == 1
+    assert chapters[0].scenes[1].metadata["page_start"] == 2
+
+
 def test_module_preview_exposes_scene_page_and_line_provenance(database, tmp_path) -> None:
     source = tmp_path / "module.md"
     source.write_text(

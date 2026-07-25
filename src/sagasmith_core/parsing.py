@@ -6,6 +6,28 @@ import re
 from dataclasses import dataclass, field
 
 _HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
+_PAGE_MARKER = re.compile(r"<!-- page: \d+ -->")
+
+
+def _structural_start(content: str, heading: re.Match[str]) -> int:
+    """Attach a page marker immediately before a heading to that heading."""
+    cursor = heading.start()
+    while cursor and content[cursor - 1].isspace():
+        cursor -= 1
+    line_start = content.rfind("\n", 0, cursor) + 1
+    candidate = content[line_start:cursor]
+    return line_start if _PAGE_MARKER.fullmatch(candidate) else heading.start()
+
+
+def _trimmed_body(content: str, start: int, end: int) -> tuple[str, int, int]:
+    """Return stripped text with offsets that still point at the source text."""
+    raw = content[start:end]
+    body = raw.strip()
+    if not body:
+        return "", end, end
+    leading = len(raw) - len(raw.lstrip())
+    trailing = len(raw.rstrip())
+    return body, start + leading, start + trailing
 
 
 @dataclass(frozen=True)
@@ -45,10 +67,12 @@ class MarkdownHierarchyParser:
     def parse(self, content: str) -> list[ParsedSection]:
         matches = list(_HEADING.finditer(content))
         if not matches:
-            return [self._section(0, 1, "Document", ("Document",), content, 0, len(content))]
+            body, start, end = _trimmed_body(content, 0, len(content))
+            return [self._section(0, 1, "Document", ("Document",), body, start, end)]
 
         sections: list[ParsedSection] = []
         heading_stack: list[tuple[int, str]] = []
+        structural_starts = [_structural_start(content, match) for match in matches]
         for ordinal, match in enumerate(matches):
             level = len(match.group(1))
             title = match.group(2).strip()
@@ -56,8 +80,12 @@ class MarkdownHierarchyParser:
             heading_stack.append((level, title))
             path = tuple(item[1] for item in heading_stack)
             start = match.end()
-            end = matches[ordinal + 1].start() if ordinal + 1 < len(matches) else len(content)
-            body = content[start:end].strip()
+            end = (
+                structural_starts[ordinal + 1]
+                if ordinal + 1 < len(matches)
+                else len(content)
+            )
+            body, start, end = _trimmed_body(content, start, end)
             sections.append(
                 self._section(
                     ordinal,
@@ -123,18 +151,17 @@ class MarkdownHierarchyParser:
                 split = max(paragraph, sentence)
                 if split > cursor + self.chunk_size // 2:
                     end = split + (1 if content[split] == "。" else 0)
-            text = content[cursor:end].strip()
+            text, chunk_start, chunk_end = _trimmed_body(content, cursor, end)
             chunks.append(
                 ParsedChunk(
                     ordinal=len(chunks),
                     heading_path=path,
                     content=text,
-                    start_offset=base_offset + cursor,
-                    end_offset=base_offset + end,
+                    start_offset=base_offset + chunk_start,
+                    end_offset=base_offset + chunk_end,
                 )
             )
             if end >= len(content):
                 break
             cursor = max(cursor + 1, end - self.chunk_overlap)
         return chunks
-

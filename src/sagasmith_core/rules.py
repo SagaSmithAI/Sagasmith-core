@@ -172,7 +172,9 @@ class RuleService:
                                 "page_start": page_locator.page_for_offset(
                                     chunk.start_offset
                                 ),
-                                "page_end": page_locator.page_for_offset(chunk.end_offset),
+                                "page_end": page_locator.page_for_offset(
+                                    max(chunk.start_offset, chunk.end_offset - 1)
+                                ),
                             },
                         )
                     )
@@ -317,7 +319,9 @@ class RuleService:
                     "level": section.level,
                     "path": list(section.path),
                     "page_start": page_locator.page_for_offset(section.start_offset),
-                    "page_end": page_locator.page_for_offset(section.end_offset),
+                    "page_end": page_locator.page_for_offset(
+                        max(section.start_offset, section.end_offset - 1)
+                    ),
                 }
                 for section in parsed
             ],

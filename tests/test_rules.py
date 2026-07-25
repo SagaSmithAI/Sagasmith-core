@@ -67,3 +67,29 @@ def test_rule_search_can_be_bound_to_exact_sources(database) -> None:
     assert {hit.source_id for hit in by_id} == {first.source_id}
     assert {hit.metadata["source_key"] for hit in by_key} == {"book-b"}
 
+
+def test_rule_chunk_excludes_page_marker_before_next_heading(database) -> None:
+    service = RuleService(database)
+    service.ingest(
+        system_id="dnd5e",
+        source_key="appendix",
+        title="Appendix",
+        content=(
+            "<!-- page: 204 -->\n"
+            "# Gazer\n"
+            "Tiny aberration.\n"
+            "## Actions\n"
+            "Eye Rays. The gazer shoots two magical rays.\n"
+            "<!-- page: 205 -->\n"
+            "# Hlam\n"
+            "Medium humanoid.\n"
+        ),
+    )
+
+    eye_rays = service.search(system_id="dnd5e", query="Eye Rays")[0]
+    hlam = service.search(system_id="dnd5e", query="Medium humanoid")[0]
+
+    assert eye_rays.metadata["page_start"] == 204
+    assert eye_rays.metadata["page_end"] == 204
+    assert hlam.metadata["page_start"] == 205
+
