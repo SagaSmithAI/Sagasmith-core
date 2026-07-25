@@ -16,7 +16,7 @@ from statistics import median
 from typing import Any, Protocol
 from uuid import uuid4
 
-DOCUMENT_NORMALIZER_VERSION = "13"
+DOCUMENT_NORMALIZER_VERSION = "14"
 _DOCUMENT_CACHE_SCHEMA = 1
 _PDF_EXTRACTION_CACHE_SCHEMA = 1
 _PDF_TEXT_EXTRACTOR_VERSION = "3"
@@ -543,6 +543,12 @@ def build_structured_markdown(
     """Normalize extracted PDF pages into provenance-preserving Markdown."""
     bookmarks = bookmarks or []
     pages = [[_clean_line(line) for line in text.splitlines()] for text in page_texts]
+    matchable_bookmarks = [
+        bookmark
+        for bookmark in bookmarks
+        if 1 <= bookmark.page <= len(pages)
+        and any(_normalize(line) for line in pages[bookmark.page - 1])
+    ]
     repeated = _repeated_margin_lines(pages)
     (
         heading_levels,
@@ -550,7 +556,7 @@ def build_structured_markdown(
         trusted_chapters,
         canonical_titles,
         synthetic_chapters,
-    ) = _match_bookmarks(pages, bookmarks)
+    ) = _match_bookmarks(pages, matchable_bookmarks)
     trusted_chapter_titles = {
         _chapter_identity(canonical_titles.get(key, pages[key[0] - 1][key[1]]))
         for key in trusted_chapters
@@ -586,9 +592,10 @@ def build_structured_markdown(
         heading_count += headings
         room_count += rooms
     warnings: list[str] = []
-    if bookmarks and matched / len(bookmarks) < 0.95:
+    if matchable_bookmarks and matched / len(matchable_bookmarks) < 0.95:
         warnings.append(
-            f"bookmark match rate is {matched}/{len(bookmarks)}; expected at least 95%"
+            "text-bearing bookmark match rate is "
+            f"{matched}/{len(matchable_bookmarks)}; expected at least 95%"
         )
     if heading_count == 0:
         warnings.append("no structural headings were recovered")
@@ -597,6 +604,7 @@ def build_structured_markdown(
         content,
         {
             "bookmark_count": len(bookmarks),
+            "matchable_bookmark_count": len(matchable_bookmarks),
             "matched_bookmarks": matched,
             "synthetic_outline_headings": sum(map(len, synthetic_chapters.values())),
             "visual_heading_count": len(visual_levels),

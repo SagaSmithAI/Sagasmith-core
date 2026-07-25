@@ -355,6 +355,29 @@ def test_pdf_normalization_synthesizes_outline_only_chapter_at_target_page() -> 
     assert metadata["synthetic_outline_headings"] == 1
 
 
+def test_pdf_normalization_excludes_image_only_outline_pages_from_match_rate() -> None:
+    content, metadata, warnings = build_structured_markdown(
+        [
+            "CHAPTER 1: OPENING\nBody.",
+            "",
+            "",
+            "",
+        ],
+        [
+            DocumentBookmark("Chapter 1: Opening", 1, 1),
+            DocumentBookmark("DM's Map", 2, 1),
+            DocumentBookmark("Player's Map", 3, 1),
+            DocumentBookmark("Back Cover", 4, 0),
+        ],
+    )
+
+    assert "# Chapter 1: Opening" in content
+    assert metadata["bookmark_count"] == 4
+    assert metadata["matchable_bookmark_count"] == 1
+    assert metadata["matched_bookmarks"] == 1
+    assert not any("bookmark match rate" in warning for warning in warnings)
+
+
 def test_pdf_normalization_moves_late_outline_chapter_anchor_to_page_start() -> None:
     content, metadata, _warnings = build_structured_markdown(
         [
