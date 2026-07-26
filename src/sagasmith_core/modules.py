@@ -1545,22 +1545,33 @@ class ModuleService:
         campaign_id: str,
         query: str,
         top_k: int = 8,
+        module_ids: Sequence[str] | None = None,
         embedder: Embedder | None = None,
         vector_store: VectorStore | None = None,
         query_hints: dict[str, Sequence[str]] | None = None,
     ) -> list[SearchHit]:
         enriched = enrich_query(query, extra_terms=query_hints)
+        selected_module_ids = tuple(
+            dict.fromkeys(str(item).strip() for item in (module_ids or ()))
+        )
+        if module_ids is not None and (
+            not selected_module_ids or any(not item for item in selected_module_ids)
+        ):
+            raise ValueError("module_ids must contain at least one non-empty module id")
+        statement = (
+            select(ModuleChunk, ModuleScene, ModuleChapter, ModuleSource)
+            .join(ModuleScene, ModuleScene.id == ModuleChunk.scene_id)
+            .join(ModuleChapter, ModuleChapter.id == ModuleScene.chapter_id)
+            .join(ModuleSource, ModuleSource.id == ModuleChunk.module_id)
+            .where(
+                ModuleSource.campaign_id == campaign_id,
+                ModuleSource.active.is_(True),
+            )
+        )
+        if selected_module_ids:
+            statement = statement.where(ModuleSource.id.in_(selected_module_ids))
         with self.database.transaction() as session:
-            rows = session.execute(
-                select(ModuleChunk, ModuleScene, ModuleChapter, ModuleSource)
-                .join(ModuleScene, ModuleScene.id == ModuleChunk.scene_id)
-                .join(ModuleChapter, ModuleChapter.id == ModuleScene.chapter_id)
-                .join(ModuleSource, ModuleSource.id == ModuleChunk.module_id)
-                .where(
-                    ModuleSource.campaign_id == campaign_id,
-                    ModuleSource.active.is_(True),
-                )
-            ).all()
+            rows = session.execute(statement).all()
         if not rows:
             return []
 
