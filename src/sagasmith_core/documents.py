@@ -16,7 +16,7 @@ from statistics import median
 from typing import Any, Protocol
 from uuid import uuid4
 
-DOCUMENT_NORMALIZER_VERSION = "14"
+DOCUMENT_NORMALIZER_VERSION = "18"
 _DOCUMENT_CACHE_SCHEMA = 1
 _PDF_EXTRACTION_CACHE_SCHEMA = 1
 _PDF_TEXT_EXTRACTOR_VERSION = "3"
@@ -91,7 +91,20 @@ _CHAPTER_RE = re.compile(
     r"(?:[0-9A-Z]+(?:\s+and\s+[0-9A-Z]+)?)(?:\s|：|:|-))",
     re.IGNORECASE,
 )
-_ROOM_RE = re.compile(r"^[A-Z]{1,3}\d+[A-Za-z]?\s*[.．]\s*\S+")
+_ROOM_RE = re.compile(
+    r"^(?:(?=[A-Z]{1,3}\s*[0-9IlO]{1,3}[A-Za-z]?\s*[.．])"
+    r"(?=[^.．]*\d)"
+    r"[A-Z]{1,3}\s*[0-9IlO]{1,3}[A-Za-z]?"
+    r"|[A-Z]{1,3}\s*[Il][0-9IlO]{0,2})"
+    r"\s*[.．]\s*(?=[^\W_])\S+",
+    re.IGNORECASE,
+)
+_ROOM_CODE_RE = re.compile(
+    r"^(?P<prefix>[A-Z]{1,3}?)\s*"
+    r"(?P<number>[0-9IlO]{1,3})(?P<suffix>[A-Za-z]?)"
+    r"(?P<separator>\s*[.．]\s*)(?P<title>[^\W_]\S.*)$",
+    re.IGNORECASE,
+)
 _LIST_RE = re.compile(r"^(?:[-*•●▪◼]|\d+[.)、]|[A-Za-z][.)])\s*")
 _PAGE_NUMBER_RE = re.compile(r"^\d{1,4}$")
 _TERMINAL_RE = re.compile(r"[。！？!?；;：:…][”’』」）》】]*$")
@@ -132,6 +145,20 @@ def _clean_line(value: str) -> str:
     value = value.replace("\uf06c", "•").replace("\uf0b7", "•")
     value = "".join(" " if 0xE000 <= ord(char) <= 0xF8FF else char for char in value)
     return re.sub(r"[ \t]+", " ", value).strip()
+
+
+def _canonical_room_heading(value: str) -> str:
+    """Repair unambiguous OCR substitutions inside a recognized room code."""
+    matched = _ROOM_CODE_RE.match(value)
+    if matched is None:
+        return value
+    number = matched.group("number").translate(
+        str.maketrans({"I": "1", "i": "1", "l": "1", "O": "0", "o": "0"})
+    )
+    return (
+        f"{matched.group('prefix').upper()}{number}{matched.group('suffix')}"
+        f"{matched.group('separator')}{matched.group('title')}"
+    )
 
 
 def _looks_letter_spaced(value: str) -> bool:
@@ -516,6 +543,7 @@ def _reflow_page(
         ):
             level = 1
         elif structural_headings and _ROOM_RE.match(display_line):
+            display_line = _canonical_room_heading(display_line)
             level = level or 4
             room_count += 1
         elif structural_headings and level is None and _looks_like_all_caps_heading(display_line):

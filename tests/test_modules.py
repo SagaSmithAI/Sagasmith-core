@@ -107,6 +107,34 @@ def test_module_ingest_search_and_progress(database) -> None:
     assert projected[1]["inherited_from_party"] is True
 
 
+def test_module_search_can_be_scoped_to_one_active_revision(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Revisions")
+    service = ModuleService(database)
+    old = service.ingest(
+        campaign_id=campaign.id,
+        source_key="adventure-v1",
+        title="Adventure",
+        content="# Chapter\n## Old Route\nshared evidence from the old revision",
+    )
+    current = service.ingest(
+        campaign_id=campaign.id,
+        source_key="adventure-v2",
+        title="Adventure",
+        content="# Chapter\n## Current Route\nshared evidence from the current revision",
+    )
+
+    unscoped = service.search(campaign_id=campaign.id, query="shared evidence", top_k=10)
+    scoped = service.search(
+        campaign_id=campaign.id,
+        query="shared evidence",
+        top_k=10,
+        module_ids=[current.module_id],
+    )
+
+    assert {hit.source_id for hit in unscoped} == {old.module_id, current.module_id}
+    assert {hit.source_id for hit in scoped} == {current.module_id}
+
+
 def test_module_chunks_can_be_listed_in_source_order(database) -> None:
     campaign = CampaignService(database).create(system_id="dnd5e", name="Chunk review")
     service = ModuleService(database)

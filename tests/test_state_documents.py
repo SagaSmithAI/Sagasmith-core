@@ -5,6 +5,7 @@ from sqlalchemy import delete, event, select
 
 from sagasmith_core import (
     ActorKnowledgeService,
+    ActorKnowledgeTransfer,
     BranchService,
     CampaignService,
     CharacterService,
@@ -204,6 +205,47 @@ def test_pdf_normalization_recovers_unbookmarked_all_caps_subheadings() -> None:
     assert "##### TOOLS AND SKILLS TOGETHER" in content
     assert metadata["heading_count"] == 2
     assert warnings == ()
+
+
+def test_pdf_normalization_recovers_room_codes_with_ocr_one_before_digit() -> None:
+    content, metadata, warnings = build_structured_markdown(
+        [
+            "XlO. NOSKA'S QUARTERS\n"
+            "A rust monster waits in a cage.\n"
+            "Xll. AHMAERGO'S COLLECTION\n"
+            "A stuffed minotaur stands here.\n"
+            "Xl3. THORVIN'S WORKSHOP\n"
+            "Thorvin is building a contraption.\n"
+            "Xl7. PROMENADE\n"
+            "Pillars carved with eyes follow the hall.\n"
+            "Xl9. XANATHAR'S SANCTUM\n"
+            "A fishbowl dominates the room."
+        ],
+        [],
+    )
+
+    assert "#### X10. NOSKA'S QUARTERS" in content
+    assert "#### X11. AHMAERGO'S COLLECTION" in content
+    assert "#### X13. THORVIN'S WORKSHOP" in content
+    assert "#### X17. PROMENADE" in content
+    assert "#### X19. XANATHAR'S SANCTUM" in content
+    assert metadata["room_heading_count"] == 5
+    assert warnings == ()
+
+
+def test_pdf_normalization_does_not_treat_alpha_abbreviation_as_ocr_room_code() -> None:
+    content, metadata, warnings = build_structured_markdown(
+        [
+            "FOO. This is ordinary prose without a numbered room code.\n"
+            "BOW1. (The fish keeper uses the pallet as a bed.)"
+        ],
+        [],
+    )
+
+    assert "#### FOO." not in content
+    assert "#### BOW1." not in content
+    assert metadata["room_heading_count"] == 0
+    assert warnings == ("no structural headings were recovered",)
 
 
 def test_pdf_normalization_uses_visual_heading_hints_for_mixed_case_titles() -> None:
@@ -1689,6 +1731,69 @@ def test_state_mutation_replaces_campaign_and_character_documents_atomically(dat
         )
 
     assert CampaignService(database).get(campaign.id).state["party"]["wallet"] == {"gp": 2}
+
+
+def test_state_mutation_atomically_transfers_complete_actor_knowledge(database) -> None:
+    campaign = CampaignService(database).create(
+        system_id="dnd5e",
+        name="Body Thief knowledge",
+        state={"phase": "before"},
+    )
+    characters = CharacterService(database)
+    target = characters.create(
+        system_id="dnd5e",
+        campaign_id=campaign.id,
+        name="Target",
+        sheet={},
+        notes={},
+    )
+    devourer = characters.create(
+        system_id="dnd5e",
+        campaign_id=campaign.id,
+        name="Intellect Devourer",
+        sheet={},
+        notes={},
+    )
+    knowledge = ActorKnowledgeService(database)
+    known = knowledge.add(
+        campaign.id,
+        actor_id=target.id,
+        knowledge_key="vault-key",
+        proposition="The vault key is hidden under the third flagstone.",
+        subject_ref="vault",
+        epistemic_status="known",
+        confidence=3,
+        cause="witnessed",
+        disclosure_scope="owner",
+    )
+
+    StateMutationService(database).replace(
+        campaign.id,
+        campaign_state={"phase": "body-taken"},
+        actor_knowledge_transfers=[
+            ActorKnowledgeTransfer(
+                source_actor_id=target.id,
+                destination_actor_id=devourer.id,
+                knowledge_key_prefix=f"body-thief.{target.id}",
+            )
+        ],
+        expected_campaign_revision=campaign.revision,
+        operation="combat.activity.source_contest_effect",
+        idempotency_key="body-thief-knowledge",
+    )
+
+    target_after = knowledge.list(campaign.id, actor_id=target.id)
+    copied = knowledge.list(campaign.id, actor_id=devourer.id)
+    assert [item.id for item in target_after] == [known.id]
+    assert len(copied) == 1
+    assert copied[0].knowledge_key == f"body-thief.{target.id}.{known.id}"
+    assert copied[0].proposition == known.proposition
+    assert copied[0].subject_ref == known.subject_ref
+    assert copied[0].cause == "body_thief"
+    assert copied[0].disclosure_scope == "dm"
+    assert CampaignService(database).get(campaign.id).state == {
+        "phase": "body-taken"
+    }
 
 
 def test_state_mutation_exposes_committed_idempotency_recovery_without_a_receipt(database) -> None:
