@@ -207,6 +207,47 @@ def test_pdf_normalization_recovers_unbookmarked_all_caps_subheadings() -> None:
     assert warnings == ()
 
 
+def test_pdf_normalization_recovers_room_codes_with_ocr_one_before_digit() -> None:
+    content, metadata, warnings = build_structured_markdown(
+        [
+            "XlO. NOSKA'S QUARTERS\n"
+            "A rust monster waits in a cage.\n"
+            "Xll. AHMAERGO'S COLLECTION\n"
+            "A stuffed minotaur stands here.\n"
+            "Xl3. THORVIN'S WORKSHOP\n"
+            "Thorvin is building a contraption.\n"
+            "Xl7. PROMENADE\n"
+            "Pillars carved with eyes follow the hall.\n"
+            "Xl9. XANATHAR'S SANCTUM\n"
+            "A fishbowl dominates the room."
+        ],
+        [],
+    )
+
+    assert "#### X10. NOSKA'S QUARTERS" in content
+    assert "#### X11. AHMAERGO'S COLLECTION" in content
+    assert "#### X13. THORVIN'S WORKSHOP" in content
+    assert "#### X17. PROMENADE" in content
+    assert "#### X19. XANATHAR'S SANCTUM" in content
+    assert metadata["room_heading_count"] == 5
+    assert warnings == ()
+
+
+def test_pdf_normalization_does_not_treat_alpha_abbreviation_as_ocr_room_code() -> None:
+    content, metadata, warnings = build_structured_markdown(
+        [
+            "FOO. This is ordinary prose without a numbered room code.\n"
+            "BOW1. (The fish keeper uses the pallet as a bed.)"
+        ],
+        [],
+    )
+
+    assert "#### FOO." not in content
+    assert "#### BOW1." not in content
+    assert metadata["room_heading_count"] == 0
+    assert warnings == ("no structural headings were recovered",)
+
+
 def test_pdf_normalization_uses_visual_heading_hints_for_mixed_case_titles() -> None:
     content, metadata, warnings = build_structured_markdown(
         [
