@@ -455,6 +455,13 @@ def test_module_reimport_preserves_snapshot_scene_references(database) -> None:
     )
 
     assert [item["title"] for item in modules.scene_index(campaign.id)] == ["Courtyard"]
+    assert [
+        item["title"]
+        for item in modules.scene_index(
+            campaign.id,
+            module_id=original["module_id"],
+        )
+    ] == ["Gate"]
     assert modules.current_scene(campaign.id)["title"] == "Gate"
     assert modules.current_scene(campaign.id)["progress"]["current_location_key"] == "gate"
     restored = SnapshotService(database).restore(campaign.id, snapshot.slot)

@@ -1310,11 +1310,12 @@ class ModuleService:
                 .join(ModuleChapter, ModuleChapter.id == ModuleScene.chapter_id)
                 .join(ModuleSource, ModuleSource.id == ModuleScene.module_id)
                 .where(ModuleSource.campaign_id == campaign_id)
-                .where(ModuleSource.active.is_(True))
                 .order_by(ModuleChapter.ordinal, ModuleScene.ordinal, ModuleScene.id)
             )
             if module_id:
                 statement = statement.where(ModuleSource.id == module_id)
+            else:
+                statement = statement.where(ModuleSource.active.is_(True))
             return [
                 {
                     "scene_id": row.ModuleScene.id,
