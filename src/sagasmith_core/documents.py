@@ -65,6 +65,43 @@ class RenderedDocumentPage:
     checksum: str
 
 
+@dataclass(frozen=True)
+class OcrTextBlock:
+    """One checksum-independent OCR text block with page-space coordinates."""
+
+    text: str
+    confidence: float
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "text": self.text,
+            "confidence": self.confidence,
+            "bbox": [self.x0, self.y0, self.x1, self.y1],
+        }
+
+
+@dataclass(frozen=True)
+class OcrPageLayout:
+    """Text-only OCR evidence that preserves enough geometry to recover columns."""
+
+    page_number: int
+    width: int
+    height: int
+    blocks: tuple[OcrTextBlock, ...]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "page_number": self.page_number,
+            "width": self.width,
+            "height": self.height,
+            "blocks": [block.as_dict() for block in self.blocks],
+        }
+
+
 class DocumentConverter(Protocol):
     def convert(
         self,
@@ -926,6 +963,95 @@ class RapidOcrProvider:
         finally:
             document.close()
 
+    def extract_layout(
+        self,
+        path: str | Path,
+        *,
+        page_numbers: Sequence[int] | None = None,
+    ) -> list[OcrPageLayout]:
+        """OCR selected pages while retaining block coordinates for text-only recovery."""
+
+        try:
+            import pypdfium2 as pdfium
+            from rapidocr import RapidOCR
+        except ImportError as exc:
+            raise RuntimeError(
+                "OCR requires `pip install sagasmith-core[documents,ocr]`"
+            ) from exc
+        if self._engine is None:
+            self._engine = RapidOCR()
+        source = Path(path).expanduser().resolve()
+        document = pdfium.PdfDocument(str(source))
+        try:
+            selected = list(page_numbers or range(1, len(document) + 1))
+            if any(not 1 <= page_number <= len(document) for page_number in selected):
+                raise ValueError("OCR page number is outside the PDF")
+            pages: list[OcrPageLayout] = []
+            for page_number in selected:
+                page = document[page_number - 1]
+                try:
+                    bitmap = page.render(scale=self.scale)
+                    try:
+                        image = bitmap.to_numpy()
+                        output = self._engine(image)
+                    finally:
+                        bitmap.close()
+                finally:
+                    page.close()
+                pages.append(
+                    _ocr_page_layout(output, page_number=page_number, image_shape=image.shape)
+                )
+            return pages
+        finally:
+            document.close()
+
+
+def _ocr_page_layout(
+    output: Any,
+    *,
+    page_number: int,
+    image_shape: Sequence[int],
+) -> OcrPageLayout:
+    """Convert one OCR-engine result into a stable, serializable page layout."""
+
+    if len(image_shape) < 2:
+        raise ValueError("OCR image shape must include height and width")
+    output_boxes = getattr(output, "boxes", None)
+    output_texts = getattr(output, "txts", None)
+    output_scores = getattr(output, "scores", None)
+    raw_boxes = tuple(output_boxes) if output_boxes is not None else ()
+    raw_texts = tuple(output_texts) if output_texts is not None else ()
+    raw_scores = tuple(output_scores) if output_scores is not None else ()
+    blocks: list[OcrTextBlock] = []
+    for index, (raw_box, raw_text) in enumerate(
+        zip(raw_boxes, raw_texts, strict=False)
+    ):
+        text = str(raw_text).strip()
+        if not text:
+            continue
+        points = [tuple(float(value) for value in point) for point in raw_box]
+        if not points or any(len(point) != 2 for point in points):
+            continue
+        xs = [point[0] for point in points]
+        ys = [point[1] for point in points]
+        confidence = float(raw_scores[index]) if index < len(raw_scores) else 0.0
+        blocks.append(
+            OcrTextBlock(
+                text=text,
+                confidence=confidence,
+                x0=min(xs),
+                y0=min(ys),
+                x1=max(xs),
+                y1=max(ys),
+            )
+        )
+    return OcrPageLayout(
+        page_number=page_number,
+        width=int(image_shape[1]),
+        height=int(image_shape[0]),
+        blocks=tuple(blocks),
+    )
+
 
 def _visual_headings(text_page: Any) -> list[tuple[str, int]]:
     """Recover headings from PDF font weight and rendered glyph height."""
@@ -1076,6 +1202,35 @@ def _extract_pdfium_pages(path: Path) -> tuple[list[str], dict[int, list[tuple[s
             finally:
                 page.close()
         return result, headings
+    finally:
+        document.close()
+
+
+def extract_pdf_page_text(path: str | Path, page_number: int) -> str:
+    """Read one physical PDF page's embedded text layer without normalizing its order."""
+
+    if isinstance(page_number, bool) or not isinstance(page_number, int) or page_number < 1:
+        raise ValueError("page_number must be a positive integer")
+    try:
+        import pypdfium2 as pdfium
+    except ImportError as exc:
+        raise RuntimeError(
+            "PDF extraction requires `pip install sagasmith-core[documents]`"
+        ) from exc
+    source = Path(path).expanduser().resolve()
+    document = pdfium.PdfDocument(str(source))
+    try:
+        if page_number > len(document):
+            raise ValueError("page_number is outside the PDF")
+        page = document[page_number - 1]
+        try:
+            text_page = page.get_textpage()
+            try:
+                return text_page.get_text_bounded() or ""
+            finally:
+                text_page.close()
+        finally:
+            page.close()
     finally:
         document.close()
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from sqlalchemy import delete, event, select
 
@@ -29,8 +31,10 @@ from sagasmith_core.documents import (
     PageLocator,
     PdfDocumentConverter,
     _looks_like_corrupt_visual_heading,
+    _ocr_page_layout,
     _pdf_form_metadata,
     build_structured_markdown,
+    extract_pdf_page_text,
     normalize_document,
 )
 from sagasmith_core.idempotency import request_hash
@@ -42,6 +46,39 @@ from sagasmith_core.models import (
     StateRevision,
 )
 from sagasmith_core.snapshots import SnapshotIntegrityError
+
+
+def test_ocr_page_layout_retains_coordinates_for_text_only_recovery() -> None:
+    layout = _ocr_page_layout(
+        SimpleNamespace(
+            boxes=[
+                [[82, 180], [388, 184], [388, 218], [82, 214]],
+                [[84, 212], [253, 212], [253, 238], [84, 238]],
+            ],
+            txts=["ADULT BLUE DRAGON", "Huge dragon, lawful evil"],
+            scores=[0.99092, 0.98081],
+        ),
+        page_number=92,
+        image_shape=(1584, 1018, 3),
+    )
+
+    assert layout.as_dict() == {
+        "page_number": 92,
+        "width": 1018,
+        "height": 1584,
+        "blocks": [
+            {
+                "text": "ADULT BLUE DRAGON",
+                "confidence": 0.99092,
+                "bbox": [82.0, 180.0, 388.0, 218.0],
+            },
+            {
+                "text": "Huge dragon, lawful evil",
+                "confidence": 0.98081,
+                "bbox": [84.0, 212.0, 253.0, 238.0],
+            },
+        ],
+    }
 
 
 def test_rule_document_path_ingest_preserves_source_and_page_provenance(database, tmp_path) -> None:
@@ -163,6 +200,21 @@ def test_pdf_converter_ocr_replaces_only_suspect_pages(tmp_path) -> None:
     assert "RECOVERED HEADING" in document.content
     assert document.metadata["ocr_pages"] == [1]
     assert document.metadata["quality"]["suspect_page_count"] == 0
+
+
+def test_extract_pdf_page_text_validates_the_physical_page(tmp_path) -> None:
+    pypdf = pytest.importorskip("pypdf")
+    pytest.importorskip("pypdfium2")
+    source = tmp_path / "two-pages.pdf"
+    writer = pypdf.PdfWriter()
+    writer.add_blank_page(width=200, height=100)
+    writer.add_blank_page(width=200, height=100)
+    with source.open("wb") as stream:
+        writer.write(stream)
+
+    assert extract_pdf_page_text(source, 2) == ""
+    with pytest.raises(ValueError, match="outside the PDF"):
+        extract_pdf_page_text(source, 3)
 
 
 def test_pdf_page_extraction_cache_survives_normalizer_cache_refresh(tmp_path) -> None:
