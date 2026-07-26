@@ -40,7 +40,11 @@ from sagasmith_core.rule_profiles import RuleProfileService
 from sagasmith_core.rule_receipts import RuleReceiptService
 from sagasmith_core.rules import RuleService
 from sagasmith_core.snapshots import SnapshotService
-from sagasmith_core.state import CharacterStateUpdate, StateMutationService
+from sagasmith_core.state import (
+    ActorKnowledgeTransfer,
+    CharacterStateUpdate,
+    StateMutationService,
+)
 from sagasmith_core.systems import SystemDefinition, SystemRegistry
 from sagasmith_core.vector import VectorStore
 
@@ -56,6 +60,7 @@ __all__ = [
     "BranchService",
     "CampaignService",
     "CharacterStateUpdate",
+    "ActorKnowledgeTransfer",
     "CharacterService",
     "ContinuityService",
     "ContinuityCommitService",

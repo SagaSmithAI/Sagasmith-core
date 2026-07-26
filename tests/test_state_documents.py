@@ -5,6 +5,7 @@ from sqlalchemy import delete, event, select
 
 from sagasmith_core import (
     ActorKnowledgeService,
+    ActorKnowledgeTransfer,
     BranchService,
     CampaignService,
     CharacterService,
@@ -1689,6 +1690,69 @@ def test_state_mutation_replaces_campaign_and_character_documents_atomically(dat
         )
 
     assert CampaignService(database).get(campaign.id).state["party"]["wallet"] == {"gp": 2}
+
+
+def test_state_mutation_atomically_transfers_complete_actor_knowledge(database) -> None:
+    campaign = CampaignService(database).create(
+        system_id="dnd5e",
+        name="Body Thief knowledge",
+        state={"phase": "before"},
+    )
+    characters = CharacterService(database)
+    target = characters.create(
+        system_id="dnd5e",
+        campaign_id=campaign.id,
+        name="Target",
+        sheet={},
+        notes={},
+    )
+    devourer = characters.create(
+        system_id="dnd5e",
+        campaign_id=campaign.id,
+        name="Intellect Devourer",
+        sheet={},
+        notes={},
+    )
+    knowledge = ActorKnowledgeService(database)
+    known = knowledge.add(
+        campaign.id,
+        actor_id=target.id,
+        knowledge_key="vault-key",
+        proposition="The vault key is hidden under the third flagstone.",
+        subject_ref="vault",
+        epistemic_status="known",
+        confidence=3,
+        cause="witnessed",
+        disclosure_scope="owner",
+    )
+
+    StateMutationService(database).replace(
+        campaign.id,
+        campaign_state={"phase": "body-taken"},
+        actor_knowledge_transfers=[
+            ActorKnowledgeTransfer(
+                source_actor_id=target.id,
+                destination_actor_id=devourer.id,
+                knowledge_key_prefix=f"body-thief.{target.id}",
+            )
+        ],
+        expected_campaign_revision=campaign.revision,
+        operation="combat.activity.source_contest_effect",
+        idempotency_key="body-thief-knowledge",
+    )
+
+    target_after = knowledge.list(campaign.id, actor_id=target.id)
+    copied = knowledge.list(campaign.id, actor_id=devourer.id)
+    assert [item.id for item in target_after] == [known.id]
+    assert len(copied) == 1
+    assert copied[0].knowledge_key == f"body-thief.{target.id}.{known.id}"
+    assert copied[0].proposition == known.proposition
+    assert copied[0].subject_ref == known.subject_ref
+    assert copied[0].cause == "body_thief"
+    assert copied[0].disclosure_scope == "dm"
+    assert CampaignService(database).get(campaign.id).state == {
+        "phase": "body-taken"
+    }
 
 
 def test_state_mutation_exposes_committed_idempotency_recovery_without_a_receipt(database) -> None:

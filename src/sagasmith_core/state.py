@@ -3,16 +3,26 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from sqlalchemy import select
 
+from sagasmith_core.branches import resolve_branch
 from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.characters import CharacterNotFoundError
 from sagasmith_core.database import Database
 from sagasmith_core.idempotency import request_hash
-from sagasmith_core.models import Campaign, Character, MutationGroup, RuleResolutionReceipt
+from sagasmith_core.knowledge import ActorKnowledgeService
+from sagasmith_core.models import (
+    ActorKnowledge,
+    ActorKnowledgeRevision,
+    BranchActorKnowledgeHead,
+    Campaign,
+    Character,
+    MutationGroup,
+    RuleResolutionReceipt,
+)
 from sagasmith_core.revisions import RevisionInfo, RevisionService
 
 
@@ -27,6 +37,17 @@ class CharacterStateUpdate:
     name: str | None = None
     player_name: str | None = None
     summary: str | None = None
+
+
+@dataclass(frozen=True)
+class ActorKnowledgeTransfer:
+    """Copy one actor's complete current subjective knowledge to another actor."""
+
+    source_actor_id: str
+    destination_actor_id: str
+    knowledge_key_prefix: str
+    cause: str = "body_thief"
+    disclosure_scope: str = "dm"
 
 
 class StateMutationService:
@@ -46,6 +67,7 @@ class StateMutationService:
         *,
         campaign_state: dict[str, Any] | None = None,
         character_updates: list[CharacterStateUpdate] | None = None,
+        actor_knowledge_transfers: list[ActorKnowledgeTransfer] | None = None,
         expected_campaign_revision: int | None = None,
         operation: str | None = None,
         actor: str = "runtime",
@@ -55,11 +77,12 @@ class StateMutationService:
         rule_receipts: list[dict[str, Any]] | None = None,
     ) -> list[RevisionInfo] | None:
         updates = list(character_updates or [])
+        knowledge_transfers = list(actor_knowledge_transfers or [])
         receipts = list(rule_receipts or [])
         ids = [item.character_id for item in updates]
         if len(ids) != len(set(ids)):
             raise ValueError("character updates must not contain duplicate ids")
-        if campaign_state is None and not updates:
+        if campaign_state is None and not updates and not knowledge_transfers:
             raise ValueError("at least one state document must be supplied")
         if receipts and operation is None:
             raise ValueError("rule receipts require an audited operation")
@@ -80,6 +103,7 @@ class StateMutationService:
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
             effective_branch_id = branch_id or campaign.active_branch_id
+            branch = resolve_branch(session, campaign, effective_branch_id)
 
             rows: list[tuple[Character, CharacterStateUpdate]] = []
             before_campaign = {
@@ -127,6 +151,78 @@ class StateMutationService:
                     "revision": row.revision,
                 }
                 rows.append((row, update))
+
+            transfer_pairs = [
+                (item.source_actor_id, item.destination_actor_id)
+                for item in knowledge_transfers
+            ]
+            if len(transfer_pairs) != len(set(transfer_pairs)):
+                raise ValueError("actor knowledge transfers must not duplicate actor pairs")
+            for transfer in knowledge_transfers:
+                if (
+                    not transfer.source_actor_id
+                    or not transfer.destination_actor_id
+                    or transfer.source_actor_id == transfer.destination_actor_id
+                    or not transfer.knowledge_key_prefix
+                ):
+                    raise ValueError(
+                        "actor knowledge transfer requires distinct actors and a key prefix"
+                    )
+                for actor_id in (
+                    transfer.source_actor_id,
+                    transfer.destination_actor_id,
+                ):
+                    actor_row = session.get(Character, actor_id)
+                    if actor_row is None:
+                        raise CharacterNotFoundError(actor_id)
+                    if actor_row.campaign_id != campaign_id:
+                        raise ValueError(
+                            "knowledge transfer actors must belong to the target campaign"
+                        )
+
+            knowledge_service = ActorKnowledgeService(self.database)
+            for transfer in knowledge_transfers:
+                source_rows = list(
+                    session.execute(
+                        select(ActorKnowledge, ActorKnowledgeRevision)
+                        .join(
+                            BranchActorKnowledgeHead,
+                            BranchActorKnowledgeHead.knowledge_id
+                            == ActorKnowledge.id,
+                        )
+                        .join(
+                            ActorKnowledgeRevision,
+                            ActorKnowledgeRevision.id
+                            == BranchActorKnowledgeHead.revision_id,
+                        )
+                        .where(
+                            BranchActorKnowledgeHead.branch_id == branch.id,
+                            ActorKnowledge.actor_id == transfer.source_actor_id,
+                            ActorKnowledgeRevision.epistemic_status.not_in(
+                                {"forgotten", "superseded"}
+                            ),
+                        )
+                        .order_by(ActorKnowledge.knowledge_key)
+                    )
+                )
+                for source_knowledge, source_revision in source_rows:
+                    knowledge_service._add_in_session(
+                        session,
+                        campaign,
+                        branch.id,
+                        branch.head_snapshot_id,
+                        actor_id=transfer.destination_actor_id,
+                        knowledge_key=(
+                            f"{transfer.knowledge_key_prefix}.{source_knowledge.id}"
+                        ),
+                        proposition=source_revision.proposition,
+                        subject_ref=source_knowledge.subject_ref,
+                        epistemic_status=source_revision.epistemic_status,
+                        confidence=source_revision.confidence,
+                        source_event_id=source_revision.source_event_id,
+                        cause=transfer.cause,
+                        disclosure_scope=transfer.disclosure_scope,
+                    )
 
             if campaign_state is not None:
                 campaign.state = dict(campaign_state)
@@ -196,6 +292,9 @@ class StateMutationService:
                                 "summary": item.summary,
                             }
                             for item in updates
+                        ],
+                        "actor_knowledge_transfers": [
+                            asdict(item) for item in knowledge_transfers
                         ],
                     }
                 )
