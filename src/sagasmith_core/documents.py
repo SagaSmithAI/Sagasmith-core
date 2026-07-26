@@ -16,7 +16,7 @@ from statistics import median
 from typing import Any, Protocol
 from uuid import uuid4
 
-DOCUMENT_NORMALIZER_VERSION = "18"
+DOCUMENT_NORMALIZER_VERSION = "19"
 _DOCUMENT_CACHE_SCHEMA = 1
 _PDF_EXTRACTION_CACHE_SCHEMA = 1
 _PDF_TEXT_EXTRACTOR_VERSION = "3"
@@ -161,11 +161,102 @@ def _canonical_room_heading(value: str) -> str:
     )
 
 
+def _looks_like_room_heading(value: str) -> bool:
+    """Require a room-like label instead of treating wrapped prose as an OCR code."""
+    if _looks_like_corrupt_visual_heading(value):
+        return False
+    matched = _ROOM_CODE_RE.match(value)
+    if matched is None:
+        return False
+    prefix = matched.group("prefix").upper()
+    suffix = matched.group("suffix")
+    title = matched.group("title").strip()
+    if prefix == "MAP":
+        return False
+    if prefix == "DAY" and not suffix:
+        return True
+    if (
+        suffix
+        and suffix.islower()
+        and len(prefix) == 1
+        and any(char in "23456789" for char in matched.group("number"))
+    ):
+        return True
+    label, separator, _body = title.partition(". ")
+    if not separator:
+        label, separator, _body = title.partition(" --- ")
+    candidate = label if separator else title
+    words = re.findall(r"[A-Za-z]+", candidate)
+    if not words:
+        return False
+    capitalized = sum(word[:1].isupper() for word in words)
+    return bool(
+        _looks_like_all_caps_heading(candidate)
+        or _looks_like_letter_spaced_heading(candidate)
+        or (
+            len(words) <= 6
+            and capitalized / len(words) >= 0.5
+            and not candidate.endswith((",", ";", ":"))
+        )
+    )
+
+
+def _split_room_heading(value: str) -> tuple[str, str]:
+    """Separate an inline room label from prose extracted on the same line."""
+    matched = _ROOM_CODE_RE.match(value)
+    if matched is None:
+        return value, ""
+    canonical = _canonical_room_heading(value)
+    canonical_match = _ROOM_CODE_RE.match(canonical)
+    if canonical_match is None:
+        return canonical, ""
+    code = (
+        f"{canonical_match.group('prefix').upper()}"
+        f"{canonical_match.group('number')}"
+        f"{canonical_match.group('suffix')}"
+    )
+    title = canonical_match.group("title").strip()
+    label, separator, body = title.partition(". ")
+    delimiter = "."
+    if not separator:
+        label, separator, body = title.partition(" --- ")
+        delimiter = ""
+    if separator and _looks_like_room_heading(
+        f"{code}. {label}"
+    ):
+        return f"{code}. {label}{delimiter}".rstrip("."), body.strip()
+    words = re.findall(r"[A-Za-z]+", title)
+    if (
+        canonical_match.group("suffix").islower()
+        or len(words) > 6
+        or _prefix_is_day(canonical_match.group("prefix"))
+    ):
+        return code, title
+    return canonical, ""
+
+
+def _prefix_is_day(value: str) -> bool:
+    """Keep day-number timeline labels while moving their prose into the body."""
+    return value.casefold() == "day"
+
+
 def _looks_letter_spaced(value: str) -> bool:
     """Recognize display-font extraction that splits words into letter tokens."""
     words = re.findall(r"[A-Za-z]+", value)
     singles = sum(len(word) == 1 for word in words)
     return singles >= 3 and singles / max(len(words), 1) >= 0.3
+
+
+def _looks_like_letter_spaced_heading(value: str) -> bool:
+    """Reject prose with a few short tokens while accepting damaged display text."""
+    words = re.findall(r"[A-Za-z]+", value)
+    singles = sum(len(word) == 1 for word in words)
+    long_words = sum(len(word) > 3 for word in words)
+    return bool(
+        singles >= 3
+        and singles / max(len(words), 1) >= 0.55
+        and long_words <= 1
+    )
 
 
 def _bookmark_title(value: str) -> str:
@@ -307,9 +398,8 @@ def _match_bookmarks(
             if not target or not candidate:
                 continue
             if target in candidate or candidate in target:
-                score = max(
-                    0.9,
-                    min(len(target), len(candidate)) / max(len(target), len(candidate)),
+                score = min(len(target), len(candidate)) / max(
+                    len(target), len(candidate)
                 )
             else:
                 score = SequenceMatcher(None, target, candidate).ratio()
@@ -413,9 +503,45 @@ def _looks_like_all_caps_heading(value: str) -> bool:
         and 1 <= len(text.split()) <= 12
         and letters
         and not uncased_letters
-        and all(char == char.upper() for char in letters)
+        and (
+            all(char == char.upper() for char in letters)
+            or _looks_like_letter_spaced_heading(text)
+        )
         and not _TERMINAL_RE.search(text)
     )
+
+
+def _recover_letter_spaced_heading(value: str, page_lines: list[str]) -> str:
+    """Reuse a normally spaced mention of a damaged display heading when available."""
+    if not _looks_letter_spaced(value):
+        return value
+    target = _normalize(value)
+    if not target:
+        return value
+    candidates: list[str] = []
+    for line in page_lines:
+        if line == value:
+            continue
+        words = re.findall(r"[A-Za-z]+(?:['\u2019][A-Za-z]+)?", line)
+        for start in range(len(words)):
+            normalized = ""
+            for end in range(start, min(len(words), start + 12)):
+                normalized += _normalize(words[end])
+                if len(normalized) > len(target):
+                    break
+                if normalized != target:
+                    continue
+                candidate = " ".join(words[start : end + 1])
+                if not _looks_letter_spaced(candidate):
+                    candidates.append(candidate)
+    if not candidates:
+        return value
+    return min(candidates, key=lambda candidate: (len(candidate.split()), len(candidate)))
+
+
+def _strip_decorative_heading_leader(value: str) -> str:
+    """Remove repeated layout leaders without changing ordinary punctuation."""
+    return re.sub(r"\s*(?:[-_=~]\s*){3,}$", "", value).strip()
 
 
 def _looks_like_toc_page(lines: list[str]) -> bool:
@@ -460,8 +586,13 @@ def _reflow_page(
         output.extend((f"# {title}", ""))
     heading_count = len(synthetic_chapters)
     room_count = 0
+    last_heading_identity = (
+        _normalize(synthetic_chapters[-1]) if synthetic_chapters else ""
+    )
+    body_since_heading = False
 
     def flush() -> None:
+        nonlocal body_since_heading
         if not paragraph:
             return
         merged = paragraph[0]
@@ -472,6 +603,7 @@ def _reflow_page(
                 merged += _joiner(merged, line) + line
         output.extend((merged, ""))
         paragraph.clear()
+        body_since_heading = True
 
     nonempty = [index for index, line in enumerate(lines) if line]
     margins = set(nonempty[:3] + nonempty[-3:])
@@ -489,7 +621,10 @@ def _reflow_page(
         if index in margins and _PAGE_NUMBER_RE.fullmatch(line):
             continue
         key = (page_number, index)
-        display_line = canonical_titles.get(key, line)
+        display_line = _strip_decorative_heading_leader(
+            canonical_titles.get(key, line)
+        )
+        room_body = ""
         level = heading_levels.get(key) if structural_headings else None
         next_line = next((value for value in lines[index + 1 :] if value), "")
         previous_line = next((value for value in reversed(lines[:index]) if value), "")
@@ -523,6 +658,12 @@ def _reflow_page(
             for trusted in trusted_chapter_titles
         )
         if (
+            level is not None
+            and not trusted_top_level
+            and _looks_like_corrupt_visual_heading(display_line)
+        ):
+            level = None
+        if (
             not trusted_top_level
             and _CHAPTER_RE.match(display_line)
             and duplicate_trusted_chapter
@@ -542,19 +683,45 @@ def _reflow_page(
             )
         ):
             level = 1
-        elif structural_headings and _ROOM_RE.match(display_line):
-            display_line = _canonical_room_heading(display_line)
+        elif structural_headings and _looks_like_room_heading(display_line):
+            display_line, room_body = _split_room_heading(display_line)
             level = level or 4
             room_count += 1
-        elif structural_headings and level is None and _looks_like_all_caps_heading(display_line):
+        elif (
+            structural_headings
+            and level is None
+            and not _looks_like_corrupt_visual_heading(display_line)
+            and _looks_like_all_caps_heading(display_line)
+        ):
             level = 5
         if level is not None:
+            display_line = _recover_letter_spaced_heading(display_line, lines)
             flush()
+            identity = _normalize(display_line)
+            if (
+                identity
+                and last_heading_identity
+                and not body_since_heading
+                and len(identity) < len(last_heading_identity)
+                and last_heading_identity.endswith(identity)
+            ):
+                if room_body:
+                    paragraph.append(room_body)
+                    if _TERMINAL_RE.search(room_body):
+                        flush()
+                continue
             output.extend((f"{'#' * level} {display_line}", ""))
             heading_count += 1
+            last_heading_identity = identity
+            body_since_heading = False
+            if room_body:
+                paragraph.append(room_body)
+                if _TERMINAL_RE.search(room_body):
+                    flush()
         elif _LIST_RE.match(line):
             flush()
             output.append(re.sub(r"^[•●▪◼]\s*", "- ", line))
+            body_since_heading = True
         else:
             paragraph.append(line)
             if _TERMINAL_RE.search(line):
@@ -771,42 +938,62 @@ def _visual_headings(text_page: Any) -> list[tuple[str, int]]:
     ranged = text_page.get_text_range(force_this=True)
     offset = 0
     styled: list[tuple[str, float, int, str]] = []
+
+    def character_style(text_index: int) -> tuple[float, int, str] | None:
+        char_index = pdfium_c.FPDFText_GetCharIndexFromTextIndex(
+            text_page.raw, text_index
+        )
+        if char_index < 0:
+            return None
+        try:
+            box = text_page.get_charbox(char_index)
+            buffer = ctypes.create_string_buffer(256)
+            flags = ctypes.c_long()
+            pdfium_c.FPDFText_GetFontInfo(
+                text_page.raw,
+                char_index,
+                buffer,
+                len(buffer),
+                ctypes.byref(flags),
+            )
+            return (
+                float(box[3] - box[1]),
+                int(pdfium_c.FPDFText_GetFontWeight(text_page.raw, char_index)),
+                buffer.value.decode("utf-8", errors="replace"),
+            )
+        except Exception:
+            return None
+
     for raw_line in ranged.splitlines(keepends=True):
         line = raw_line.rstrip("\r\n")
-        first_letter = next((index for index, char in enumerate(line) if char.isalpha()), None)
-        if first_letter is not None:
-            char_index = pdfium_c.FPDFText_GetCharIndexFromTextIndex(
-                text_page.raw, offset + first_letter
+        letters = [index for index, char in enumerate(line) if char.isalpha()]
+        if letters:
+            sample_indices = sorted(
+                {
+                    letters[0],
+                    letters[len(letters) // 2],
+                    letters[-1],
+                }
             )
-            if char_index >= 0:
-                try:
-                    box = text_page.get_charbox(char_index)
-                    height = float(box[3] - box[1])
-                    weight = int(pdfium_c.FPDFText_GetFontWeight(text_page.raw, char_index))
-                    buffer = ctypes.create_string_buffer(256)
-                    flags = ctypes.c_long()
-                    pdfium_c.FPDFText_GetFontInfo(
-                        text_page.raw,
-                        char_index,
-                        buffer,
-                        len(buffer),
-                        ctypes.byref(flags),
+            styles = [
+                style
+                for index in sample_indices
+                if (style := character_style(offset + index)) is not None
+            ]
+            if styles:
+                styled.append(
+                    (
+                        line.strip(),
+                        median(style[0] for style in styles),
+                        Counter(style[1] for style in styles).most_common(1)[0][0],
+                        Counter(style[2] for style in styles).most_common(1)[0][0],
                     )
-                    styled.append(
-                        (
-                            line.strip(),
-                            height,
-                            weight,
-                            buffer.value.decode("utf-8", errors="replace"),
-                        )
-                    )
-                except Exception:
-                    pass
+                )
         offset += len(raw_line)
     eligible = [
         (line, height, weight, font)
         for line, height, weight, font in styled
-        if 3 <= len(line) <= 160 and not _PAGE_NUMBER_RE.fullmatch(line)
+        if 3 <= len(line) <= 100 and not _PAGE_NUMBER_RE.fullmatch(line)
     ]
     if not eligible:
         return []
@@ -828,17 +1015,40 @@ def _visual_headings(text_page: Any) -> list[tuple[str, int]]:
     for line, height, weight, font in eligible:
         if _TERMINAL_RE.search(line) or _LIST_RE.match(line):
             continue
+        if _looks_like_corrupt_visual_heading(line):
+            continue
         if field_label.match(line):
+            continue
+        if re.search(
+            r"\b(?:Melee|Ranged)\s+(?:Weapon|Spell)\s+Attack\s*:",
+            line,
+            re.IGNORECASE,
+        ):
             continue
         ratio = height / max(body_height, 0.1)
         strong_size = height >= 8.0 and ratio >= 1.35
         small_caps = "smallcaps" in font.casefold() and height >= 7.0
+        bold_display = (
+            "bold" in font.casefold()
+            and height >= 6.5
+            and _looks_like_letter_spaced_heading(line)
+        )
         distinct_weight = weights_informative and weight != common_weight and height >= 7.0
-        if not (strong_size or small_caps or distinct_weight):
+        if not (strong_size or small_caps or bold_display or distinct_weight):
             continue
         level = 3 if ratio >= 1.8 else 4 if ratio >= 1.4 else 5
         result.append((line, level))
     return result
+
+
+def _looks_like_corrupt_visual_heading(value: str) -> bool:
+    """Reject decorative or handwritten glyph extraction as document structure."""
+    quote_count = value.count("'") + value.count('"')
+    return bool(
+        any(char in value for char in ("\\", "~", "{", "}", "°", "•", "·", "+"))
+        or ".. " in value
+        or quote_count >= 4
+    )
 
 
 def _extract_pdfium_pages(path: Path) -> tuple[list[str], dict[int, list[tuple[str, int]]]]:

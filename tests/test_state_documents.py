@@ -28,6 +28,7 @@ from sagasmith_core.documents import (
     NormalizedDocument,
     PageLocator,
     PdfDocumentConverter,
+    _looks_like_corrupt_visual_heading,
     _pdf_form_metadata,
     build_structured_markdown,
     normalize_document,
@@ -207,6 +208,70 @@ def test_pdf_normalization_recovers_unbookmarked_all_caps_subheadings() -> None:
     assert warnings == ()
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        r"Mi r~eS t\re 5°Anc{Arc4",
+        r"SACY-ec\ f \Aces thAt We know",
+        "Wh'f f\"i tor one ju'tqe When tu CAn hA'v'e",
+    ],
+)
+def test_pdf_visual_heading_rejects_decorative_glyph_noise(value: str) -> None:
+    assert _looks_like_corrupt_visual_heading(value) is True
+
+
+def test_pdf_normalization_sanitizes_leader_and_demotes_corrupt_hint() -> None:
+    content, metadata, warnings = build_structured_markdown(
+        ["CHARACTER ADVANCEMENT ~~~~~~~~~~\nP,\\RT 3: THE SPIDER'S WEB\nBody."],
+        [],
+        {
+            1: [
+                ("CHARACTER ADVANCEMENT ~~~~~~~~~~", 4),
+                ("P,\\RT 3: THE SPIDER'S WEB", 4),
+            ]
+        },
+    )
+
+    assert "#### CHARACTER ADVANCEMENT" in content
+    assert "#### P,\\RT" not in content
+    assert metadata["heading_count"] == 1
+    assert warnings == ()
+
+
+def test_pdf_normalization_recovers_letter_spaced_unbookmarked_subheading() -> None:
+    content, metadata, warnings = build_structured_markdown(
+        [
+            'The only exception is "Seek the Keep," which should be first.\n'
+            "Se e k t h e K eep\n"
+            "Characters have random encounters with raiders.\n"
+            "T he town remains under attack."
+        ],
+        [],
+    )
+
+    assert "##### Seek the Keep\n\nCharacters have random encounters" in content
+    assert "##### T he town" not in content
+    assert metadata["heading_count"] == 1
+    assert warnings == ()
+
+
+def test_pdf_normalization_drops_split_suffix_of_previous_heading() -> None:
+    content, metadata, warnings = build_structured_markdown(
+        [
+            "Planned Road Events\n"
+            "E v e n t s\n"
+            "After the travelers join, three planned events must take place."
+        ],
+        [],
+        {1: [("Planned Road Events", 3), ("E v e n t s", 4)]},
+    )
+
+    assert "### Planned Road Events" in content
+    assert "#### events" not in content
+    assert metadata["heading_count"] == 1
+    assert warnings == ()
+
+
 def test_pdf_normalization_recovers_room_codes_with_ocr_one_before_digit() -> None:
     content, metadata, warnings = build_structured_markdown(
         [
@@ -231,6 +296,43 @@ def test_pdf_normalization_recovers_room_codes_with_ocr_one_before_digit() -> No
     assert "#### X19. XANATHAR'S SANCTUM" in content
     assert metadata["room_heading_count"] == 5
     assert warnings == ()
+
+
+def test_pdf_normalization_splits_inline_room_prose_from_heading() -> None:
+    content, metadata, warnings = build_structured_markdown(
+        [
+            "CG2. Storage. Guests can store their traveling gear here.\n"
+            "B9a. Stone stairs climb 10 feet to a wooden door.\n"
+            "DAY1. The first day's travel is by foot through tangled brush."
+        ],
+        [],
+    )
+
+    assert "#### CG2. Storage\n\nGuests can store" in content
+    assert "#### B9a\n\nStone stairs climb" in content
+    assert "#### DAY1\n\nThe first day's travel" in content
+    assert metadata["room_heading_count"] == 3
+    assert warnings == ()
+
+
+def test_pdf_normalization_rejects_wrapped_prose_as_room_codes() -> None:
+    content, metadata, warnings = build_structured_markdown(
+        [
+            "FA11. The dragon doesn't target the adventurers at first,\n"
+            "and every breath attack kills defenders.\n"
+            "D6. On a roll of 1, an encounter occurs. Then roll on the table.\n"
+            "Map 5.1 shows this level of the dungeon.\n"
+            "TA11. Melee Weapon Attack: +8 to hit, reach 20 ft., one target."
+        ],
+        [],
+    )
+
+    assert "#### FA11." not in content
+    assert "#### D6." not in content
+    assert "#### Map 5.1" not in content
+    assert "#### TA11." not in content
+    assert metadata["room_heading_count"] == 0
+    assert warnings == ("no structural headings were recovered",)
 
 
 def test_pdf_normalization_does_not_treat_alpha_abbreviation_as_ocr_room_code() -> None:
@@ -395,6 +497,23 @@ def test_pdf_normalization_synthesizes_outline_only_chapter_at_target_page() -> 
     assert "ANSHOON YEARNS TO RULE WATERDEEP" in content
     assert metadata["matched_bookmarks"] == 0
     assert metadata["synthetic_outline_headings"] == 1
+
+
+def test_pdf_normalization_does_not_anchor_bookmark_to_body_mention() -> None:
+    content, metadata, warnings = build_structured_markdown(
+        [
+            "THE XORLARRIN ALLIANCE\n"
+            "By the time the characters begin their journey to Ironslag, "
+            "the drow have already infiltrated Gauntlgrym."
+        ],
+        [DocumentBookmark("Ironslag", 1, 1)],
+    )
+
+    assert "### By the time" not in content
+    assert metadata["matched_bookmarks"] == 0
+    assert warnings == (
+        "text-bearing bookmark match rate is 0/1; expected at least 95%",
+    )
 
 
 def test_pdf_normalization_excludes_image_only_outline_pages_from_match_rate() -> None:
