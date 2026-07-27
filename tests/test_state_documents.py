@@ -16,6 +16,7 @@ from sagasmith_core import (
     ContinuityService,
     EventService,
     IdempotencyService,
+    IdempotencyWrite,
     MemoryService,
     ModuleService,
     RevisionService,
@@ -1987,6 +1988,21 @@ def test_state_mutation_exposes_committed_idempotency_recovery_without_a_receipt
         "recover-on-retry",
         public_request,
     )
+    recovered = idempotency.receipt(campaign.id, "recover-on-retry")
+    assert recovered.request_hash == request_hash(public_request)
+    assert recovered.response == {
+        "status": "committed",
+        "idempotency_replayed": True,
+        "response_recovery": "read_current_state",
+    }
+    assert recovered.entity_revisions == [
+        {
+            "entity_type": "campaign",
+            "entity_id": campaign.id,
+            "before_revision": campaign.revision,
+            "after_revision": campaign.revision + 1,
+        }
+    ]
     with pytest.raises(ValueError, match="different request"):
         idempotency.mutation_committed(
             campaign.id,
@@ -2001,6 +2017,78 @@ def test_state_mutation_exposes_committed_idempotency_recovery_without_a_receipt
             idempotency_key="recover-on-retry",
         )
     assert CampaignService(database).get(campaign.id).state == {"phase": "after"}
+
+
+def test_state_mutation_persists_exact_replay_response_atomically(database) -> None:
+    campaign = CampaignService(database).create(
+        system_id="dnd5e",
+        name="Atomic replay",
+        state={"phase": "before"},
+    )
+    branch_id = BranchService(database).current(campaign.id).id
+    public_request = {"phase": "after", "branch_id": branch_id}
+    revisions = StateMutationService(database).replace(
+        campaign.id,
+        campaign_state={"phase": "after"},
+        expected_campaign_revision=campaign.revision,
+        operation="test.atomic-replay",
+        idempotency_key="atomic-replay",
+        idempotency_write=IdempotencyWrite(
+            scope=(
+                f"test-atomic-replay:{campaign.id}:"
+                f"{branch_id}:system:local"
+            ),
+            payload=public_request,
+            response=lambda committed: {
+                "status": "committed",
+                "campaign_revision": campaign.revision + 1,
+                "revisions": [item.sequence for item in committed],
+            },
+        ),
+    )
+
+    receipt = IdempotencyService(database).receipt(campaign.id, "atomic-replay")
+    assert receipt.response == {
+        "status": "committed",
+        "campaign_revision": campaign.revision + 1,
+        "revisions": [item.sequence for item in revisions],
+    }
+    assert receipt.request_hash == request_hash(public_request)
+    assert receipt.mutation_group_id == revisions[0].mutation_group_id
+
+
+def test_state_mutation_rolls_back_when_atomic_replay_response_cannot_be_built(
+    database,
+) -> None:
+    campaign = CampaignService(database).create(
+        system_id="dnd5e",
+        name="Atomic replay rollback",
+        state={"phase": "before"},
+    )
+
+    def fail_response(_revisions):
+        raise RuntimeError("response serialization failed")
+
+    with pytest.raises(RuntimeError, match="response serialization failed"):
+        StateMutationService(database).replace(
+            campaign.id,
+            campaign_state={"phase": "must-roll-back"},
+            expected_campaign_revision=campaign.revision,
+            operation="test.atomic-replay-rollback",
+            idempotency_key="atomic-replay-rollback",
+            idempotency_write=IdempotencyWrite(
+                scope=f"test-atomic-replay:{campaign.id}",
+                payload={"phase": "must-roll-back"},
+                response=fail_response,
+            ),
+        )
+
+    assert CampaignService(database).get(campaign.id).state == {"phase": "before"}
+    with pytest.raises(LookupError, match="receipt not found"):
+        IdempotencyService(database).receipt(
+            campaign.id,
+            "atomic-replay-rollback",
+        )
 
 
 def test_state_mutation_persists_rule_receipts_in_the_same_group(database) -> None:

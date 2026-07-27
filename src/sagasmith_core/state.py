@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import Any, Callable
 
 from sqlalchemy import select
 
@@ -12,7 +12,7 @@ from sagasmith_core.branches import resolve_branch
 from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.characters import CharacterNotFoundError
 from sagasmith_core.database import Database
-from sagasmith_core.idempotency import request_hash
+from sagasmith_core.idempotency import IdempotencyService, request_hash
 from sagasmith_core.knowledge import ActorKnowledgeService
 from sagasmith_core.models import (
     ActorKnowledge,
@@ -50,6 +50,15 @@ class ActorKnowledgeTransfer:
     disclosure_scope: str = "dm"
 
 
+@dataclass(frozen=True)
+class IdempotencyWrite:
+    """Persist an exact public replay response in the state transaction."""
+
+    scope: str
+    payload: Any
+    response: dict[str, Any] | Callable[[list[RevisionInfo]], dict[str, Any]]
+
+
 class StateMutationService:
     """Apply related campaign and character document changes atomically.
 
@@ -74,6 +83,7 @@ class StateMutationService:
         branch_id: str | None = None,
         idempotency_key: str | None = None,
         idempotency_request_hash: str | None = None,
+        idempotency_write: IdempotencyWrite | None = None,
         rule_receipts: list[dict[str, Any]] | None = None,
     ) -> list[RevisionInfo] | None:
         updates = list(character_updates or [])
@@ -97,6 +107,19 @@ class StateMutationService:
                 )
             ):
                 raise ValueError("idempotency_request_hash must be a SHA-256 hex digest")
+        if idempotency_write is not None:
+            if not idempotency_key:
+                raise ValueError("idempotency_write requires an idempotency_key")
+            if not str(idempotency_write.scope).strip():
+                raise ValueError("idempotency_write.scope is required")
+            replay_request_hash = request_hash(idempotency_write.payload)
+            if (
+                idempotency_request_hash is not None
+                and idempotency_request_hash != replay_request_hash
+            ):
+                raise ValueError(
+                    "idempotency_request_hash does not match idempotency_write.payload"
+                )
 
         with self.database.transaction() as session:
             campaign = session.get(Campaign, campaign_id)
@@ -278,6 +301,11 @@ class StateMutationService:
                 branch_id=branch_id,
                 idempotency_key=idempotency_key,
                 request_hash=idempotency_request_hash
+                or (
+                    request_hash(idempotency_write.payload)
+                    if idempotency_write is not None
+                    else None
+                )
                 or request_hash(
                     {
                         "campaign_state": campaign_state,
@@ -323,5 +351,22 @@ class StateMutationService:
                         event=event,
                         receipt=dict(receipt),
                     )
+                )
+            if idempotency_write is not None:
+                replay_response = (
+                    idempotency_write.response(revisions)
+                    if callable(idempotency_write.response)
+                    else dict(idempotency_write.response)
+                )
+                if not isinstance(replay_response, dict):
+                    raise TypeError("idempotency_write.response must produce an object")
+                IdempotencyService(self.database).remember_in_session(
+                    session,
+                    idempotency_write.scope,
+                    idempotency_key,
+                    idempotency_write.payload,
+                    replay_response,
+                    campaign_id=campaign_id,
+                    mutation_group_id=mutation_group_id,
                 )
             return revisions

@@ -72,7 +72,51 @@ class IdempotencyService:
                 )
             )
             if not rows:
-                raise LookupError(f"idempotency receipt not found: {key}")
+                groups = list(
+                    session.scalars(
+                        select(MutationGroup).where(
+                            MutationGroup.campaign_id == campaign_id,
+                            MutationGroup.branch_id == effective_branch_id,
+                            MutationGroup.idempotency_key == key,
+                            MutationGroup.applied.is_(True),
+                        )
+                    )
+                )
+                if not groups:
+                    raise LookupError(f"idempotency receipt not found: {key}")
+                if len(groups) != 1:
+                    raise RuntimeError(f"idempotency mutation group is ambiguous: {key}")
+                group = groups[0]
+                entity_revisions = []
+                revision_rows = session.scalars(
+                    select(StateRevision)
+                    .where(StateRevision.mutation_group_id == group.id)
+                    .order_by(StateRevision.sequence)
+                )
+                for revision in revision_rows:
+                    before = dict(revision.before or {})
+                    after = dict(revision.after or {})
+                    entity_revisions.append(
+                        {
+                            "entity_type": revision.entity_type,
+                            "entity_id": revision.entity_id,
+                            "before_revision": before.get("revision"),
+                            "after_revision": after.get("revision"),
+                        }
+                    )
+                return IdempotencyReceipt(
+                    key,
+                    True,
+                    {
+                        "status": "committed",
+                        "idempotency_replayed": True,
+                        "response_recovery": "read_current_state",
+                    },
+                    group.id,
+                    str(group.request_hash or ""),
+                    group.branch_id,
+                    entity_revisions,
+                )
             matched: list[tuple[IdempotencyRecord, MutationGroup | None]] = []
             for candidate in rows:
                 candidate_group = (

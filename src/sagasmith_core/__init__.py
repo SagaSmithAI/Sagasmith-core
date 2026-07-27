@@ -46,6 +46,7 @@ from sagasmith_core.snapshots import SnapshotService
 from sagasmith_core.state import (
     ActorKnowledgeTransfer,
     CharacterStateUpdate,
+    IdempotencyWrite,
     StateMutationService,
 )
 from sagasmith_core.systems import SystemDefinition, SystemRegistry
@@ -74,6 +75,7 @@ __all__ = [
     "MemoryService",
     "IdempotencyConflictError",
     "IdempotencyService",
+    "IdempotencyWrite",
     "ImportJobError",
     "ImportJobService",
     "ModuleService",
