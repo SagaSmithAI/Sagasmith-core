@@ -103,4 +103,4 @@ Further reading: [Architecture](docs/ARCHITECTURE.md) · [Quickstart](docs/QUICK
 
 ## License
 
-MIT
+Apache-2.0

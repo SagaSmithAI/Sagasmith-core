@@ -8,7 +8,8 @@ version = "0.2.0"
 description = "System-neutral database, document, retrieval, and campaign runtime for tabletop RPGs"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "SagaSmithAI" }]
 dependencies = [
     "sqlalchemy>=2.0.41,<3.0.0",
