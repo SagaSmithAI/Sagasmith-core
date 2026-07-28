@@ -5,10 +5,14 @@ from sagasmith_core.branches import BranchService
 from sagasmith_core.campaigns import CampaignService
 from sagasmith_core.characters import CharacterService
 from sagasmith_core.continuity import ContinuityService
-from sagasmith_core.continuity_commit import ContinuityCommitService
+from sagasmith_core.continuity_commit import (
+    FACT_KEY_WRITE_ACTIONS,
+    ContinuityCommitService,
+)
 from sagasmith_core.database import Database
 from sagasmith_core.documents import (
     DOCUMENT_NORMALIZER_VERSION,
+    DOCUMENT_SOURCE_SUFFIXES,
     DocumentQualityError,
     NormalizedDocument,
     OcrPageLayout,
@@ -41,7 +45,14 @@ from sagasmith_core.idempotency import (
 from sagasmith_core.import_jobs import ImportJobError, ImportJobService
 from sagasmith_core.knowledge import ActorKnowledgeService
 from sagasmith_core.memory import MemoryService
-from sagasmith_core.modules import ModuleService
+from sagasmith_core.modules import (
+    EXACT_MODULE_SOURCE_FIELD_ORDER,
+    EXACT_MODULE_SOURCE_FIELDS,
+    MANAGED_MODULE_SOURCE_FIELDS,
+    ModuleService,
+    clean_source_evidence_text,
+    normalize_source_evidence_text,
+)
 from sagasmith_core.revisions import RevisionService
 from sagasmith_core.rule_packs import RulePackService
 from sagasmith_core.rule_profiles import RuleProfileService
@@ -59,6 +70,9 @@ from sagasmith_core.vector_jobs import VectorFlushResult, VectorIndexJobService
 
 __all__ = [
     "DOCUMENT_NORMALIZER_VERSION",
+    "DOCUMENT_SOURCE_SUFFIXES",
+    "EXACT_MODULE_SOURCE_FIELD_ORDER",
+    "EXACT_MODULE_SOURCE_FIELDS",
     "BgeEmbedder",
     "BgeM3Embedder",
     "BgeSmallEnEmbedder",
@@ -77,7 +91,9 @@ __all__ = [
     "DocumentQualityError",
     "EmbeddingProfile",
     "EventService",
+    "FACT_KEY_WRITE_ACTIONS",
     "MemoryService",
+    "MANAGED_MODULE_SOURCE_FIELDS",
     "IdempotencyConflictError",
     "IdempotencyService",
     "IdempotencyWrite",
@@ -104,11 +120,13 @@ __all__ = [
     "VectorFlushResult",
     "VectorIndexJobService",
     "configured_profiles",
+    "clean_source_evidence_text",
     "create_embedder",
     "default_local_principal",
     "extract_pdf_page_text",
     "file_sha256",
     "normalize_document",
+    "normalize_source_evidence_text",
     "request_hash",
     "render_pdf_page",
 ]

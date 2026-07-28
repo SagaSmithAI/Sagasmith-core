@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -29,6 +28,7 @@ from sagasmith_core.rule_profile_contract import (
     LEGACY_RULE_PROFILE_SETTING_FIELDS,
     RULE_PROFILE_FIELDS,
 )
+from sagasmith_core.text import ascii_slug
 
 
 class CampaignNotFoundError(LookupError):
@@ -49,7 +49,7 @@ class CampaignInfo:
 
 
 def slugify(value: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", value.casefold()).strip("-")
+    slug = ascii_slug(value)
     return slug or uuid.uuid4().hex[:12]
 
 

@@ -48,6 +48,30 @@ from sagasmith_core.vector import VectorStore
 from sagasmith_core.vector_jobs import VectorIndexJobService
 from sagasmith_core.visibility import MODULE_VISIBILITY_SCOPES
 
+MANAGED_MODULE_SOURCE_FIELDS = frozenset(
+    {"module_id", "scene_id", "chunk_id", "content_sha256"}
+)
+EXACT_MODULE_SOURCE_FIELD_ORDER = (
+    "module_id",
+    "scene_id",
+    "chunk_id",
+    "page_start",
+    "page_end",
+    "heading_path",
+    "content_sha256",
+)
+EXACT_MODULE_SOURCE_FIELDS = frozenset(EXACT_MODULE_SOURCE_FIELD_ORDER)
+_SOURCE_EVIDENCE_TRANSLATION = str.maketrans(
+    {
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u2013": "-",
+        "\u2014": "-",
+    }
+)
+
 
 def canonical_heading_path(headings: Sequence[str]) -> tuple[str, ...]:
     """Return one stable heading path, collapsing parser-boundary duplicates."""
@@ -61,6 +85,19 @@ def canonical_heading_path(headings: Sequence[str]) -> tuple[str, ...]:
             continue
         normalized.append(heading)
     return tuple(normalized)
+
+
+def clean_source_evidence_text(value: Any) -> str:
+    """Remove PDF artifacts and normalize typography while preserving letter case."""
+
+    text = str(value or "").replace("\x02", "").replace("\u00ad", "")
+    return " ".join(text.translate(_SOURCE_EVIDENCE_TRANSLATION).split())
+
+
+def normalize_source_evidence_text(value: Any) -> str:
+    """Normalize indexed PDF text for exact, case-insensitive containment checks."""
+
+    return clean_source_evidence_text(value).casefold()
 
 
 @dataclass(frozen=True)

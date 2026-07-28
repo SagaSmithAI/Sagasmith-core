@@ -22,6 +22,8 @@ from sagasmith_core.models import (
 )
 from sagasmith_core.snapshots import SnapshotService
 
+FACT_KEY_WRITE_ACTIONS = frozenset({"add", "upsert"})
+
 
 class ContinuityCommitService:
     """Persist one narrative outcome without exposing partially saved continuity."""
@@ -143,7 +145,7 @@ class ContinuityCommitService:
                 importance=data.get("importance"),
                 disclosure_scope=data.get("disclosure_scope"),
             )
-        if action not in {"add", "upsert"}:
+        if action not in FACT_KEY_WRITE_ACTIONS:
             raise ValueError(f"unsupported fact action: {action}")
         fact_key = self._required_text(data, "fact_key")
         memory = session.scalar(

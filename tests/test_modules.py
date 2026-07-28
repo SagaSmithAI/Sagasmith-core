@@ -7,13 +7,34 @@ from sagasmith_core.campaigns import CampaignService
 from sagasmith_core.documents import NormalizedDocument
 from sagasmith_core.models import ModuleSource
 from sagasmith_core.modules import (
+    EXACT_MODULE_SOURCE_FIELD_ORDER,
+    EXACT_MODULE_SOURCE_FIELDS,
+    MANAGED_MODULE_SOURCE_FIELDS,
     GenericModuleProfile,
     MarkdownModuleParser,
     ModuleService,
     SceneBoundary,
     canonical_heading_path,
+    clean_source_evidence_text,
+    normalize_source_evidence_text,
 )
 from sagasmith_core.snapshots import SnapshotService
+
+
+def test_module_source_evidence_contract_has_one_canonical_normalizer() -> None:
+    assert EXACT_MODULE_SOURCE_FIELDS == set(EXACT_MODULE_SOURCE_FIELD_ORDER)
+    assert MANAGED_MODULE_SOURCE_FIELDS == {
+        "module_id",
+        "scene_id",
+        "chunk_id",
+        "content_sha256",
+    }
+    assert clean_source_evidence_text(
+        "\x02The dragon\u2019s \u00adhoard\u2014HERE."
+    ) == "The dragon's hoard-HERE."
+    assert normalize_source_evidence_text(
+        "\x02The dragon\u2019s \u00adhoard\u2014HERE."
+    ) == "the dragon's hoard-here."
 
 
 def test_module_ingest_search_and_progress(database) -> None:

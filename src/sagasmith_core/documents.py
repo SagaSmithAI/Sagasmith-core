@@ -17,6 +17,7 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 DOCUMENT_NORMALIZER_VERSION = "19"
+DOCUMENT_SOURCE_SUFFIXES = frozenset({".md", ".markdown", ".pdf", ".txt"})
 _DOCUMENT_CACHE_SCHEMA = 1
 _PDF_EXTRACTION_CACHE_SCHEMA = 1
 _PDF_TEXT_EXTRACTOR_VERSION = "3"
@@ -1697,7 +1698,7 @@ def converter_for(
             ocr_provider=ocr_provider,
             extraction_cache_dir=extraction_cache_dir,
         )
-    if suffix in {".md", ".markdown", ".txt"}:
+    if suffix in DOCUMENT_SOURCE_SUFFIXES - {".pdf"}:
         return MarkdownDocumentConverter()
     raise ValueError(f"unsupported document type: {suffix}")
 

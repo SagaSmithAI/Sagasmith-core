@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy import delete, event, select
 
 from sagasmith_core import (
+    FACT_KEY_WRITE_ACTIONS,
     ActorKnowledgeService,
     ActorKnowledgeTransfer,
     BranchService,
@@ -63,6 +64,10 @@ from sagasmith_core.visibility import (
     PLAYER_MEMORY_DISCLOSURE_SCOPES,
     PLAYER_OWNED_ACTOR_DISCLOSURE_SCOPES,
 )
+
+
+def test_continuity_fact_key_actions_have_one_public_contract() -> None:
+    assert FACT_KEY_WRITE_ACTIONS == {"add", "upsert"}
 
 
 def test_visibility_vocabularies_keep_distinct_semantics_explicit() -> None:

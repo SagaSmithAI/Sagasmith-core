@@ -1,3 +1,4 @@
+from sagasmith_core.documents import DOCUMENT_SOURCE_SUFFIXES
 from sagasmith_core.idempotency import request_hash
 from sagasmith_core.integrity import (
     canonical_json,
@@ -33,3 +34,7 @@ def test_retired_source_keys_share_one_collision_contract() -> None:
     assert first == f"{'x' * 180}@abcdef012345"
     assert second == f"{first}-2"
     assert len(second) <= 200
+
+
+def test_document_importers_share_one_supported_suffix_contract() -> None:
+    assert DOCUMENT_SOURCE_SUFFIXES == {".md", ".markdown", ".pdf", ".txt"}
