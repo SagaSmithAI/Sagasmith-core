@@ -25,6 +25,10 @@ from sagasmith_core.models import (
     MutationGroup,
     Principal,
 )
+from sagasmith_core.rule_profile_contract import (
+    LEGACY_RULE_PROFILE_SETTING_FIELDS,
+    RULE_PROFILE_FIELDS,
+)
 
 
 class CampaignNotFoundError(LookupError):
@@ -101,20 +105,14 @@ class CampaignService:
         """Atomically create a campaign and every required initial authority."""
         normalized_profile = dict(rule_profile) if rule_profile is not None else None
         if normalized_profile is not None:
-            required_profile_fields = {
-                "edition",
-                "locale",
-                "publications",
-                "options",
-            }
-            if set(normalized_profile) != required_profile_fields:
+            if set(normalized_profile) != RULE_PROFILE_FIELDS:
                 raise ValueError(
                     "rule_profile must contain edition, locale, publications, and options"
                 )
         normalized_settings = dict(settings or {})
         if normalized_profile is not None:
-            normalized_settings.pop("edition", None)
-            normalized_settings.pop("locale", None)
+            for field in LEGACY_RULE_PROFILE_SETTING_FIELDS:
+                normalized_settings.pop(field, None)
         payload = {
             "system_id": system_id,
             "name": name,

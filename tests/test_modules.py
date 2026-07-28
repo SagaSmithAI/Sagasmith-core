@@ -341,6 +341,36 @@ def test_module_profile_metadata_errors_fail_preview_and_ingest(database, tmp_pa
         )
 
 
+def test_module_scene_visibility_uses_the_shared_vocabulary(database, tmp_path) -> None:
+    class InvalidVisibilityProfile(GenericModuleProfile):
+        def scene_boundaries(self, chapter_title: str, chapter_content: str):
+            return [
+                SceneBoundary(
+                    "Scene",
+                    0,
+                    len(chapter_content),
+                    {"visibility": "secret"},
+                )
+            ]
+
+    source = tmp_path / "invalid-visibility.md"
+    source.write_text("# Chapter\nBody.\n", encoding="utf-8")
+    parser = MarkdownModuleParser(profile=InvalidVisibilityProfile())
+    preview = ModuleService(database).preview_path(source, parser=parser)
+
+    assert preview["valid"] is False
+    assert preview["errors"] == ["scene chapter-scene has invalid visibility 'secret'"]
+
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Invalid")
+    with pytest.raises(ValueError, match="invalid module scene visibility"):
+        ModuleService(database).ingest_path(
+            campaign_id=campaign.id,
+            path=source,
+            source_key="invalid-visibility",
+            parser=parser,
+        )
+
+
 def test_scene_stable_keys_preserve_cjk_chapter_identity(database) -> None:
     campaign = CampaignService(database).create(system_id="dnd5e", name="中文章节")
     service = ModuleService(database)

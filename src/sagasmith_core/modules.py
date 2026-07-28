@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 import uuid
 from collections.abc import Sequence
@@ -24,6 +23,7 @@ from sagasmith_core.documents import (
 )
 from sagasmith_core.embeddings import Embedder
 from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
+from sagasmith_core.integrity import json_sha256, unique_retired_source_key
 from sagasmith_core.models import (
     Campaign,
     ModuleAsset,
@@ -46,6 +46,7 @@ from sagasmith_core.retrieval import (
 )
 from sagasmith_core.vector import VectorStore
 from sagasmith_core.vector_jobs import VectorIndexJobService
+from sagasmith_core.visibility import MODULE_VISIBILITY_SCOPES
 
 
 def canonical_heading_path(headings: Sequence[str]) -> tuple[str, ...]:
@@ -544,6 +545,13 @@ class ModuleService:
                             scene.content.encode("utf-8")
                         ).hexdigest(),
                     }
+                    visibility = str(scene_metadata.get("visibility", "keeper"))
+                    if visibility not in MODULE_VISIBILITY_SCOPES:
+                        raise ValueError(
+                            f"invalid module scene visibility {visibility!r}: "
+                            f"expected one of {sorted(MODULE_VISIBILITY_SCOPES)}"
+                        )
+                    scene_metadata["visibility"] = visibility
                     session.add(
                         ModuleScene(
                             id=scene_id,
@@ -751,6 +759,11 @@ class ModuleService:
                     errors.append(f"duplicate stable scene key: {stable_key}")
                 keys.add(stable_key)
                 metadata = dict(scene.metadata)
+                visibility = str(metadata.get("visibility", "keeper"))
+                if visibility not in MODULE_VISIBILITY_SCOPES:
+                    errors.append(
+                        f"scene {stable_key} has invalid visibility {visibility!r}"
+                    )
                 spatial = dict(metadata.get("spatial") or {})
                 locations = list(spatial.get("locations") or [])
                 location_keys = [str(item.get("key") or "") for item in locations]
@@ -777,7 +790,7 @@ class ModuleService:
                         "title": scene.title,
                         "headings": list(canonical_heading_path(scene.heading_path)),
                         "scene_type": metadata.get("scene_type", "section"),
-                        "visibility": metadata.get("visibility", "keeper"),
+                        "visibility": visibility,
                         "page_start": page_start,
                         "page_end": page_end,
                         "start_line": metadata.get("start_line"),
@@ -1060,19 +1073,14 @@ class ModuleService:
         if not observation_value or len(observation_value) > 500:
             raise ValueError("observation must contain 1 to 500 characters")
         metadata_value = dict(metadata or {})
-        checksum = hashlib.sha256(
-            json.dumps(
-                {
-                    "content_key": key,
-                    "content_kind": kind,
-                    "normalized_content": content,
-                    "metadata": metadata_value,
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        ).hexdigest()
+        checksum = json_sha256(
+            {
+                "content_key": key,
+                "content_kind": kind,
+                "normalized_content": content,
+                "metadata": metadata_value,
+            }
+        )
 
         with self.database.transaction() as session:
             idempotency = IdempotencyService(self.database)
@@ -2307,21 +2315,18 @@ class ModuleService:
     @staticmethod
     def _retired_source_key(session: Any, campaign_id: str, source_key: str, checksum: str) -> str:
         """Return a unique, human-auditable key for an immutable retired revision."""
-        # ModuleSource.source_key is capped at 200 characters. Reserve room for
-        # the checksum and a collision suffix when a very long filename is
-        # revised multiple times.
-        stem = f"{source_key[:180]}@{checksum[:12]}"
-        candidate = stem
-        suffix = 2
-        while session.scalar(
-            select(ModuleSource.id).where(
-                ModuleSource.campaign_id == campaign_id,
-                ModuleSource.source_key == candidate,
-            )
-        ):
-            candidate = f"{stem[: 200 - len(str(suffix)) - 1]}-{suffix}"
-            suffix += 1
-        return candidate
+        return unique_retired_source_key(
+            source_key,
+            checksum,
+            exists=lambda candidate: bool(
+                session.scalar(
+                    select(ModuleSource.id).where(
+                        ModuleSource.campaign_id == campaign_id,
+                        ModuleSource.source_key == candidate,
+                    )
+                )
+            ),
+        )
 
     @staticmethod
     def _counts(session, module_id: str) -> tuple[int, int, int]:

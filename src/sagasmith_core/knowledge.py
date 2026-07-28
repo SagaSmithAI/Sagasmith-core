@@ -23,7 +23,10 @@ from sagasmith_core.models import (
 from sagasmith_core.retrieval import lexical_score
 from sagasmith_core.visibility import ACTOR_KNOWLEDGE_DISCLOSURE_SCOPES
 
-_STATUSES = {"known", "belief", "rumor", "false_belief", "forgotten", "modified", "superseded"}
+ACTOR_KNOWLEDGE_STATUSES = frozenset(
+    {"known", "belief", "rumor", "false_belief", "forgotten", "modified", "superseded"}
+)
+INACTIVE_ACTOR_KNOWLEDGE_STATUSES = frozenset({"forgotten", "superseded"})
 
 
 @dataclass(frozen=True)
@@ -298,7 +301,7 @@ class ActorKnowledgeService:
             if not include_inactive:
                 statement = statement.where(
                     ActorKnowledgeRevision.epistemic_status.not_in(
-                        {"forgotten", "superseded"}
+                        INACTIVE_ACTOR_KNOWLEDGE_STATUSES
                     )
                 )
             rows = session.execute(statement)
@@ -374,7 +377,7 @@ class ActorKnowledgeService:
 
     @staticmethod
     def _validate_status(value: str) -> None:
-        if value not in _STATUSES:
+        if value not in ACTOR_KNOWLEDGE_STATUSES:
             raise ValueError(f"invalid epistemic status: {value}")
 
     @staticmethod

@@ -23,6 +23,7 @@ from sagasmith_core.models import (
 )
 from sagasmith_core.visibility import (
     ACTOR_KNOWLEDGE_DISCLOSURE_SCOPES,
+    CONTINUITY_AUDIENCES,
     EVENT_AUDIENCE_SCOPES,
     PLAYER_EVENT_AUDIENCE_SCOPES,
     PLAYER_OWNED_ACTOR_DISCLOSURE_SCOPES,
@@ -255,7 +256,7 @@ class EventService:
     ) -> list[CampaignEventInfo]:
         """List branch events through the one authoritative audience policy."""
 
-        if audience not in {"dm", "player"}:
+        if audience not in CONTINUITY_AUDIENCES:
             raise ValueError("audience must be 'dm' or 'player'")
         with self.database.transaction() as session:
             campaign = session.get(Campaign, campaign_id)

@@ -13,7 +13,10 @@ from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.characters import CharacterNotFoundError
 from sagasmith_core.database import Database
 from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite, request_hash
-from sagasmith_core.knowledge import ActorKnowledgeService
+from sagasmith_core.knowledge import (
+    INACTIVE_ACTOR_KNOWLEDGE_STATUSES,
+    ActorKnowledgeService,
+)
 from sagasmith_core.models import (
     ActorKnowledge,
     ActorKnowledgeRevision,
@@ -213,7 +216,7 @@ class StateMutationService:
                             BranchActorKnowledgeHead.branch_id == branch.id,
                             ActorKnowledge.actor_id == transfer.source_actor_id,
                             ActorKnowledgeRevision.epistemic_status.not_in(
-                                {"forgotten", "superseded"}
+                                INACTIVE_ACTOR_KNOWLEDGE_STATUSES
                             ),
                         )
                         .order_by(ActorKnowledge.knowledge_key)

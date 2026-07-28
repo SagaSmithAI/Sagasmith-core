@@ -21,6 +21,7 @@ from sagasmith_core.documents import (
 )
 from sagasmith_core.embeddings import Embedder
 from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
+from sagasmith_core.integrity import unique_retired_source_key
 from sagasmith_core.models import RuleChunk, RuleSection, RuleSource, VectorIndexJob
 from sagasmith_core.parsing import MarkdownHierarchyParser
 from sagasmith_core.retrieval import (
@@ -684,15 +685,15 @@ class RuleService:
     ) -> str:
         """Return one unique storage key for an immutable retired rule revision."""
 
-        stem = f"{source_key[:180]}@{checksum[:12]}"
-        candidate = stem
-        suffix = 2
-        while session.scalar(
-            select(RuleSource.id).where(
-                RuleSource.system_id == system_id,
-                RuleSource.source_key == candidate,
-            )
-        ):
-            candidate = f"{stem[: 200 - len(str(suffix)) - 1]}-{suffix}"
-            suffix += 1
-        return candidate
+        return unique_retired_source_key(
+            source_key,
+            checksum,
+            exists=lambda candidate: bool(
+                session.scalar(
+                    select(RuleSource.id).where(
+                        RuleSource.system_id == system_id,
+                        RuleSource.source_key == candidate,
+                    )
+                )
+            ),
+        )

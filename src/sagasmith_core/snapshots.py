@@ -41,6 +41,10 @@ from sagasmith_core.models import (
     SnapshotFactBinding,
     StateRevision,
 )
+from sagasmith_core.rule_profile_contract import (
+    LEGACY_RULE_PROFILE_SETTING_FIELDS,
+    SNAPSHOT_RULE_PROFILE_FIELDS,
+)
 from sagasmith_core.visibility import (
     PLAYER_EVENT_AUDIENCE_SCOPES,
     PLAYER_MEMORY_DISCLOSURE_SCOPES,
@@ -277,8 +281,7 @@ class SnapshotService:
         snapshot, so later checkout never depends on an implicit runtime upgrade.
         """
         profile_value = deepcopy(dict(rule_profile or {}))
-        required = {"system_id", "edition", "locale", "publications", "options"}
-        if set(profile_value) != required:
+        if set(profile_value) != SNAPSHOT_RULE_PROFILE_FIELDS:
             raise ValueError("converted rule profile must contain the exact snapshot fields")
         name = str(branch_name or "").strip()
         if not name:
@@ -813,7 +816,7 @@ class SnapshotService:
             campaign.settings = {
                 key: setting
                 for key, setting in dict(campaign.settings or {}).items()
-                if key not in {"edition", "locale"}
+                if key not in LEGACY_RULE_PROFILE_SETTING_FIELDS
             }
 
         branch = resolve_branch(session, campaign)

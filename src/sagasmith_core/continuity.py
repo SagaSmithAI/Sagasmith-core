@@ -11,7 +11,10 @@ from sqlalchemy import select
 from sagasmith_core.branches import BranchService
 from sagasmith_core.database import Database
 from sagasmith_core.events import EventService
-from sagasmith_core.knowledge import ActorKnowledgeService
+from sagasmith_core.knowledge import (
+    INACTIVE_ACTOR_KNOWLEDGE_STATUSES,
+    ActorKnowledgeService,
+)
 from sagasmith_core.memory import MemoryService
 from sagasmith_core.models import (
     ActorKnowledge,
@@ -27,6 +30,7 @@ from sagasmith_core.modules import ModuleService
 from sagasmith_core.retrieval import lexical_score
 from sagasmith_core.snapshots import SnapshotService
 from sagasmith_core.visibility import (
+    CONTINUITY_AUDIENCES,
     PLAYER_MEMORY_DISCLOSURE_SCOPES,
     PLAYER_OWNED_ACTOR_DISCLOSURE_SCOPES,
 )
@@ -53,7 +57,7 @@ class ContinuityService:
         limit: int = 8,
         budget_chars: int = 12_000,
     ) -> dict[str, Any]:
-        if audience not in {"dm", "player"}:
+        if audience not in CONTINUITY_AUDIENCES:
             raise ValueError("audience must be 'dm' or 'player'")
         branch = (
             self.branches.current(campaign_id)
@@ -174,7 +178,7 @@ class ContinuityService:
 
         active_facts = sum(revision.status == "active" for _, revision in fact_rows)
         inactive_knowledge = sum(
-            revision.epistemic_status in {"forgotten", "superseded"}
+            revision.epistemic_status in INACTIVE_ACTOR_KNOWLEDGE_STATUSES
             for _, revision in knowledge_rows
         )
         orphan_fact_sources = sum(
