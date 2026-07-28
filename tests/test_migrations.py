@@ -278,3 +278,91 @@ def test_rule_profile_authority_removes_legacy_campaign_setting_copies(
         assert settings == {"table_name": "Friday"}
     finally:
         database.dispose()
+
+
+def test_rule_source_revision_migration_preserves_sqlite_fts_triggers(
+    tmp_path: Path,
+) -> None:
+    database = Database(sqlite_database_url(tmp_path / "rule-source-revisions.db"))
+    config = alembic_config(database.url)
+    command.upgrade(config, "20260728_19")
+    with database.engine.begin() as connection:
+        if "active" in {
+            column["name"]
+            for column in inspect(connection).get_columns("rule_sources")
+        }:
+            connection.exec_driver_sql("ALTER TABLE rule_sources DROP COLUMN active")
+
+    database.upgrade_schema()
+
+    try:
+        inspector = inspect(database.engine)
+        assert "active" in {
+            column["name"] for column in inspector.get_columns("rule_sources")
+        }
+        with database.engine.begin() as connection:
+            trigger_names = {
+                row[0]
+                for row in connection.exec_driver_sql(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type = 'trigger' AND name LIKE 'rule_fts_%'"
+                )
+            }
+            connection.exec_driver_sql(
+                "INSERT INTO rule_sources "
+                "(id, system_id, source_key, title, locale, edition, version, "
+                "publication_id, authority, checksum, active, metadata_json, "
+                "created_at, updated_at) VALUES "
+                "('source-1', 'dnd5e', 'legacy-rules', 'Legacy Rules', 'en', "
+                "'2014', '', '', 'primary', 'checksum', 1, '{}', "
+                "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO rule_sections "
+                "(id, source_id, ordinal, level, title, path, content, "
+                "start_offset, end_offset) VALUES "
+                "('section-1', 'source-1', 0, 1, 'Combat', '[\"Combat\"]', "
+                "'', 0, 0)"
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO rule_chunks "
+                "(id, source_id, section_id, ordinal, heading_path, content, "
+                "token_count, metadata_json) VALUES "
+                "('chunk-1', 'source-1', 'section-1', 0, '[\"Combat\"]', "
+                "'migration sentinel', 2, '{}')"
+            )
+            indexed = connection.exec_driver_sql(
+                "SELECT content FROM rule_fts WHERE chunk_id = 'chunk-1'"
+            ).scalar_one()
+        assert trigger_names == {"rule_fts_ai", "rule_fts_ad", "rule_fts_au"}
+        assert indexed == "migration sentinel"
+    finally:
+        database.dispose()
+
+
+def test_rule_source_revision_migration_recovers_interrupted_sqlite_batch(
+    tmp_path: Path,
+) -> None:
+    database = Database(sqlite_database_url(tmp_path / "interrupted-rule-source.db"))
+    config = alembic_config(database.url)
+    command.upgrade(config, "20260728_19")
+    with database.engine.begin() as connection:
+        if "active" in {
+            column["name"]
+            for column in inspect(connection).get_columns("rule_sources")
+        }:
+            connection.exec_driver_sql("ALTER TABLE rule_sources DROP COLUMN active")
+        connection.exec_driver_sql(
+            "CREATE TABLE _alembic_tmp_rule_sources (id VARCHAR(36) PRIMARY KEY)"
+        )
+
+    database.upgrade_schema()
+
+    try:
+        inspector = inspect(database.engine)
+        assert "_alembic_tmp_rule_sources" not in inspector.get_table_names()
+        assert "active" in {
+            column["name"] for column in inspector.get_columns("rule_sources")
+        }
+    finally:
+        database.dispose()
