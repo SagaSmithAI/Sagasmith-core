@@ -18,6 +18,10 @@ from sagasmith_core.models import (
     Principal,
 )
 
+CAMPAIGN_ROLES = frozenset({"owner", "dm", "player", "observer"})
+CAMPAIGN_DM_ROLES = frozenset({"owner", "dm"})
+LOCAL_SYSTEM_PRINCIPAL_ID = "system:local"
+
 
 class AccessDeniedError(PermissionError):
     """Raised when a principal is not allowed to read or mutate campaign state."""
@@ -80,7 +84,7 @@ class AccessService:
     def grant_campaign(
         self, campaign_id: str, principal_id: str, *, role: str = "player"
     ) -> MembershipInfo:
-        if role not in {"owner", "dm", "player", "observer"}:
+        if role not in CAMPAIGN_ROLES:
             raise ValueError(f"invalid campaign role: {role}")
         with self.database.transaction() as session:
             if session.get(Campaign, campaign_id) is None:
@@ -222,7 +226,7 @@ class AccessService:
                 raise AccessDeniedError(
                     f"actor {actor_id!r} does not belong to campaign {campaign_id!r}"
                 )
-        if membership.role in {"owner", "dm"}:
+        if membership.role in CAMPAIGN_DM_ROLES:
             return membership
         with self.database.transaction() as session:
             row = session.get(
@@ -255,5 +259,8 @@ class AccessService:
 def default_local_principal(database: Database) -> PrincipalInfo:
     """Return the local service identity used by single-user stdio deployments."""
     return AccessService(database).ensure_principal(
-        "system:local", platform="local", external_id="system:local", is_service=True
+        LOCAL_SYSTEM_PRINCIPAL_ID,
+        platform="local",
+        external_id=LOCAL_SYSTEM_PRINCIPAL_ID,
+        is_service=True,
     )

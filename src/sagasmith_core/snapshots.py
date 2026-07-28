@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import uuid
 from copy import deepcopy
@@ -17,6 +16,7 @@ from sagasmith_core.branches import BranchService, resolve_branch
 from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.database import Database
 from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
+from sagasmith_core.integrity import json_sha256
 from sagasmith_core.models import (
     ActorKnowledge,
     ActorKnowledgeRevision,
@@ -41,6 +41,10 @@ from sagasmith_core.models import (
     SnapshotFactBinding,
     StateRevision,
 )
+from sagasmith_core.visibility import (
+    PLAYER_EVENT_AUDIENCE_SCOPES,
+    PLAYER_MEMORY_DISCLOSURE_SCOPES,
+)
 
 
 class SnapshotIntegrityError(RuntimeError):
@@ -60,12 +64,8 @@ class SnapshotInfo:
     branch_id: str | None = None
 
 
-def _canonical_json(value: dict[str, Any]) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-
-
 def _checksum(value: dict[str, Any]) -> str:
-    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+    return json_sha256(value)
 
 
 class SnapshotService:
@@ -696,14 +696,14 @@ class SnapshotService:
                 item["revision"].get("disclosure_scope")
                 or item["revision"].get("metadata", {}).get("disclosure_scope", "dm")
             )
-            in {"public", "party", "player"}
+            in PLAYER_MEMORY_DISCLOSURE_SCOPES
         ]
         old_event_ids = {item["id"] for item in previous.get("events", [])}
         evidence_event_ids = [
             item["id"]
             for item in current.get("events", [])
             if item["id"] not in old_event_ids
-            and item.get("audience_scope") in {"public", "party", "player"}
+            and item.get("audience_scope") in PLAYER_EVENT_AUDIENCE_SCOPES
         ]
         event_changes = [
             item["summary"]

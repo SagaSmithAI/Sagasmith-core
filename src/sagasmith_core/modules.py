@@ -48,6 +48,20 @@ from sagasmith_core.vector import VectorStore
 from sagasmith_core.vector_jobs import VectorIndexJobService
 
 
+def canonical_heading_path(headings: Sequence[str]) -> tuple[str, ...]:
+    """Return one stable heading path, collapsing parser-boundary duplicates."""
+
+    normalized: list[str] = []
+    for raw_heading in headings:
+        heading = str(raw_heading).strip()
+        if not heading:
+            continue
+        if normalized and normalized[-1].casefold() == heading.casefold():
+            continue
+        normalized.append(heading)
+    return tuple(normalized)
+
+
 @dataclass(frozen=True)
 class ParsedScene:
     ordinal: int
@@ -307,7 +321,7 @@ class MarkdownModuleParser:
                     chunks.append(
                         type(chunk)(
                             ordinal=len(chunks),
-                            heading_path=(title, *chunk.heading_path),
+                            heading_path=canonical_heading_path((title, *chunk.heading_path)),
                             content=text,
                             start_offset=absolute_start,
                             end_offset=absolute_end,
@@ -321,7 +335,7 @@ class MarkdownModuleParser:
                     ordinal=scene_ordinal,
                     title=scene_title,
                     content=clean,
-                    heading_path=(title, scene_title),
+                    heading_path=canonical_heading_path((title, scene_title)),
                     chunks=tuple(chunks),
                     metadata={
                         **boundary.metadata,
@@ -761,7 +775,7 @@ class ModuleService:
                         "chapter_ordinal": chapter.ordinal,
                         "ordinal": scene.ordinal,
                         "title": scene.title,
-                        "headings": list(scene.heading_path),
+                        "headings": list(canonical_heading_path(scene.heading_path)),
                         "scene_type": metadata.get("scene_type", "section"),
                         "visibility": metadata.get("visibility", "keeper"),
                         "page_start": page_start,
@@ -1215,7 +1229,7 @@ class ModuleService:
                 .join(ModuleSource, ModuleSource.id == ModuleChunk.module_id)
                 .where(ModuleChunk.id == chunk_id)
             ).one()
-            heading_path = list(row.ModuleChunk.heading_path)
+            heading_path = list(canonical_heading_path(row.ModuleChunk.heading_path))
             content_sha256 = hashlib.sha256(
                 row.ModuleChunk.content.encode("utf-8")
             ).hexdigest()
@@ -1282,7 +1296,9 @@ class ModuleService:
                     "scene_id": row.ModuleChunk.scene_id,
                     "scene_title": row.ModuleScene.title,
                     "ordinal": row.ModuleChunk.ordinal,
-                    "heading_path": list(row.ModuleChunk.heading_path),
+                    "heading_path": list(
+                        canonical_heading_path(row.ModuleChunk.heading_path)
+                    ),
                     "content": row.ModuleChunk.content,
                     "chunk_type": row.ModuleChunk.chunk_type,
                     "page_start": row.ModuleChunk.page_start,
@@ -1887,7 +1903,7 @@ class ModuleService:
                     title=row.ModuleScene.title,
                     content=row.ModuleChunk.content,
                     source_id=row.ModuleSource.id,
-                    heading_path=tuple(row.ModuleChunk.heading_path),
+                    heading_path=canonical_heading_path(row.ModuleChunk.heading_path),
                     retrieval=retrieval,
                     metadata={
                         "campaign_id": row.ModuleSource.campaign_id,
@@ -2250,7 +2266,7 @@ class ModuleService:
             "visibility": metadata.get("visibility", "keeper"),
             "scene_level": metadata.get("scene_level"),
             "line_count": metadata.get("line_count"),
-            "headings": list(scene.headings),
+            "headings": list(canonical_heading_path(scene.headings)),
             "subsections": list(metadata.get("subsections", [])),
             "tags": list(metadata.get("tags", [])),
             "clues": list(metadata.get("clues", [])),

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
@@ -18,9 +18,13 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from sagasmith_core.clock import operational_utcnow
+
 
 def utcnow() -> datetime:
-    return datetime.now(UTC)
+    """Compatibility alias for the shared operational wall clock."""
+
+    return operational_utcnow()
 
 
 class Base(DeclarativeBase):

@@ -26,6 +26,11 @@ from sagasmith_core import (
     SnapshotService,
     StateMutationService,
 )
+from sagasmith_core.access import (
+    CAMPAIGN_DM_ROLES,
+    CAMPAIGN_ROLES,
+    LOCAL_SYSTEM_PRINCIPAL_ID,
+)
 from sagasmith_core.documents import (
     DocumentBookmark,
     NormalizedDocument,
@@ -50,6 +55,26 @@ from sagasmith_core.models import (
     StateRevision,
 )
 from sagasmith_core.snapshots import SnapshotIntegrityError
+from sagasmith_core.visibility import (
+    ACTOR_KNOWLEDGE_DISCLOSURE_SCOPES,
+    EVENT_AUDIENCE_SCOPES,
+    MEMORY_DISCLOSURE_SCOPES,
+    PLAYER_EVENT_AUDIENCE_SCOPES,
+    PLAYER_MEMORY_DISCLOSURE_SCOPES,
+    PLAYER_OWNED_ACTOR_DISCLOSURE_SCOPES,
+)
+
+
+def test_visibility_vocabularies_keep_distinct_semantics_explicit() -> None:
+    assert CAMPAIGN_DM_ROLES < CAMPAIGN_ROLES
+    assert LOCAL_SYSTEM_PRINCIPAL_ID == "system:local"
+    assert PLAYER_EVENT_AUDIENCE_SCOPES < EVENT_AUDIENCE_SCOPES
+    assert PLAYER_MEMORY_DISCLOSURE_SCOPES < MEMORY_DISCLOSURE_SCOPES
+    assert PLAYER_OWNED_ACTOR_DISCLOSURE_SCOPES < ACTOR_KNOWLEDGE_DISCLOSURE_SCOPES
+    assert "actor" in EVENT_AUDIENCE_SCOPES
+    assert "actor" not in ACTOR_KNOWLEDGE_DISCLOSURE_SCOPES
+    assert "owner" in ACTOR_KNOWLEDGE_DISCLOSURE_SCOPES
+    assert "owner" not in MEMORY_DISCLOSURE_SCOPES
 
 
 def test_active_branch_pointer_is_the_only_current_branch_authority(database) -> None:
@@ -1369,6 +1394,21 @@ def test_actor_scoped_events_follow_visible_actor_knowledge(database) -> None:
         audience="player",
         query="masked visitor",
     )
+    events = EventService(database)
+    witness_log = events.list_for_audience(
+        campaign.id,
+        audience="player",
+        actor_id=witness.id,
+    )
+    unaware_log = events.list_for_audience(
+        campaign.id,
+        audience="player",
+        actor_id=unaware.id,
+    )
+    unscoped_player_log = events.list_for_audience(
+        campaign.id,
+        audience="player",
+    )
 
     assert [item["id"] for item in seen["events"]] == [event.id]
     assert [item["knowledge_key"] for item in seen["actor_knowledge"]] == [
@@ -1376,6 +1416,9 @@ def test_actor_scoped_events_follow_visible_actor_knowledge(database) -> None:
     ]
     assert hidden["events"] == []
     assert hidden["actor_knowledge"] == []
+    assert [item.id for item in witness_log] == [event.id]
+    assert unaware_log == []
+    assert unscoped_player_log == []
 
 
 def test_actor_event_authorization_is_not_limited_by_knowledge_top_n(database) -> None:

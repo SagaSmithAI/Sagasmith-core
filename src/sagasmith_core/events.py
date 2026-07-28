@@ -21,8 +21,12 @@ from sagasmith_core.models import (
     Character,
     SnapshotEventBinding,
 )
-
-_AUDIENCE_SCOPES = {"dm", "public", "party", "player", "actor"}
+from sagasmith_core.visibility import (
+    ACTOR_KNOWLEDGE_DISCLOSURE_SCOPES,
+    EVENT_AUDIENCE_SCOPES,
+    PLAYER_EVENT_AUDIENCE_SCOPES,
+    PLAYER_OWNED_ACTOR_DISCLOSURE_SCOPES,
+)
 
 
 @dataclass(frozen=True)
@@ -53,7 +57,7 @@ class EventService:
         idempotency_key: str | None = None,
         idempotency_write: IdempotencyWrite | None = None,
     ) -> CampaignEventInfo:
-        if audience_scope not in _AUDIENCE_SCOPES:
+        if audience_scope not in EVENT_AUDIENCE_SCOPES:
             raise ValueError(f"invalid event audience scope: {audience_scope}")
         with self.database.transaction() as session:
             campaign = session.get(Campaign, campaign_id)
@@ -100,9 +104,9 @@ class EventService:
     ) -> tuple[CampaignEventInfo, list[str]]:
         """Append one event and every witnessed knowledge head atomically."""
 
-        if audience_scope not in _AUDIENCE_SCOPES:
+        if audience_scope not in EVENT_AUDIENCE_SCOPES:
             raise ValueError(f"invalid event audience scope: {audience_scope}")
-        if disclosure_scope not in {"dm", "owner", "party", "public", "player"}:
+        if disclosure_scope not in ACTOR_KNOWLEDGE_DISCLOSURE_SCOPES:
             raise ValueError(f"invalid actor-knowledge disclosure scope: {disclosure_scope}")
         normalized_actor_ids = [str(item) for item in actor_ids]
         if not normalized_actor_ids:
@@ -204,7 +208,7 @@ class EventService:
         payload: dict[str, Any] | None,
         audience_scope: str,
     ) -> CampaignEventInfo:
-        if audience_scope not in _AUDIENCE_SCOPES:
+        if audience_scope not in EVENT_AUDIENCE_SCOPES:
             raise ValueError(f"invalid event audience scope: {audience_scope}")
         sequence = session.scalar(
             update(Campaign)
@@ -236,31 +240,97 @@ class EventService:
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
             branch = resolve_branch(session, campaign, branch_id)
-            bound_ids: set[str] = set()
-            if branch.head_snapshot_id:
-                bound_ids = set(
-                    session.scalars(
-                        select(SnapshotEventBinding.event_id).where(
-                            SnapshotEventBinding.snapshot_id == branch.head_snapshot_id
+            rows = self._branch_rows(session, campaign_id, branch)
+            rows = rows[-max(1, min(limit, 500)) :]
+            return [self._info(row) for row in rows]
+
+    def list_for_audience(
+        self,
+        campaign_id: str,
+        *,
+        audience: str,
+        actor_id: str | None = None,
+        limit: int = 50,
+        branch_id: str | None = None,
+    ) -> list[CampaignEventInfo]:
+        """List branch events through the one authoritative audience policy."""
+
+        if audience not in {"dm", "player"}:
+            raise ValueError("audience must be 'dm' or 'player'")
+        with self.database.transaction() as session:
+            campaign = session.get(Campaign, campaign_id)
+            if campaign is None:
+                raise CampaignNotFoundError(campaign_id)
+            branch = resolve_branch(session, campaign, branch_id)
+            rows = self._branch_rows(session, campaign_id, branch)
+            if audience == "player":
+                actor_event_ids: set[str] = set()
+                if actor_id:
+                    actor = session.get(Character, actor_id)
+                    if actor is None or actor.campaign_id != campaign_id:
+                        raise LookupError(actor_id)
+                    actor_event_ids = {
+                        str(source_event_id)
+                        for source_event_id in session.scalars(
+                            select(ActorKnowledgeRevision.source_event_id)
+                            .join(
+                                BranchActorKnowledgeHead,
+                                BranchActorKnowledgeHead.revision_id
+                                == ActorKnowledgeRevision.id,
+                            )
+                            .join(
+                                ActorKnowledge,
+                                ActorKnowledge.id == BranchActorKnowledgeHead.knowledge_id,
+                            )
+                            .where(
+                                BranchActorKnowledgeHead.branch_id == branch.id,
+                                ActorKnowledge.actor_id == actor_id,
+                                ActorKnowledgeRevision.source_event_id.is_not(None),
+                                ActorKnowledgeRevision.disclosure_scope.in_(
+                                    PLAYER_OWNED_ACTOR_DISCLOSURE_SCOPES
+                                ),
+                            )
                         )
-                    )
-                )
-            rows = []
-            if bound_ids:
-                rows.extend(
-                    session.scalars(select(CampaignEvent).where(CampaignEvent.id.in_(bound_ids)))
-                )
-            rows.extend(
+                    }
+                rows = [
+                    row
+                    for row in rows
+                    if row.audience_scope in PLAYER_EVENT_AUDIENCE_SCOPES
+                    or (row.audience_scope == "actor" and row.id in actor_event_ids)
+                ]
+            rows = rows[-max(1, min(limit, 500)) :]
+            return [self._info(row) for row in rows]
+
+    @staticmethod
+    def _branch_rows(session, campaign_id: str, branch) -> list[CampaignEvent]:
+        bound_ids: set[str] = set()
+        if branch.head_snapshot_id:
+            bound_ids = set(
                 session.scalars(
-                    select(CampaignEvent).where(
-                        CampaignEvent.campaign_id == campaign_id,
-                        CampaignEvent.branch_id == branch.id,
-                        CampaignEvent.committed_snapshot_id.is_(None),
+                    select(SnapshotEventBinding.event_id).where(
+                        SnapshotEventBinding.snapshot_id == branch.head_snapshot_id
                     )
                 )
             )
-            rows = sorted(rows, key=lambda row: (row.sequence, row.id))[-max(1, min(limit, 500)) :]
-            return [self._info(row) for row in rows]
+        rows: dict[str, CampaignEvent] = {}
+        if bound_ids:
+            rows.update(
+                (row.id, row)
+                for row in session.scalars(
+                    select(CampaignEvent).where(CampaignEvent.id.in_(bound_ids))
+                )
+            )
+        rows.update(
+            (row.id, row)
+            for row in session.scalars(
+                select(CampaignEvent).where(
+                    CampaignEvent.campaign_id == campaign_id,
+                    CampaignEvent.branch_id == branch.id,
+                    CampaignEvent.committed_snapshot_id.is_(None),
+                )
+            )
+        )
+        return sorted(rows.values(), key=lambda row: (row.sequence, row.id))
 
     @staticmethod
     def _info(row: CampaignEvent) -> CampaignEventInfo:

@@ -21,9 +21,9 @@ from sagasmith_core.models import (
     SnapshotEventBinding,
 )
 from sagasmith_core.retrieval import lexical_score
+from sagasmith_core.visibility import ACTOR_KNOWLEDGE_DISCLOSURE_SCOPES
 
 _STATUSES = {"known", "belief", "rumor", "false_belief", "forgotten", "modified", "superseded"}
-_DISCLOSURE_SCOPES = {"dm", "owner", "party", "public", "player"}
 
 
 @dataclass(frozen=True)
@@ -379,7 +379,7 @@ class ActorKnowledgeService:
 
     @staticmethod
     def _validate_disclosure_scope(value: str) -> None:
-        if value not in _DISCLOSURE_SCOPES:
+        if value not in ACTOR_KNOWLEDGE_DISCLOSURE_SCOPES:
             raise ValueError(f"invalid actor-knowledge disclosure scope: {value}")
 
     @staticmethod

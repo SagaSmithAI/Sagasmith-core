@@ -11,6 +11,7 @@ from sagasmith_core.modules import (
     MarkdownModuleParser,
     ModuleService,
     SceneBoundary,
+    canonical_heading_path,
 )
 from sagasmith_core.snapshots import SnapshotService
 
@@ -176,6 +177,22 @@ def test_module_parser_preserves_front_matter_before_first_chapter() -> None:
     assert chapters[0].metadata["page_start"] == 1
     assert chapters[1].metadata["page_start"] == 2
     assert chapters[1].scenes[0].metadata["page_start"] == 2
+
+
+def test_module_heading_paths_have_one_canonical_representation() -> None:
+    chapters = MarkdownModuleParser().parse(
+        "# Episode 2: Raiders' Camp\n"
+        "## Episode 2: Raiders' Camp\n"
+        "The trail is easy to spot.\n"
+    )
+
+    assert chapters[0].scenes[0].heading_path == ("Episode 2: Raiders' Camp",)
+    assert chapters[0].scenes[0].chunks[0].heading_path == (
+        "Episode 2: Raiders' Camp",
+    )
+    assert canonical_heading_path(
+        ("Episode 2: Raiders' Camp", "episode 2: raiders' camp")
+    ) == ("Episode 2: Raiders' Camp",)
 
 
 def test_module_parser_uses_global_page_offsets_for_same_page_chapters() -> None:

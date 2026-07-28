@@ -22,6 +22,7 @@ from sagasmith_core.models import (
     utcnow,
 )
 from sagasmith_core.retrieval import lexical_score
+from sagasmith_core.visibility import MEMORY_DISCLOSURE_SCOPES
 
 
 @dataclass(frozen=True)
@@ -48,7 +49,6 @@ class MemoryInfo:
 
 
 _STATUSES = {"active", "superseded", "retracted"}
-_DISCLOSURE_SCOPES = {"dm", "public", "party", "player"}
 
 
 class MemoryService:
@@ -562,7 +562,7 @@ class MemoryService:
         if not 1 <= importance <= 5:
             raise ValueError("campaign-memory importance must be between 1 and 5")
         scope = disclosure_scope or str((metadata or {}).get("disclosure_scope", "dm"))
-        if scope not in _DISCLOSURE_SCOPES:
+        if scope not in MEMORY_DISCLOSURE_SCOPES:
             raise ValueError(f"invalid campaign-memory disclosure scope: {scope}")
 
     @staticmethod

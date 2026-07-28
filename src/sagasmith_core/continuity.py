@@ -26,6 +26,10 @@ from sagasmith_core.models import (
 from sagasmith_core.modules import ModuleService
 from sagasmith_core.retrieval import lexical_score
 from sagasmith_core.snapshots import SnapshotService
+from sagasmith_core.visibility import (
+    PLAYER_MEMORY_DISCLOSURE_SCOPES,
+    PLAYER_OWNED_ACTOR_DISCLOSURE_SCOPES,
+)
 
 
 class ContinuityService:
@@ -57,7 +61,13 @@ class ContinuityService:
             else self.branches.get(campaign_id, branch_id)
         )
         facts = self.facts.search(campaign_id, query or " ", limit=limit, branch_id=branch.id)
-        events = self.events.list(campaign_id, limit=limit, branch_id=branch.id)
+        events = self.events.list_for_audience(
+            campaign_id,
+            audience=audience,
+            actor_id=actor_id,
+            limit=limit,
+            branch_id=branch.id,
+        )
         knowledge = []
         if actor_id:
             knowledge = self.knowledge.search(
@@ -71,31 +81,12 @@ class ContinuityService:
             facts = [
                 item
                 for item in facts
-                if item.disclosure_scope in {"public", "party", "player"}
+                if item.disclosure_scope in PLAYER_MEMORY_DISCLOSURE_SCOPES
             ]
             knowledge = [
                 item
                 for item in knowledge
-                if item.disclosure_scope in {"owner", "party", "public", "player"}
-            ]
-            # Authorization must not depend on which knowledge items happened to
-            # rank in the response's top-N window.  Use the actor's complete active
-            # branch view to decide whether an actor-scoped event is visible.
-            actor_event_ids = set()
-            if actor_id:
-                actor_event_ids = {
-                    item.source_event_id
-                    for item in self.knowledge.list(
-                        campaign_id, actor_id=actor_id, branch_id=branch.id
-                    )
-                    if item.source_event_id is not None
-                    and item.disclosure_scope in {"owner", "party", "public", "player"}
-                }
-            events = [
-                item
-                for item in events
-                if item.audience_scope in {"public", "party", "player"}
-                or (item.audience_scope == "actor" and item.id in actor_event_ids)
+                if item.disclosure_scope in PLAYER_OWNED_ACTOR_DISCLOSURE_SCOPES
             ]
         current = self.branches.current(campaign_id)
         if branch.id == current.id:

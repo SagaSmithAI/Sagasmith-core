@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import uuid
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -11,6 +9,7 @@ from typing import Any, Callable
 from sqlalchemy import select
 
 from sagasmith_core.database import Database
+from sagasmith_core.integrity import json_sha256
 from sagasmith_core.models import Campaign, IdempotencyRecord, MutationGroup, StateRevision
 
 
@@ -47,8 +46,7 @@ class IdempotencyReceipt:
 
 
 def request_hash(payload: Any) -> str:
-    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    return json_sha256(payload)
 
 
 class IdempotencyService:

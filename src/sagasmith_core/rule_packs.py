@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -14,6 +12,8 @@ from sagasmith_core.branches import resolve_branch
 from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.database import Database
 from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
+from sagasmith_core.integrity import canonical_json as _canonical_json
+from sagasmith_core.integrity import json_sha256
 from sagasmith_core.models import (
     Campaign,
     CampaignRuleActivation,
@@ -70,11 +70,15 @@ class EffectiveRulesetInfo:
 
 
 def canonical_json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    """Compatibility name for the shared canonical JSON encoder."""
+
+    return _canonical_json(value)
 
 
 def content_checksum(value: Any) -> str:
-    return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+    """Compatibility name for the shared canonical JSON hash."""
+
+    return json_sha256(value)
 
 
 class RulePackService:
