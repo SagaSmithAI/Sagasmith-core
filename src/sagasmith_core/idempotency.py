@@ -6,7 +6,7 @@ import hashlib
 import json
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from sqlalchemy import select
 
@@ -16,6 +16,15 @@ from sagasmith_core.models import Campaign, IdempotencyRecord, MutationGroup, St
 
 class IdempotencyConflictError(ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class IdempotencyWrite:
+    """Persist an exact public replay response with its owning transaction."""
+
+    scope: str
+    payload: Any
+    response: dict[str, Any] | Callable[[Any], dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -52,7 +61,7 @@ class IdempotencyService:
 
     def receipt(
         self,
-        campaign_id: str,
+        campaign_id: str | None,
         key: str,
         *,
         branch_id: str | None = None,
@@ -316,3 +325,51 @@ class IdempotencyService:
         session.add(row)
         session.flush()
         return IdempotencyResult(key, False, dict(row.response), row.mutation_group_id)
+
+    def require_uncommitted_in_session(
+        self,
+        session,
+        key: str | None,
+        write: IdempotencyWrite | None,
+    ) -> None:
+        """Reject a duplicate before a non-state domain mutation is applied."""
+
+        if (key is None) != (write is None):
+            raise ValueError("idempotency_key and idempotency_write must be supplied together")
+        if write is None:
+            return
+        if not str(write.scope).strip():
+            raise ValueError("idempotency_write.scope is required")
+        replay = self.lookup_in_session(session, write.scope, str(key), write.payload)
+        if replay is not None:
+            raise ValueError(
+                "idempotency key already has a committed response; "
+                "read its replay receipt instead of applying another write"
+            )
+
+    def remember_write_in_session(
+        self,
+        session,
+        *,
+        campaign_id: str,
+        key: str | None,
+        write: IdempotencyWrite | None,
+        result: Any,
+        mutation_group_id: str | None = None,
+    ) -> None:
+        """Save a domain result's exact replay response before the transaction commits."""
+
+        if write is None:
+            return
+        response = write.response(result) if callable(write.response) else write.response
+        if not isinstance(response, dict):
+            raise ValueError("idempotency response builder must return an object")
+        self.remember_in_session(
+            session,
+            write.scope,
+            str(key),
+            write.payload,
+            response,
+            campaign_id=campaign_id,
+            mutation_group_id=mutation_group_id,
+        )

@@ -23,6 +23,7 @@ from sagasmith_core.documents import (
     strip_page_markers,
 )
 from sagasmith_core.embeddings import Embedder
+from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
 from sagasmith_core.models import (
     Campaign,
     ModuleAsset,
@@ -44,6 +45,7 @@ from sagasmith_core.retrieval import (
     structured_score,
 )
 from sagasmith_core.vector import VectorStore
+from sagasmith_core.vector_jobs import VectorIndexJobService
 
 
 @dataclass(frozen=True)
@@ -390,6 +392,8 @@ class ModuleService:
         normalized_document: NormalizedDocument | None = None,
         activate: bool = True,
         logical_source_key: str | None = None,
+        idempotency_key: str | None = None,
+        idempotency_write: IdempotencyWrite | None = None,
     ) -> ModuleIngestResult:
         checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
         selected_parser = parser or MarkdownModuleParser()
@@ -411,6 +415,12 @@ class ModuleService:
             )
         )
         with self.database.transaction() as session:
+            idempotency = IdempotencyService(self.database)
+            idempotency.require_uncommitted_in_session(
+                session,
+                idempotency_key,
+                idempotency_write,
+            )
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
@@ -427,13 +437,20 @@ class ModuleService:
                 and existing.parser_version == parser_version
             ):
                 counts = self._counts(session, existing.id)
-                return ModuleIngestResult(existing.id, True, *counts, 0)
+                result = ModuleIngestResult(existing.id, True, *counts, 0)
+                idempotency.remember_write_in_session(
+                    session,
+                    campaign_id=campaign_id,
+                    key=idempotency_key,
+                    write=idempotency_write,
+                    result=result,
+                )
+                return result
             if existing and activate:
                 # Module text is external to save payloads, but scene progress
                 # and historical snapshots hold foreign keys to its scene rows.
                 # Retire the old source instead of deleting it: a restore must
                 # always be able to resolve the exact scene it captured.
-                existing.active = False
                 existing.source_key = self._retired_source_key(
                     session, campaign_id, stored_source_key, existing.checksum
                 )
@@ -448,15 +465,21 @@ class ModuleService:
                 title=title,
                 source_path=source_path,
                 checksum=checksum,
-                active=activate,
+                # Activation is applied below through the same transaction used
+                # by activate_candidate().  Creating an already-active row here
+                # used to bypass logical-key replacement when source_key changed.
+                active=False,
                 parser_profile=parser_profile,
                 parser_version=parser_version,
                 warnings=list(normalized_document.warnings) if normalized_document else [],
                 metadata_json={
-                    **dict(metadata or {}),
-                    **profile_metadata,
-                    "logical_source_key": logical_key,
-                    "import_state": "active" if activate else "staged",
+                    key: value
+                    for key, value in {
+                        **dict(metadata or {}),
+                        **profile_metadata,
+                        "logical_source_key": logical_key,
+                    }.items()
+                    if key != "import_state"
                 },
             )
             session.add(source_row)
@@ -480,11 +503,6 @@ class ModuleService:
             scene_count = 0
             chunk_count = 0
             embedding_count = 0
-            vector_ids: list[str] = []
-            vector_values: list[list[float]] = []
-            vector_metadata: list[dict[str, Any]] = []
-            vector_documents: list[str] = []
-            vector_job_ids: list[str] = []
             stable_keys = self._scene_stable_keys(parsed)
             for chapter in parsed:
                 chapter_id = str(uuid.uuid4())
@@ -496,7 +514,7 @@ class ModuleService:
                         title=chapter.title,
                         content=chapter.content,
                         source_path=source_path,
-                        status="current" if chapter.ordinal == 0 else "locked",
+                        status="indexed",
                         page_start=chapter.metadata.get("page_start"),
                         page_end=chapter.metadata.get("page_end"),
                         metadata_json=chapter.metadata,
@@ -564,18 +582,12 @@ class ModuleService:
                         embedding_count += int(vector is not None)
                         if vector is not None:
                             job_id = str(uuid.uuid4())
-                            vector_job_ids.append(job_id)
-                            vector_ids.append(chunk_id)
-                            vector_values.append(vector)
-                            vector_metadata.append(
-                                {
-                                    "system_id": campaign.system_id,
-                                    "campaign_id": campaign_id,
-                                    "module_id": module_id,
-                                    "scene_id": scene_id,
-                                }
-                            )
-                            vector_documents.append(chunk.content)
+                            vector_metadata = {
+                                "system_id": campaign.system_id,
+                                "campaign_id": campaign_id,
+                                "module_id": module_id,
+                                "scene_id": scene_id,
+                            }
                             session.add(
                                 VectorIndexJob(
                                     id=job_id,
@@ -585,34 +597,20 @@ class ModuleService:
                                     entity_id=chunk_id,
                                     payload={
                                         "document": chunk.content,
-                                        "metadata": vector_metadata[-1],
+                                        "metadata": vector_metadata,
                                         "embedding_model": embedder.model_name,
                                     },
                                 )
                             )
                     scene_count += 1
-            if vector_store and vector_values:
-                try:
-                    vector_store.upsert(
-                        "modules",
-                        ids=vector_ids,
-                        embeddings=vector_values,
-                        metadatas=vector_metadata,
-                        documents=vector_documents,
-                        profile=getattr(embedder, "profile", None),
-                    )
-                except Exception as exc:
-                    for job_id in vector_job_ids:
-                        job = session.get(VectorIndexJob, job_id)
-                        job.status = "failed"
-                        job.attempts = 1
-                        job.error = str(exc)
-                else:
-                    for job_id in vector_job_ids:
-                        job = session.get(VectorIndexJob, job_id)
-                        job.status = "completed"
-                        job.attempts = 1
-            return ModuleIngestResult(
+            if activate:
+                self._activate_candidate_in_session(
+                    session,
+                    campaign_id=campaign_id,
+                    row=source_row,
+                    explicit_remaps={},
+                )
+            result = ModuleIngestResult(
                 module_id,
                 False,
                 len(parsed),
@@ -620,6 +618,14 @@ class ModuleService:
                 chunk_count,
                 embedding_count,
             )
+            idempotency.remember_write_in_session(
+                session,
+                campaign_id=campaign_id,
+                key=idempotency_key,
+                write=idempotency_write,
+                result=result,
+            )
+            return result
 
     def ingest_path(
         self,
@@ -636,6 +642,8 @@ class ModuleService:
         ocr_provider: OcrProvider | None = None,
         document_cache_dir: str | Path | None = None,
         expected_checksum: str | None = None,
+        idempotency_key: str | None = None,
+        idempotency_write: IdempotencyWrite | None = None,
     ) -> ModuleIngestResult:
         source_path = Path(path).expanduser().resolve()
         document = normalize_document(
@@ -662,6 +670,8 @@ class ModuleService:
             normalized_document=document,
             activate=activate,
             logical_source_key=logical_source_key,
+            idempotency_key=idempotency_key,
+            idempotency_write=idempotency_write,
         )
 
     def inspect_path(
@@ -937,10 +947,18 @@ class ModuleService:
         media_type: str,
         checksum: str,
         metadata: dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
+        idempotency_write: IdempotencyWrite | None = None,
     ) -> dict[str, Any]:
         """Idempotently register a managed derived module asset."""
         resolved = str(Path(source_path).expanduser().resolve())
         with self.database.transaction() as session:
+            idempotency = IdempotencyService(self.database)
+            idempotency.require_uncommitted_in_session(
+                session,
+                idempotency_key,
+                idempotency_write,
+            )
             source = session.get(ModuleSource, module_id)
             if source is None or source.campaign_id != campaign_id:
                 raise LookupError(module_id)
@@ -967,7 +985,15 @@ class ModuleService:
                 row.media_type = media_type
                 row.metadata_json = {**dict(row.metadata_json or {}), **dict(metadata or {})}
             session.flush()
-            return self._asset_view(row)
+            result = self._asset_view(row)
+            idempotency.remember_write_in_session(
+                session,
+                campaign_id=campaign_id,
+                key=idempotency_key,
+                write=idempotency_write,
+                result=result,
+            )
+            return result
 
     def review_content(
         self,
@@ -984,6 +1010,8 @@ class ModuleService:
         reviewer: str,
         observation: str,
         metadata: dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
+        idempotency_write: IdempotencyWrite | None = None,
     ) -> dict[str, Any]:
         """Record an immutable human/agent-reviewed transcription with page evidence."""
         key = str(content_key).strip()
@@ -1033,6 +1061,12 @@ class ModuleService:
         ).hexdigest()
 
         with self.database.transaction() as session:
+            idempotency = IdempotencyService(self.database)
+            idempotency.require_uncommitted_in_session(
+                session,
+                idempotency_key,
+                idempotency_write,
+            )
             source = session.get(ModuleSource, module_id)
             if source is None or source.campaign_id != campaign_id:
                 raise LookupError(module_id)
@@ -1108,7 +1142,15 @@ class ModuleService:
                 )
             )
             if existing is not None:
-                return self._content_review_view(existing)
+                result = self._content_review_view(existing)
+                idempotency.remember_write_in_session(
+                    session,
+                    campaign_id=campaign_id,
+                    key=idempotency_key,
+                    write=idempotency_write,
+                    result=result,
+                )
+                return result
             row = ModuleContentReview(
                 id=str(uuid.uuid4()),
                 module_id=module_id,
@@ -1122,7 +1164,15 @@ class ModuleService:
             )
             session.add(row)
             session.flush()
-            return self._content_review_view(row)
+            result = self._content_review_view(row)
+            idempotency.remember_write_in_session(
+                session,
+                campaign_id=campaign_id,
+                key=idempotency_key,
+                write=idempotency_write,
+                result=result,
+            )
+            return result
 
     def list_content_reviews(
         self,
@@ -1359,6 +1409,7 @@ class ModuleService:
                         SceneProgress.campaign_id == campaign_id,
                         SceneProgress.scope_id == effective_scope,
                         SceneProgress.status == "current",
+                        ModuleSource.active.is_(True),
                     )
                     .order_by(SceneProgress.updated_at.desc(), SceneProgress.id.desc())
                 ).first()
@@ -1467,38 +1518,183 @@ class ModuleService:
             )
 
     def set_active(self, campaign_id: str, module_id: str, *, active: bool) -> dict[str, Any]:
+        if active:
+            # There is only one activation transaction.  Keep this legacy
+            # convenience API from bypassing logical-key replacement and
+            # branch progress migration.
+            return self.activate_candidate(campaign_id, module_id)
         with self.database.transaction() as session:
             row = session.get(ModuleSource, module_id)
             if row is None or row.campaign_id != campaign_id:
                 raise LookupError(module_id)
-            row.active = active
+            row.active = False
             session.flush()
             return {"module_id": row.id, "active": row.active}
 
-    def activate_candidate(self, campaign_id: str, module_id: str) -> dict[str, Any]:
+    def activate_candidate(
+        self,
+        campaign_id: str,
+        module_id: str,
+        *,
+        progress_remaps: dict[str, str] | None = None,
+        idempotency_key: str | None = None,
+        idempotency_write: IdempotencyWrite | None = None,
+    ) -> dict[str, Any]:
         """Atomically make one staged revision current for its logical module key."""
         with self.database.transaction() as session:
+            idempotency = IdempotencyService(self.database)
+            idempotency.require_uncommitted_in_session(
+                session,
+                idempotency_key,
+                idempotency_write,
+            )
             row = session.get(ModuleSource, module_id)
             if row is None or row.campaign_id != campaign_id:
                 raise LookupError(module_id)
-            logical_key = str(
-                dict(row.metadata_json or {}).get("logical_source_key") or row.source_key
+            explicit_remaps = {
+                str(source_scene_id): str(target_scene_id)
+                for source_scene_id, target_scene_id in (progress_remaps or {}).items()
+            }
+            result = self._activate_candidate_in_session(
+                session,
+                campaign_id=campaign_id,
+                row=row,
+                explicit_remaps=explicit_remaps,
             )
-            replaced: list[str] = []
-            for candidate in session.scalars(
-                select(ModuleSource).where(ModuleSource.campaign_id == campaign_id)
-            ):
-                candidate_key = str(
-                    dict(candidate.metadata_json or {}).get("logical_source_key")
-                    or candidate.source_key
+            idempotency.remember_write_in_session(
+                session,
+                campaign_id=campaign_id,
+                key=idempotency_key,
+                write=idempotency_write,
+                result=result,
+            )
+            return result
+
+    def _activate_candidate_in_session(
+        self,
+        session: Any,
+        *,
+        campaign_id: str,
+        row: ModuleSource,
+        explicit_remaps: dict[str, str],
+    ) -> dict[str, Any]:
+        """Apply the sole module-activation policy inside an existing transaction."""
+
+        logical_key = str(
+            dict(row.metadata_json or {}).get("logical_source_key") or row.source_key
+        )
+        replaced: list[str] = []
+        for candidate in session.scalars(
+            select(ModuleSource).where(ModuleSource.campaign_id == campaign_id)
+        ):
+            candidate_key = str(
+                dict(candidate.metadata_json or {}).get("logical_source_key")
+                or candidate.source_key
+            )
+            if candidate.id != row.id and candidate.active and candidate_key == logical_key:
+                candidate.active = False
+                replaced.append(candidate.id)
+        progress_migrations = self._migrate_progress_in_session(
+            session,
+            campaign_id=campaign_id,
+            replaced_module_ids=replaced,
+            target_module_id=row.id,
+            explicit_remaps=explicit_remaps,
+        )
+        row.active = True
+        row.metadata_json = {
+            key: value
+            for key, value in dict(row.metadata_json or {}).items()
+            if key != "import_state"
+        }
+        session.flush()
+        return {
+            "module_id": row.id,
+            "active": True,
+            "replaced_module_ids": replaced,
+            "progress_migrations": progress_migrations,
+        }
+
+    @staticmethod
+    def _migrate_progress_in_session(
+        session: Any,
+        *,
+        campaign_id: str,
+        replaced_module_ids: list[str],
+        target_module_id: str,
+        explicit_remaps: dict[str, str],
+    ) -> list[dict[str, Any]]:
+        """Move scene progress to one newly authoritative module revision."""
+
+        target_scenes = list(
+            session.scalars(
+                select(ModuleScene).where(ModuleScene.module_id == target_module_id)
+            )
+        )
+        target_by_id = {scene.id: scene for scene in target_scenes}
+        target_by_stable_key = {
+            str(dict(scene.metadata_json or {}).get("stable_key") or ""): scene
+            for scene in target_scenes
+            if str(dict(scene.metadata_json or {}).get("stable_key") or "")
+        }
+        migrations: list[dict[str, Any]] = []
+        consumed_explicit_remaps: set[str] = set()
+        if replaced_module_ids:
+            progress_rows = list(
+                session.execute(
+                    select(SceneProgress, ModuleScene)
+                    .join(ModuleScene, ModuleScene.id == SceneProgress.scene_id)
+                    .where(
+                        SceneProgress.campaign_id == campaign_id,
+                        ModuleScene.module_id.in_(replaced_module_ids),
+                    )
                 )
-                if candidate.id != row.id and candidate.active and candidate_key == logical_key:
-                    candidate.active = False
-                    replaced.append(candidate.id)
-            row.active = True
-            row.metadata_json = {**dict(row.metadata_json or {}), "import_state": "active"}
-            session.flush()
-            return {"module_id": row.id, "active": True, "replaced_module_ids": replaced}
+            )
+            for progress, source_scene in progress_rows:
+                stable_key = str(
+                    dict(source_scene.metadata_json or {}).get("stable_key") or ""
+                )
+                target_scene = target_by_stable_key.get(stable_key)
+                mode = "stable_key"
+                if source_scene.id in explicit_remaps:
+                    target_scene = target_by_id.get(explicit_remaps[source_scene.id])
+                    consumed_explicit_remaps.add(source_scene.id)
+                    mode = "dm_ruling"
+                if target_scene is None:
+                    raise ValueError(
+                        "module activation requires a DM-reviewed progress remap for "
+                        f"scene {source_scene.id}"
+                    )
+                conflict = session.scalar(
+                    select(SceneProgress).where(
+                        SceneProgress.campaign_id == campaign_id,
+                        SceneProgress.scope_id == progress.scope_id,
+                        SceneProgress.scene_id == target_scene.id,
+                        SceneProgress.id != progress.id,
+                    )
+                )
+                if conflict is not None:
+                    raise ValueError(
+                        "module activation cannot merge two progress records for "
+                        f"scope {progress.scope_id} and scene {target_scene.id}"
+                    )
+                progress.scene_id = target_scene.id
+                migrations.append(
+                    {
+                        "scope_id": progress.scope_id,
+                        "from_scene_id": source_scene.id,
+                        "to_scene_id": target_scene.id,
+                        "stable_key": stable_key,
+                        "mode": mode,
+                    }
+                )
+        unused_remaps = set(explicit_remaps) - consumed_explicit_remaps
+        if unused_remaps:
+            raise ValueError(
+                "progress remaps reference scenes without active progress: "
+                + ", ".join(sorted(unused_remaps))
+            )
+        return migrations
 
     @staticmethod
     def _scene_stable_keys(parsed: Sequence[ParsedChapter]) -> dict[tuple[int, int], str]:
@@ -1649,6 +1845,12 @@ class ModuleService:
         if embedder:
             query_vector = embedder.encode([query])[0]
             if vector_store and vector_store.enabled:
+                VectorIndexJobService(self.database).flush(
+                    vector_store,
+                    system_id=rows[0].ModuleSource.system_id,
+                    collection="modules",
+                    profile=getattr(embedder, "profile", None),
+                )
                 rankings["dense"] = [
                     item_id
                     for item_id, _score in vector_store.query(
@@ -1718,6 +1920,8 @@ class ModuleService:
         scope_id: str = "party",
         expected_state_version: int | None = None,
         spatial_review: dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
+        idempotency_write: IdempotencyWrite | None = None,
     ) -> dict[str, Any]:
         if state is not None and spatial_review is not None:
             raise ValueError("state and spatial_review cannot be changed in the same request")
@@ -1730,6 +1934,10 @@ class ModuleService:
             source = session.get(ModuleSource, scene.module_id)
             if source is None or source.campaign_id != campaign_id:
                 raise ValueError("scene does not belong to campaign")
+            idempotency = IdempotencyService(self.database)
+            idempotency.require_uncommitted_in_session(
+                session, idempotency_key, idempotency_write
+            )
             row = session.scalar(
                 select(SceneProgress).where(
                     SceneProgress.campaign_id == campaign_id,
@@ -1756,6 +1964,10 @@ class ModuleService:
                 )
             effective_status = status or row.status or "current"
             if effective_status == "current":
+                if not source.active:
+                    raise ValueError(
+                        "a scene from a retired module revision cannot become current"
+                    )
                 for other in session.scalars(
                     select(SceneProgress).where(
                         SceneProgress.campaign_id == campaign_id,
@@ -1814,7 +2026,7 @@ class ModuleService:
                     review=spatial_review,
                 )
             session.flush()
-            return {
+            result = {
                 "id": row.id,
                 "campaign_id": row.campaign_id,
                 "scene_id": row.scene_id,
@@ -1826,6 +2038,14 @@ class ModuleService:
                 "state_version": row.state_version,
                 "state": dict(row.state),
             }
+            idempotency.remember_write_in_session(
+                session,
+                campaign_id=campaign_id,
+                key=idempotency_key,
+                write=idempotency_write,
+                result=result,
+            )
+            return result
 
     @staticmethod
     def _apply_spatial_review(

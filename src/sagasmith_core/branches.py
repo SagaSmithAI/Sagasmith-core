@@ -5,11 +5,12 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.database import Database
+from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
 from sagasmith_core.models import (
     BranchActorKnowledgeHead,
     BranchFactHead,
@@ -38,16 +39,18 @@ class BranchInfo:
 def resolve_branch(
     session: Session, campaign: Campaign, branch_id: str | None = None
 ) -> CampaignBranch:
-    """Return an initialized branch for this campaign."""
+    """Return a branch, treating ``Campaign.active_branch_id`` as current authority."""
 
     target_id = branch_id or campaign.active_branch_id
     row = session.get(CampaignBranch, target_id) if target_id else None
     if row is not None and row.campaign_id == campaign.id:
         return row
+    if branch_id is not None:
+        raise LookupError(f"branch does not belong to campaign: {branch_id}")
 
     row = session.scalar(
         select(CampaignBranch)
-        .where(CampaignBranch.campaign_id == campaign.id, CampaignBranch.is_current.is_(True))
+        .where(CampaignBranch.campaign_id == campaign.id)
         .order_by(CampaignBranch.created_at, CampaignBranch.id)
     )
     if row is not None:
@@ -59,7 +62,6 @@ def resolve_branch(
         "Create a new campaign or initialize a branch explicitly."
     )
 
-
 class BranchService:
     def __init__(self, database: Database) -> None:
         self.database = database
@@ -69,14 +71,18 @@ class BranchService:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
-            return self._info(resolve_branch(session, campaign))
+            return self._info(
+                resolve_branch(session, campaign),
+                active_branch_id=campaign.active_branch_id,
+            )
 
     def list(self, campaign_id: str) -> list[BranchInfo]:
         with self.database.transaction() as session:
-            if session.get(Campaign, campaign_id) is None:
+            campaign = session.get(Campaign, campaign_id)
+            if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
             return [
-                self._info(row)
+                self._info(row, active_branch_id=campaign.active_branch_id)
                 for row in session.scalars(
                     select(CampaignBranch)
                     .where(CampaignBranch.campaign_id == campaign_id)
@@ -86,12 +92,13 @@ class BranchService:
 
     def get(self, campaign_id: str, branch_id: str) -> BranchInfo:
         with self.database.transaction() as session:
-            if session.get(Campaign, campaign_id) is None:
+            campaign = session.get(Campaign, campaign_id)
+            if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
             row = session.get(CampaignBranch, branch_id)
             if row is None or row.campaign_id != campaign_id:
                 raise LookupError(branch_id)
-            return self._info(row)
+            return self._info(row, active_branch_id=campaign.active_branch_id)
 
     def compare(
         self, campaign_id: str, left_branch_id: str, right_branch_id: str
@@ -178,11 +185,17 @@ class BranchService:
         name: str,
         from_snapshot_id: str | None = None,
         checkout: bool = False,
+        idempotency_key: str | None = None,
+        idempotency_write: IdempotencyWrite | None = None,
     ) -> BranchInfo:
         with self.database.transaction() as session:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
+            idempotency = IdempotencyService(self.database)
+            idempotency.require_uncommitted_in_session(
+                session, idempotency_key, idempotency_write
+            )
             current = resolve_branch(session, campaign) if campaign.active_branch_id else None
             source_id = from_snapshot_id or (current.head_snapshot_id if current else None)
             if current is not None and source_id is None:
@@ -202,7 +215,6 @@ class BranchService:
                 name=name,
                 base_snapshot_id=source_id,
                 head_snapshot_id=source_id,
-                is_current=current is None,
             )
             session.add(row)
             session.flush()
@@ -214,6 +226,7 @@ class BranchService:
             elif current is not None:
                 self._copy_branch_heads(session, current.id, row.id)
                 self._copy_branch_rule_lock(session, current.id, row.id)
+            checked_out_snapshot = None
             if current is None:
                 campaign.active_branch_id = row.id
             elif checkout:
@@ -232,19 +245,56 @@ class BranchService:
                         raise LookupError(row.head_snapshot_id)
                     SnapshotService._assert_integrity(session, snapshot)
                     SnapshotService(self.database)._apply(session, campaign, dict(snapshot.payload))
-            return self._info(row)
+                    checked_out_snapshot = SnapshotService(self.database)._info(session, snapshot)
+            result = self._info(row, active_branch_id=campaign.active_branch_id)
+            idempotency.remember_write_in_session(
+                session,
+                campaign_id=campaign_id,
+                key=idempotency_key,
+                write=idempotency_write,
+                result={"branch": result, "snapshot": checked_out_snapshot},
+            )
+            return result
 
-    def checkout(self, campaign_id: str, branch_id: str) -> BranchInfo:
+    def checkout(
+        self,
+        campaign_id: str,
+        branch_id: str,
+        *,
+        idempotency_key: str | None = None,
+        idempotency_write: IdempotencyWrite | None = None,
+    ) -> BranchInfo:
         with self.database.transaction() as session:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
+            idempotency = IdempotencyService(self.database)
+            idempotency.require_uncommitted_in_session(
+                session, idempotency_key, idempotency_write
+            )
             row = session.get(CampaignBranch, branch_id)
             if row is None or row.campaign_id != campaign_id:
                 raise LookupError(branch_id)
             current = resolve_branch(session, campaign)
             if current.id == row.id:
-                return self._info(row)
+                result = self._info(row, active_branch_id=campaign.active_branch_id)
+                snapshot_info = None
+                if row.head_snapshot_id:
+                    from sagasmith_core.snapshots import SnapshotService
+
+                    snapshot = session.get(CampaignSnapshot, row.head_snapshot_id)
+                    if snapshot is None:
+                        raise LookupError(row.head_snapshot_id)
+                    SnapshotService._assert_integrity(session, snapshot)
+                    snapshot_info = SnapshotService(self.database)._info(session, snapshot)
+                idempotency.remember_write_in_session(
+                    session,
+                    campaign_id=campaign_id,
+                    key=idempotency_key,
+                    write=idempotency_write,
+                    result={"branch": result, "snapshot": snapshot_info},
+                )
+                return result
             from sagasmith_core.snapshots import SnapshotIntegrityError, SnapshotService
 
             SnapshotService._assert_clean_branch(session, campaign, current)
@@ -259,16 +309,21 @@ class BranchService:
                     raise LookupError(row.head_snapshot_id)
                 SnapshotService._assert_integrity(session, snapshot)
                 SnapshotService(self.database)._apply(session, campaign, dict(snapshot.payload))
-            return self._info(row)
+                snapshot_info = SnapshotService(self.database)._info(session, snapshot)
+            else:
+                snapshot_info = None
+            result = self._info(row, active_branch_id=campaign.active_branch_id)
+            idempotency.remember_write_in_session(
+                session,
+                campaign_id=campaign_id,
+                key=idempotency_key,
+                write=idempotency_write,
+                result={"branch": result, "snapshot": snapshot_info},
+            )
+            return result
 
     @staticmethod
     def _checkout(session: Session, campaign: Campaign, branch: CampaignBranch) -> None:
-        session.execute(
-            update(CampaignBranch)
-            .where(CampaignBranch.campaign_id == campaign.id)
-            .values(is_current=False)
-        )
-        branch.is_current = True
         campaign.active_branch_id = branch.id
 
     @staticmethod
@@ -479,12 +534,16 @@ class BranchService:
             )
 
     @staticmethod
-    def _info(row: CampaignBranch) -> BranchInfo:
+    def _info(
+        row: CampaignBranch,
+        *,
+        active_branch_id: str | None,
+    ) -> BranchInfo:
         return BranchInfo(
             id=row.id,
             campaign_id=row.campaign_id,
             name=row.name,
             base_snapshot_id=row.base_snapshot_id,
             head_snapshot_id=row.head_snapshot_id,
-            is_current=row.is_current,
+            is_current=row.id == active_branch_id,
         )

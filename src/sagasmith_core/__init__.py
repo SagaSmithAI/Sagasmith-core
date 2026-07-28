@@ -32,7 +32,12 @@ from sagasmith_core.embeddings import (
     create_embedder,
 )
 from sagasmith_core.events import EventService
-from sagasmith_core.idempotency import IdempotencyConflictError, IdempotencyService, request_hash
+from sagasmith_core.idempotency import (
+    IdempotencyConflictError,
+    IdempotencyService,
+    IdempotencyWrite,
+    request_hash,
+)
 from sagasmith_core.import_jobs import ImportJobError, ImportJobService
 from sagasmith_core.knowledge import ActorKnowledgeService
 from sagasmith_core.memory import MemoryService
@@ -46,11 +51,11 @@ from sagasmith_core.snapshots import SnapshotService
 from sagasmith_core.state import (
     ActorKnowledgeTransfer,
     CharacterStateUpdate,
-    IdempotencyWrite,
     StateMutationService,
 )
 from sagasmith_core.systems import SystemDefinition, SystemRegistry
 from sagasmith_core.vector import VectorStore
+from sagasmith_core.vector_jobs import VectorFlushResult, VectorIndexJobService
 
 __all__ = [
     "DOCUMENT_NORMALIZER_VERSION",
@@ -96,6 +101,8 @@ __all__ = [
     "SystemDefinition",
     "SystemRegistry",
     "VectorStore",
+    "VectorFlushResult",
+    "VectorIndexJobService",
     "configured_profiles",
     "create_embedder",
     "default_local_principal",

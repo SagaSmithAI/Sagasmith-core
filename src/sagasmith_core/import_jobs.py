@@ -9,6 +9,7 @@ from uuid import uuid4
 from sqlalchemy import select
 
 from sagasmith_core.database import Database
+from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
 from sagasmith_core.models import Campaign, ImportJob
 
 
@@ -29,6 +30,21 @@ _STATES = {
     "imported",
     "activated",
     "failed",
+}
+_TRANSITIONS = {
+    "staged": {"inspected", "failed"},
+    # Candidate extraction and entering review are one atomic public operation
+    # when candidates are found; an empty extraction remains ``extracted``.
+    "inspected": {"extracted", "review_required", "validated", "failed"},
+    "extracted": {"review_required", "failed"},
+    "review_required": {"reviewed", "failed"},
+    "reviewed": {"compiled", "failed"},
+    "compiled": {"installed", "failed"},
+    "installed": {"activated", "failed"},
+    "validated": {"imported", "failed"},
+    "imported": {"activated", "failed"},
+    "activated": set(),
+    "failed": {"inspected", "extracted", "validated", "compiled", "failed"},
 }
 
 
@@ -51,6 +67,7 @@ class ImportJobInfo:
     validation: dict[str, Any]
     result: dict[str, Any]
     error: str
+    revision: int
 
 
 class ImportJobService:
@@ -67,6 +84,8 @@ class ImportJobService:
         artifact: str,
         artifact_checksum: str = "",
         payload: dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
+        idempotency_write: IdempotencyWrite | None = None,
     ) -> ImportJobInfo:
         if kind not in _KINDS:
             raise ImportJobError(f"unsupported import kind: {kind}")
@@ -76,6 +95,12 @@ class ImportJobService:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 raise LookupError(campaign_id)
+            idempotency = IdempotencyService(self.database)
+            idempotency.require_uncommitted_in_session(
+                session,
+                idempotency_key,
+                idempotency_write,
+            )
             row = ImportJob(
                 id=str(uuid4()),
                 campaign_id=campaign_id,
@@ -87,7 +112,15 @@ class ImportJobService:
             )
             session.add(row)
             session.flush()
-            return self._info(row)
+            result = self._info(row)
+            idempotency.remember_write_in_session(
+                session,
+                campaign_id=campaign_id,
+                key=idempotency_key,
+                write=idempotency_write,
+                result=result,
+            )
+            return result
 
     def get(self, job_id: str) -> ImportJobInfo:
         with self.database.transaction() as session:
@@ -108,6 +141,10 @@ class ImportJobService:
         self,
         job_id: str,
         inspection: dict[str, Any],
+        *,
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+        idempotency_write: IdempotencyWrite | None = None,
     ) -> ImportJobInfo:
         return self._update(
             job_id,
@@ -115,9 +152,20 @@ class ImportJobService:
             inspection=dict(inspection),
             parser_profile=str(inspection.get("parser_profile") or ""),
             parser_version=str(inspection.get("parser_version") or ""),
+            expected_revision=expected_revision,
+            idempotency_key=idempotency_key,
+            idempotency_write=idempotency_write,
         )
 
-    def set_candidates(self, job_id: str, candidates: list[dict[str, Any]]) -> ImportJobInfo:
+    def set_candidates(
+        self,
+        job_id: str,
+        candidates: list[dict[str, Any]],
+        *,
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+        idempotency_write: IdempotencyWrite | None = None,
+    ) -> ImportJobInfo:
         normalized: list[dict[str, Any]] = []
         seen: set[str] = set()
         for index, candidate in enumerate(candidates):
@@ -137,15 +185,33 @@ class ImportJobService:
             job_id,
             state="review_required" if normalized else "extracted",
             candidates=normalized,
+            expected_revision=expected_revision,
+            idempotency_key=idempotency_key,
+            idempotency_write=idempotency_write,
         )
 
     def review_candidates(
         self,
         job_id: str,
         decisions: list[dict[str, Any]],
+        *,
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+        idempotency_write: IdempotencyWrite | None = None,
     ) -> ImportJobInfo:
         with self.database.transaction() as session:
             row = self._row(session, job_id)
+            idempotency = IdempotencyService(self.database)
+            idempotency.require_uncommitted_in_session(
+                session,
+                idempotency_key,
+                idempotency_write,
+            )
+            if expected_revision is not None and row.revision != expected_revision:
+                raise ImportJobError(
+                    "import job revision conflict: "
+                    f"expected {expected_revision}, found {row.revision}"
+                )
             values = [dict(item) for item in row.candidates or []]
             by_id = {str(item.get("id")): item for item in values}
             for decision in decisions:
@@ -167,15 +233,26 @@ class ImportJobService:
                 if "note" in decision:
                     candidate["review_note"] = str(decision["note"])
             row.candidates = values
-            row.state = (
+            next_state = (
                 "reviewed"
                 if values
                 and all(item.get("review_status") in {"accepted", "rejected"} for item in values)
                 else "review_required"
             )
+            self._require_transition(row.state, next_state)
+            row.state = next_state
+            row.revision += 1
             row.error = ""
             session.flush()
-            return self._info(row)
+            result = self._info(row)
+            idempotency.remember_write_in_session(
+                session,
+                campaign_id=row.campaign_id,
+                key=idempotency_key,
+                write=idempotency_write,
+                result=result,
+            )
+            return result
 
     def record_validation(
         self,
@@ -183,10 +260,20 @@ class ImportJobService:
         validation: dict[str, Any],
         *,
         state: str = "validated",
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+        idempotency_write: IdempotencyWrite | None = None,
     ) -> ImportJobInfo:
         if state not in {"compiled", "validated", "installed", "imported", "activated", "failed"}:
             raise ImportJobError(f"invalid validation state: {state}")
-        return self._update(job_id, state=state, validation=dict(validation))
+        return self._update(
+            job_id,
+            state=state,
+            validation=dict(validation),
+            expected_revision=expected_revision,
+            idempotency_key=idempotency_key,
+            idempotency_write=idempotency_write,
+        )
 
     def record_result(
         self,
@@ -196,6 +283,9 @@ class ImportJobService:
         state: str,
         source_id: str | None = None,
         module_id: str | None = None,
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+        idempotency_write: IdempotencyWrite | None = None,
     ) -> ImportJobInfo:
         return self._update(
             job_id,
@@ -204,23 +294,71 @@ class ImportJobService:
             source_id=source_id,
             module_id=module_id,
             error="",
+            expected_revision=expected_revision,
+            idempotency_key=idempotency_key,
+            idempotency_write=idempotency_write,
         )
 
-    def fail(self, job_id: str, error: str) -> ImportJobInfo:
-        return self._update(job_id, state="failed", error=str(error))
+    def fail(
+        self,
+        job_id: str,
+        error: str,
+        *,
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+        idempotency_write: IdempotencyWrite | None = None,
+    ) -> ImportJobInfo:
+        return self._update(
+            job_id,
+            state="failed",
+            error=str(error),
+            expected_revision=expected_revision,
+            idempotency_key=idempotency_key,
+            idempotency_write=idempotency_write,
+        )
 
-    def _update(self, job_id: str, *, state: str, **fields: Any) -> ImportJobInfo:
+    def _update(
+        self,
+        job_id: str,
+        *,
+        state: str,
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+        idempotency_write: IdempotencyWrite | None = None,
+        **fields: Any,
+    ) -> ImportJobInfo:
         if state not in _STATES:
             raise ImportJobError(f"invalid import state: {state}")
         with self.database.transaction() as session:
             row = self._row(session, job_id)
+            idempotency = IdempotencyService(self.database)
+            idempotency.require_uncommitted_in_session(
+                session,
+                idempotency_key,
+                idempotency_write,
+            )
+            if expected_revision is not None and row.revision != expected_revision:
+                raise ImportJobError(
+                    "import job revision conflict: "
+                    f"expected {expected_revision}, found {row.revision}"
+                )
+            self._require_transition(row.state, state)
             for key, value in fields.items():
                 setattr(row, key, value)
             row.state = state
+            row.revision += 1
             if state != "failed" and "error" not in fields:
                 row.error = ""
             session.flush()
-            return self._info(row)
+            result = self._info(row)
+            idempotency.remember_write_in_session(
+                session,
+                campaign_id=row.campaign_id,
+                key=idempotency_key,
+                write=idempotency_write,
+                result=result,
+            )
+            return result
 
     @staticmethod
     def _row(session: Any, job_id: str) -> ImportJob:
@@ -228,6 +366,15 @@ class ImportJobService:
         if row is None:
             raise LookupError(job_id)
         return row
+
+    @staticmethod
+    def _require_transition(current: str, target: str) -> None:
+        if current == target:
+            return
+        if target not in _TRANSITIONS.get(current, set()):
+            raise ImportJobError(
+                f"invalid import job transition: {current} -> {target}"
+            )
 
     @staticmethod
     def _info(row: ImportJob) -> ImportJobInfo:
@@ -249,4 +396,5 @@ class ImportJobService:
             validation=dict(row.validation or {}),
             result=dict(row.result or {}),
             error=row.error,
+            revision=row.revision,
         )

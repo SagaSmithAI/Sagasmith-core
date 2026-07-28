@@ -1,6 +1,14 @@
 import pytest
 
-from sagasmith_core import CampaignService, RulePackService, RuleProfileService, SnapshotService
+from sagasmith_core import (
+    CampaignService,
+    CharacterService,
+    IdempotencyService,
+    IdempotencyWrite,
+    RulePackService,
+    RuleProfileService,
+    SnapshotService,
+)
 from sagasmith_core.branches import BranchService
 from sagasmith_core.rule_packs import RulePackError, RulesetUnavailableError
 
@@ -66,6 +74,98 @@ def test_rule_pack_install_activation_and_branch_lock(database) -> None:
     packs.remove_activation(campaign.id, "dnd5e.xgte", branch_id=source_branch.id)
     with pytest.raises(RulePackError, match="snapshot"):
         packs.remove_version("dnd5e.xgte", "1.0.0")
+
+
+def test_rule_profile_cannot_diverge_from_an_active_combat(database) -> None:
+    campaigns = CampaignService(database)
+    campaign = campaigns.create(system_id="dnd5e", name="Locked combat rules")
+    campaigns.update(campaign.id, state={"combat": {"active": True}})
+
+    with pytest.raises(ValueError, match="rule profile cannot change during active combat"):
+        RuleProfileService(database).set(campaign.id, edition="2024")
+
+
+def test_rule_profile_cannot_diverge_from_existing_character_editions(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Locked actor rules")
+    profiles = RuleProfileService(database)
+    profiles.set(campaign.id, edition="2014")
+    CharacterService(database).create(
+        system_id="dnd5e",
+        campaign_id=campaign.id,
+        name="Existing actor",
+        sheet={"edition": "2014"},
+    )
+
+    same = profiles.set(campaign.id, edition="2014", locale="zh-CN")
+    assert same.locale == "zh-CN"
+    with pytest.raises(ValueError, match="explicit edition migration"):
+        profiles.set(campaign.id, edition="2024")
+
+
+def test_rule_pack_activation_receipt_is_atomic_with_campaign_revision(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Atomic rules")
+    RuleProfileService(database).set(campaign.id, edition="2014")
+    campaign = CampaignService(database).get(campaign.id)
+    packs = RulePackService(database)
+    manifest = _pack("dnd5e.atomic")
+    packs.save_draft(manifest=manifest)
+    packs.install(manifest["id"], "1.0.0")
+    payload = {"pack_id": manifest["id"], "version": "1.0.0"}
+
+    packs.set_activation(
+        campaign.id,
+        pack_id=manifest["id"],
+        version="1.0.0",
+        expected_campaign_revision=campaign.revision,
+        idempotency_key="activate",
+        idempotency_write=IdempotencyWrite(
+            scope=f"rule-activation:{campaign.id}",
+            payload=payload,
+            response=lambda result: {
+                "pack_id": result["activation"].pack_id,
+                "fingerprint": result["effective"].fingerprint,
+                "campaign_revision": result["campaign_revision"],
+            },
+        ),
+    )
+
+    replay = IdempotencyService(database).lookup(
+        f"rule-activation:{campaign.id}",
+        "activate",
+        payload,
+    )
+    assert replay is not None
+    assert replay.response["pack_id"] == manifest["id"]
+    assert replay.response["campaign_revision"] == campaign.revision + 1
+
+
+def test_rule_pack_activation_rolls_back_when_receipt_builder_fails(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Rollback rules")
+    RuleProfileService(database).set(campaign.id, edition="2014")
+    campaign = CampaignService(database).get(campaign.id)
+    packs = RulePackService(database)
+    manifest = _pack("dnd5e.rollback")
+    packs.save_draft(manifest=manifest)
+    packs.install(manifest["id"], "1.0.0")
+
+    with pytest.raises(RuntimeError, match="receipt failed"):
+        packs.set_activation(
+            campaign.id,
+            pack_id=manifest["id"],
+            version="1.0.0",
+            expected_campaign_revision=campaign.revision,
+            idempotency_key="activate",
+            idempotency_write=IdempotencyWrite(
+                scope=f"rule-activation:{campaign.id}",
+                payload={"pack_id": manifest["id"]},
+                response=lambda _result: (_ for _ in ()).throw(
+                    RuntimeError("receipt failed")
+                ),
+            ),
+        )
+
+    assert packs.effective_ruleset(campaign.id).lock == ()
+    assert CampaignService(database).get(campaign.id).revision == campaign.revision
 
 
 def test_rule_pack_rejects_unsafe_identity_and_missing_lock(database) -> None:

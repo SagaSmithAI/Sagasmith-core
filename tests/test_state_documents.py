@@ -42,11 +42,35 @@ from sagasmith_core.idempotency import request_hash
 from sagasmith_core.models import (
     ActorKnowledgeRevision,
     AuditLog,
+    Campaign,
+    CampaignBranch,
+    CampaignSnapshot,
     MutationGroup,
     SnapshotActorKnowledgeBinding,
     StateRevision,
 )
 from sagasmith_core.snapshots import SnapshotIntegrityError
+
+
+def test_active_branch_pointer_is_the_only_current_branch_authority(database) -> None:
+    campaign = CampaignService(database).create(
+        system_id="dnd5e",
+        name="Branch authority",
+    )
+    active_branch_id = BranchService(database).current(campaign.id).id
+
+    current = BranchService(database).current(campaign.id)
+    assert current.id == active_branch_id
+    assert current.is_current is True
+    assert [item.is_current for item in BranchService(database).list(campaign.id)] == [True]
+
+    with database.transaction() as session:
+        campaign_row = session.get(Campaign, campaign.id)
+        branch_row = session.get(CampaignBranch, active_branch_id)
+        assert campaign_row is not None
+        assert branch_row is not None
+        assert campaign_row.active_branch_id == branch_row.id
+        assert not hasattr(branch_row, "is_current")
 
 
 def test_ocr_page_layout_retains_coordinates_for_text_only_recovery() -> None:
@@ -1169,12 +1193,47 @@ def test_snapshot_rule_profile_conversion_forks_without_mutating_source(database
     assert campaigns.get(campaign.id).state == {"step": 1}
     assert BranchService(database).current(campaign.id).name == "converted-core"
     assert profiles.get(campaign.id).options == converted_profile["options"]
+    assert "edition" not in campaigns.get(campaign.id).settings
+    assert "locale" not in campaigns.get(campaign.id).settings
     source_after = snapshots.get(campaign.id, source.slot)
     assert source_after["payload"] == source_document["payload"]
     assert source_after["checksum"] == source_document["checksum"]
     converted_document = snapshots.get(campaign.id, converted.slot)
     assert converted_document["payload"]["rule_profile"] == converted_profile
     assert converted_document["valid"] is True
+
+
+def test_rule_profile_change_and_exact_receipt_commit_together(database) -> None:
+    campaigns = CampaignService(database)
+    campaign = campaigns.create(system_id="dnd5e", name="Atomic profile")
+    payload = {"edition": "2014", "locale": "en"}
+    profiles = RuleProfileService(database)
+
+    profiles.set(
+        campaign.id,
+        edition="2014",
+        expected_campaign_revision=campaign.revision,
+        idempotency_key="profile",
+        idempotency_write=IdempotencyWrite(
+            scope=f"rule-profile:{campaign.id}",
+            payload=payload,
+            response=lambda result: {
+                "edition": result["profile"].edition,
+                "campaign_revision": result["campaign_revision"],
+            },
+        ),
+    )
+
+    replay = IdempotencyService(database).lookup(
+        f"rule-profile:{campaign.id}",
+        "profile",
+        payload,
+    )
+    assert replay is not None
+    assert replay.response == {
+        "edition": "2014",
+        "campaign_revision": campaign.revision + 1,
+    }
 
 
 def test_branch_scoped_facts_events_and_actor_knowledge_do_not_leak(database) -> None:
@@ -2089,6 +2148,246 @@ def test_state_mutation_rolls_back_when_atomic_replay_response_cannot_be_built(
             campaign.id,
             "atomic-replay-rollback",
         )
+
+
+def test_continuity_writes_share_atomic_idempotency_and_rollback(database) -> None:
+    campaign = CampaignService(database).create(
+        system_id="dnd5e",
+        name="Atomic continuity replay",
+    )
+    actor = CharacterService(database).create(
+        system_id="dnd5e",
+        campaign_id=campaign.id,
+        name="Witness",
+        character_type="npc",
+    )
+    memories = MemoryService(database)
+    events = EventService(database)
+    knowledge = ActorKnowledgeService(database)
+    idempotency = IdempotencyService(database)
+    scope = f"memory-change:add:{campaign.id}:system:local"
+    payload = {"fact_key": "door", "content": "The door is locked."}
+
+    fact = memories.add(
+        campaign.id,
+        fact_key="door",
+        content="The door is locked.",
+        idempotency_key="atomic-fact",
+        idempotency_write=IdempotencyWrite(
+            scope=scope,
+            payload=payload,
+            response=lambda result: {"id": result.id, "revision_id": result.revision_id},
+        ),
+    )
+    replay = idempotency.lookup(scope, "atomic-fact", payload)
+    assert replay is not None
+    assert replay.response == {"id": fact.id, "revision_id": fact.revision_id}
+    with pytest.raises(ValueError, match="committed response"):
+        memories.add(
+            campaign.id,
+            fact_key="door-copy",
+            content="This duplicate must not commit.",
+            idempotency_key="atomic-fact",
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=lambda result: {"id": result.id},
+            ),
+        )
+    assert [item.fact_key for item in memories.list(campaign.id)] == ["door"]
+
+    def fail_response(_result):
+        raise RuntimeError("continuity response serialization failed")
+
+    with pytest.raises(RuntimeError, match="continuity response serialization failed"):
+        events.add(
+            campaign.id,
+            summary="This event must roll back.",
+            idempotency_key="failed-event",
+            idempotency_write=IdempotencyWrite(
+                scope=f"event-add:{campaign.id}:system:local",
+                payload={"summary": "This event must roll back."},
+                response=fail_response,
+            ),
+        )
+    assert events.list(campaign.id) == []
+
+    with pytest.raises(RuntimeError, match="continuity response serialization failed"):
+        knowledge.add(
+            campaign.id,
+            actor_id=actor.id,
+            knowledge_key="failed-knowledge",
+            proposition="This knowledge must roll back.",
+            idempotency_key="failed-knowledge",
+            idempotency_write=IdempotencyWrite(
+                scope=f"actor-knowledge:{campaign.id}:{actor.id}",
+                payload={"knowledge_key": "failed-knowledge"},
+                response=fail_response,
+            ),
+        )
+    assert knowledge.list(campaign.id, actor_id=actor.id) == []
+
+    with pytest.raises(RuntimeError, match="continuity response serialization failed"):
+        ContinuityCommitService(database).commit(
+            campaign.id,
+            event={"summary": "The whole scene commit must roll back."},
+            facts=[
+                {
+                    "action": "add",
+                    "fact_key": "failed-scene-fact",
+                    "content": "This fact must roll back.",
+                }
+            ],
+            idempotency_key="failed-continuity-commit",
+            idempotency_write=IdempotencyWrite(
+                scope=f"continuity-commit:{campaign.id}:system:local",
+                payload={"scene": "failed"},
+                response=fail_response,
+            ),
+        )
+    assert events.list(campaign.id) == []
+    assert [item.fact_key for item in memories.list(campaign.id)] == ["door"]
+
+
+def test_snapshot_recap_query_is_pure_and_checkpoint_receipt_is_atomic(database) -> None:
+    campaign = CampaignService(database).create(
+        system_id="dnd5e",
+        name="Pure recap and atomic checkpoint",
+        state={"scene": "opening"},
+    )
+    snapshots = SnapshotService(database)
+
+    def fail_response(_result):
+        raise RuntimeError("snapshot response serialization failed")
+
+    with pytest.raises(RuntimeError, match="snapshot response serialization failed"):
+        snapshots.create(
+            campaign.id,
+            label="Must roll back",
+            idempotency_key="failed-checkpoint",
+            idempotency_write=IdempotencyWrite(
+                scope=f"snapshot-create:{campaign.id}:system:local",
+                payload={"label": "Must roll back"},
+                response=fail_response,
+            ),
+        )
+    assert snapshots.list(campaign.id) == []
+
+    saved = snapshots.create(campaign.id, label="Opening")
+    with database.transaction() as session:
+        row = session.get(CampaignSnapshot, saved.id)
+        assert row is not None
+        row.recap = {"source": "sentinel", "summary": "Presentation-owned text"}
+    computed = snapshots.regenerate_recap(campaign.id, saved.slot)
+    assert computed["source"] == "deterministic"
+    assert snapshots.get(campaign.id, saved.slot)["recap"] == {
+        "source": "sentinel",
+        "summary": "Presentation-owned text",
+    }
+    original_branch = BranchService(database).current(campaign.id)
+    with pytest.raises(RuntimeError, match="snapshot response serialization failed"):
+        BranchService(database).create(
+            campaign.id,
+            name="must-roll-back",
+            from_snapshot_id=saved.id,
+            checkout=True,
+            idempotency_key="failed-branch",
+            idempotency_write=IdempotencyWrite(
+                scope=f"branch-create:{campaign.id}:system:local",
+                payload={"name": "must-roll-back"},
+                response=fail_response,
+            ),
+        )
+    assert [item.id for item in BranchService(database).list(campaign.id)] == [
+        original_branch.id
+    ]
+    assert BranchService(database).current(campaign.id).id == original_branch.id
+
+
+def test_undo_rolls_back_when_its_replay_receipt_cannot_be_built(database) -> None:
+    campaign = CampaignService(database).create(
+        system_id="dnd5e",
+        name="Atomic undo",
+        state={"phase": "before"},
+    )
+    StateMutationService(database).replace(
+        campaign.id,
+        campaign_state={"phase": "after"},
+        operation="test.atomic-undo",
+    )
+
+    def fail_response(_result):
+        raise RuntimeError("undo response serialization failed")
+
+    with pytest.raises(RuntimeError, match="undo response serialization failed"):
+        RevisionService(database).undo(
+            campaign.id,
+            idempotency_key="failed-undo",
+            idempotency_write=IdempotencyWrite(
+                scope=f"state-undo:{campaign.id}:system:local",
+                payload={"operation": "undo"},
+                response=fail_response,
+            ),
+        )
+    assert CampaignService(database).get(campaign.id).state == {"phase": "after"}
+    assert RevisionService(database).history(campaign.id)[0].applied is True
+
+
+def test_audited_campaign_update_and_exact_replay_receipt_share_one_transaction(
+    database,
+) -> None:
+    campaigns = CampaignService(database)
+    campaign = campaigns.create(
+        system_id="dnd5e",
+        name="Atomic campaign update",
+        state={"phase": "before"},
+    )
+    payload = {"state": {"phase": "after"}}
+    response = campaigns.update_audited(
+        campaign.id,
+        state={"phase": "after"},
+        expected_revision=campaign.revision,
+        idempotency_key="campaign-update",
+        idempotency_write=IdempotencyWrite(
+            scope=f"campaign-update:{campaign.id}:system:local",
+            payload=payload,
+            response=lambda result: {
+                "campaign_id": result.id,
+                "revision": result.revision,
+                "state": result.state,
+            },
+        ),
+    )
+    replay = IdempotencyService(database).lookup(
+        f"campaign-update:{campaign.id}:system:local",
+        "campaign-update",
+        payload,
+    )
+    assert replay is not None
+    assert replay.response == {
+        "campaign_id": campaign.id,
+        "revision": response.revision,
+        "state": {"phase": "after"},
+    }
+
+    def fail_response(_result):
+        raise RuntimeError("campaign response serialization failed")
+
+    with pytest.raises(RuntimeError, match="campaign response serialization failed"):
+        campaigns.update_audited(
+            campaign.id,
+            state={"phase": "must-roll-back"},
+            expected_revision=response.revision,
+            idempotency_key="failed-campaign-update",
+            idempotency_write=IdempotencyWrite(
+                scope=f"campaign-update:{campaign.id}:system:local",
+                payload={"state": {"phase": "must-roll-back"}},
+                response=fail_response,
+            ),
+        )
+    persisted = campaigns.get(campaign.id)
+    assert persisted.revision == response.revision
+    assert persisted.state == {"phase": "after"}
 
 
 def test_state_mutation_persists_rule_receipts_in_the_same_group(database) -> None:

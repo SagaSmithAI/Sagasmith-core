@@ -11,6 +11,7 @@ from sagasmith_core.branches import resolve_branch
 from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.database import Database
 from sagasmith_core.events import EventService
+from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
 from sagasmith_core.knowledge import ActorKnowledgeService
 from sagasmith_core.memory import MemoryService
 from sagasmith_core.models import (
@@ -40,11 +41,17 @@ class ContinuityCommitService:
         actor_knowledge: list[dict[str, Any]] | None = None,
         snapshot: dict[str, Any] | None = None,
         branch_id: str | None = None,
+        idempotency_key: str | None = None,
+        idempotency_write: IdempotencyWrite | None = None,
     ) -> dict[str, Any]:
         with self.database.transaction() as session:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
+            idempotency = IdempotencyService(self.database)
+            idempotency.require_uncommitted_in_session(
+                session, idempotency_key, idempotency_write
+            )
             branch = resolve_branch(session, campaign, branch_id)
             event_info = self.events._add_in_session(
                 session,
@@ -90,12 +97,20 @@ class ContinuityCommitService:
                     parent_id=snapshot_data.get("parent_id"),
                 )
 
-            return {
+            result = {
                 "event": asdict(event_info),
                 "facts": [asdict(item) for item in fact_results],
                 "actor_knowledge": [asdict(item) for item in knowledge_results],
                 "snapshot": asdict(snapshot_result) if snapshot_result is not None else None,
             }
+            idempotency.remember_write_in_session(
+                session,
+                campaign_id=campaign_id,
+                key=idempotency_key,
+                write=idempotency_write,
+                result=result,
+            )
+            return result
 
     def _apply_fact(
         self,

@@ -11,6 +11,7 @@ from sqlalchemy import select, update
 from sagasmith_core.branches import resolve_branch
 from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.database import Database
+from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
 from sagasmith_core.models import (
     ActorKnowledge,
     ActorKnowledgeRevision,
@@ -49,6 +50,8 @@ class EventService:
         payload: dict[str, Any] | None = None,
         audience_scope: str = "dm",
         branch_id: str | None = None,
+        idempotency_key: str | None = None,
+        idempotency_write: IdempotencyWrite | None = None,
     ) -> CampaignEventInfo:
         if audience_scope not in _AUDIENCE_SCOPES:
             raise ValueError(f"invalid event audience scope: {audience_scope}")
@@ -56,8 +59,12 @@ class EventService:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
+            idempotency = IdempotencyService(self.database)
+            idempotency.require_uncommitted_in_session(
+                session, idempotency_key, idempotency_write
+            )
             branch = resolve_branch(session, campaign, branch_id)
-            return self._add_in_session(
+            result = self._add_in_session(
                 session,
                 campaign,
                 branch.id,
@@ -66,6 +73,14 @@ class EventService:
                 payload=payload,
                 audience_scope=audience_scope,
             )
+            idempotency.remember_write_in_session(
+                session,
+                campaign_id=campaign_id,
+                key=idempotency_key,
+                write=idempotency_write,
+                result=result,
+            )
+            return result
 
     def add_with_actor_knowledge(
         self,
@@ -80,6 +95,8 @@ class EventService:
         audience_scope: str = "dm",
         disclosure_scope: str = "owner",
         branch_id: str | None = None,
+        idempotency_key: str | None = None,
+        idempotency_write: IdempotencyWrite | None = None,
     ) -> tuple[CampaignEventInfo, list[str]]:
         """Append one event and every witnessed knowledge head atomically."""
 
@@ -96,6 +113,10 @@ class EventService:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
+            idempotency = IdempotencyService(self.database)
+            idempotency.require_uncommitted_in_session(
+                session, idempotency_key, idempotency_write
+            )
             branch = resolve_branch(session, campaign, branch_id)
             actors = [session.get(Character, actor_id) for actor_id in normalized_actor_ids]
             if any(actor is None or actor.campaign_id != campaign_id for actor in actors):
@@ -162,7 +183,15 @@ class EventService:
                 )
                 knowledge_ids.append(knowledge.id)
             session.flush()
-            return event_info, knowledge_ids
+            result = (event_info, knowledge_ids)
+            idempotency.remember_write_in_session(
+                session,
+                campaign_id=campaign_id,
+                key=idempotency_key,
+                write=idempotency_write,
+                result=result,
+            )
+            return result
 
     def _add_in_session(
         self,

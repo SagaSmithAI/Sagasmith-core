@@ -5,9 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from sqlalchemy import select
+
 from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.database import Database
-from sagasmith_core.models import Campaign, CampaignRuleProfile
+from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
+from sagasmith_core.models import Campaign, CampaignRuleProfile, Character
 
 
 @dataclass(frozen=True)
@@ -33,11 +36,21 @@ class RuleProfileService:
         publications: list[str] | None = None,
         options: dict[str, Any] | None = None,
         expected_campaign_revision: int | None = None,
+        idempotency_key: str | None = None,
+        idempotency_write: IdempotencyWrite | None = None,
     ) -> RuleProfileInfo:
         with self.database.transaction() as session:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
+            idempotency = IdempotencyService(self.database)
+            idempotency.require_uncommitted_in_session(
+                session,
+                idempotency_key,
+                idempotency_write,
+            )
+            if dict(campaign.state or {}).get("combat", {}).get("active", False):
+                raise ValueError("rule profile cannot change during active combat")
             if (
                 expected_campaign_revision is not None
                 and campaign.revision != expected_campaign_revision
@@ -47,6 +60,21 @@ class RuleProfileService:
                     f"expected {expected_campaign_revision}, found {campaign.revision}"
                 )
             row = session.get(CampaignRuleProfile, campaign_id)
+            if (
+                row is not None
+                and row.edition
+                and row.edition != edition
+                and session.scalar(
+                    select(Character.id)
+                    .where(Character.campaign_id == campaign_id)
+                    .limit(1)
+                )
+                is not None
+            ):
+                raise ValueError(
+                    "campaign edition cannot change while characters exist; "
+                    "use an explicit edition migration"
+                )
             if row is None:
                 row = CampaignRuleProfile(
                     campaign_id=campaign_id,
@@ -58,13 +86,24 @@ class RuleProfileService:
             row.publications = list(publications or [])
             row.options = dict(options or {})
             campaign.settings = {
-                **dict(campaign.settings or {}),
-                "edition": edition,
-                "locale": locale,
+                key: value
+                for key, value in dict(campaign.settings or {}).items()
+                if key not in {"edition", "locale"}
             }
             campaign.revision += 1
             session.flush()
-            return self._info(row)
+            result = self._info(row)
+            idempotency.remember_write_in_session(
+                session,
+                campaign_id=campaign_id,
+                key=idempotency_key,
+                write=idempotency_write,
+                result={
+                    "profile": result,
+                    "campaign_revision": campaign.revision,
+                },
+            )
+            return result
 
     def get(self, campaign_id: str) -> RuleProfileInfo | None:
         with self.database.transaction() as session:

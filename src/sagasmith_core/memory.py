@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sagasmith_core.branches import resolve_branch
 from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.database import Database
+from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
 from sagasmith_core.models import (
     BranchFactHead,
     Campaign,
@@ -73,12 +74,19 @@ class MemoryService:
         source_event_ids: list[str] | None = None,
         importance: int = 3,
         disclosure_scope: str | None = None,
+        idempotency_key: str | None = None,
+        idempotency_write: IdempotencyWrite | None = None,
     ) -> MemoryInfo:
         with self.database.transaction() as session:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
+            idempotency = IdempotencyService(self.database)
+            idempotency.require_uncommitted_in_session(
+                session, idempotency_key, idempotency_write
+            )
             branch = resolve_branch(session, campaign, branch_id)
+            result: MemoryInfo
             if fact_key is not None:
                 normalized_key = self._validate_fact_key(fact_key)
                 existing = session.scalar(
@@ -94,7 +102,7 @@ class MemoryService:
                     )
                     if head is not None:
                         raise ValueError(f"campaign fact already exists: {normalized_key}")
-                    return self._add_branch_revision_in_session(
+                    result = self._add_branch_revision_in_session(
                         session,
                         existing,
                         branch.id,
@@ -108,25 +116,54 @@ class MemoryService:
                         importance=importance,
                         disclosure_scope=disclosure_scope,
                     )
-            return self._add_in_session(
+                else:
+                    result = self._add_in_session(
+                        session,
+                        campaign_id,
+                        branch.id,
+                        content=content,
+                        kind=kind,
+                        subject=subject,
+                        metadata=metadata,
+                        snapshot_id=snapshot_id,
+                        fact_key=fact_key,
+                        subject_ref=subject_ref,
+                        predicate=predicate,
+                        status=status,
+                        valid_from=valid_from,
+                        valid_to=valid_to,
+                        source_event_ids=source_event_ids,
+                        importance=importance,
+                        disclosure_scope=disclosure_scope,
+                    )
+            else:
+                result = self._add_in_session(
+                    session,
+                    campaign_id,
+                    branch.id,
+                    content=content,
+                    kind=kind,
+                    subject=subject,
+                    metadata=metadata,
+                    snapshot_id=snapshot_id,
+                    fact_key=fact_key,
+                    subject_ref=subject_ref,
+                    predicate=predicate,
+                    status=status,
+                    valid_from=valid_from,
+                    valid_to=valid_to,
+                    source_event_ids=source_event_ids,
+                    importance=importance,
+                    disclosure_scope=disclosure_scope,
+                )
+            idempotency.remember_write_in_session(
                 session,
-                campaign_id,
-                branch.id,
-                content=content,
-                kind=kind,
-                subject=subject,
-                metadata=metadata,
-                snapshot_id=snapshot_id,
-                fact_key=fact_key,
-                subject_ref=subject_ref,
-                predicate=predicate,
-                status=status,
-                valid_from=valid_from,
-                valid_to=valid_to,
-                source_event_ids=source_event_ids,
-                importance=importance,
-                disclosure_scope=disclosure_scope,
+                campaign_id=campaign_id,
+                key=idempotency_key,
+                write=idempotency_write,
+                result=result,
             )
+            return result
 
     def revise(
         self,
@@ -143,6 +180,8 @@ class MemoryService:
         source_event_ids: list[str] | None = None,
         importance: int | None = None,
         disclosure_scope: str | None = None,
+        idempotency_key: str | None = None,
+        idempotency_write: IdempotencyWrite | None = None,
     ) -> MemoryInfo:
         with self.database.transaction() as session:
             memory = session.get(CampaignMemory, memory_id)
@@ -151,8 +190,12 @@ class MemoryService:
             campaign = session.get(Campaign, memory.campaign_id)
             if campaign is None:
                 raise CampaignNotFoundError(memory.campaign_id)
+            idempotency = IdempotencyService(self.database)
+            idempotency.require_uncommitted_in_session(
+                session, idempotency_key, idempotency_write
+            )
             branch = resolve_branch(session, campaign, branch_id)
-            return self._revise_in_session(
+            result = self._revise_in_session(
                 session,
                 memory,
                 branch.id,
@@ -167,6 +210,14 @@ class MemoryService:
                 importance=importance,
                 disclosure_scope=disclosure_scope,
             )
+            idempotency.remember_write_in_session(
+                session,
+                campaign_id=memory.campaign_id,
+                key=idempotency_key,
+                write=idempotency_write,
+                result=result,
+            )
+            return result
 
     def upsert(
         self,
@@ -188,12 +239,18 @@ class MemoryService:
         source_event_ids: list[str] | None = None,
         importance: int = 3,
         disclosure_scope: str | None = None,
+        idempotency_key: str | None = None,
+        idempotency_write: IdempotencyWrite | None = None,
     ) -> MemoryInfo:
         normalized_key = self._validate_fact_key(fact_key)
         with self.database.transaction() as session:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
+            idempotency = IdempotencyService(self.database)
+            idempotency.require_uncommitted_in_session(
+                session, idempotency_key, idempotency_write
+            )
             branch = resolve_branch(session, campaign, branch_id)
             memory = session.scalar(
                 select(CampaignMemory).where(
@@ -204,7 +261,7 @@ class MemoryService:
             if memory is None:
                 if expected_revision_id is not None:
                     raise ValueError("expected revision cannot target a missing fact")
-                return self._add_in_session(
+                result = self._add_in_session(
                     session,
                     campaign_id,
                     branch.id,
@@ -223,42 +280,52 @@ class MemoryService:
                     importance=importance,
                     disclosure_scope=disclosure_scope,
                 )
-            head = session.get(
-                BranchFactHead,
-                {"branch_id": branch.id, "memory_id": memory.id},
-            )
-            if head is None:
-                if expected_revision_id is not None:
-                    raise ValueError("expected revision cannot target a missing branch fact")
-                return self._add_branch_revision_in_session(
-                    session,
-                    memory,
-                    branch.id,
-                    content=content,
-                    metadata=metadata,
-                    snapshot_id=snapshot_id,
-                    status=status,
-                    valid_from=valid_from,
-                    valid_to=valid_to,
-                    source_event_ids=source_event_ids,
-                    importance=importance,
-                    disclosure_scope=disclosure_scope,
+            else:
+                head = session.get(
+                    BranchFactHead,
+                    {"branch_id": branch.id, "memory_id": memory.id},
                 )
-            return self._revise_in_session(
+                if head is None:
+                    if expected_revision_id is not None:
+                        raise ValueError("expected revision cannot target a missing branch fact")
+                    result = self._add_branch_revision_in_session(
+                        session,
+                        memory,
+                        branch.id,
+                        content=content,
+                        metadata=metadata,
+                        snapshot_id=snapshot_id,
+                        status=status,
+                        valid_from=valid_from,
+                        valid_to=valid_to,
+                        source_event_ids=source_event_ids,
+                        importance=importance,
+                        disclosure_scope=disclosure_scope,
+                    )
+                else:
+                    result = self._revise_in_session(
+                        session,
+                        memory,
+                        branch.id,
+                        content=content,
+                        metadata=metadata,
+                        snapshot_id=snapshot_id,
+                        expected_revision_id=expected_revision_id,
+                        status=status,
+                        valid_from=valid_from,
+                        valid_to=valid_to,
+                        source_event_ids=source_event_ids,
+                        importance=importance,
+                        disclosure_scope=disclosure_scope,
+                    )
+            idempotency.remember_write_in_session(
                 session,
-                memory,
-                branch.id,
-                content=content,
-                metadata=metadata,
-                snapshot_id=snapshot_id,
-                expected_revision_id=expected_revision_id,
-                status=status,
-                valid_from=valid_from,
-                valid_to=valid_to,
-                source_event_ids=source_event_ids,
-                importance=importance,
-                disclosure_scope=disclosure_scope,
+                campaign_id=campaign_id,
+                key=idempotency_key,
+                write=idempotency_write,
+                result=result,
             )
+            return result
 
     def list(
         self,
@@ -394,7 +461,6 @@ class MemoryService:
             snapshot_id=snapshot_id,
             content=content,
             metadata_json=metadata or {},
-            active=status == "active",
             status=status,
             valid_from=valid_from,
             valid_to=valid_to,
@@ -452,7 +518,6 @@ class MemoryService:
             snapshot_id=snapshot_id,
             content=content,
             metadata_json=resolved_metadata,
-            active=resolved_status == "active",
             status=resolved_status,
             valid_from=valid_from if valid_from is not None else current.valid_from,
             valid_to=valid_to if valid_to is not None else current.valid_to,

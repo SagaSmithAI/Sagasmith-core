@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import asdict, dataclass
-from typing import Any, Callable
+from typing import Any
 
 from sqlalchemy import select
 
@@ -12,7 +12,7 @@ from sagasmith_core.branches import resolve_branch
 from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.characters import CharacterNotFoundError
 from sagasmith_core.database import Database
-from sagasmith_core.idempotency import IdempotencyService, request_hash
+from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite, request_hash
 from sagasmith_core.knowledge import ActorKnowledgeService
 from sagasmith_core.models import (
     ActorKnowledge,
@@ -48,15 +48,6 @@ class ActorKnowledgeTransfer:
     knowledge_key_prefix: str
     cause: str = "body_thief"
     disclosure_scope: str = "dm"
-
-
-@dataclass(frozen=True)
-class IdempotencyWrite:
-    """Persist an exact public replay response in the state transaction."""
-
-    scope: str
-    payload: Any
-    response: dict[str, Any] | Callable[[list[RevisionInfo]], dict[str, Any]]
 
 
 class StateMutationService:
@@ -353,20 +344,12 @@ class StateMutationService:
                     )
                 )
             if idempotency_write is not None:
-                replay_response = (
-                    idempotency_write.response(revisions)
-                    if callable(idempotency_write.response)
-                    else dict(idempotency_write.response)
-                )
-                if not isinstance(replay_response, dict):
-                    raise TypeError("idempotency_write.response must produce an object")
-                IdempotencyService(self.database).remember_in_session(
+                IdempotencyService(self.database).remember_write_in_session(
                     session,
-                    idempotency_write.scope,
-                    idempotency_key,
-                    idempotency_write.payload,
-                    replay_response,
                     campaign_id=campaign_id,
+                    key=idempotency_key,
+                    write=idempotency_write,
+                    result=revisions,
                     mutation_group_id=mutation_group_id,
                 )
             return revisions

@@ -115,6 +115,7 @@ class CharacterService:
         name: str | None = None,
         player_name: str | None = None,
         sheet: dict[str, Any] | None = None,
+        notes: dict[str, Any] | None = None,
     ) -> CharacterInfo:
         """Copy a library character into a campaign as an independent instance."""
         with self.database.transaction() as session:
@@ -136,7 +137,7 @@ class CharacterService:
                 ),
                 summary=template.summary,
                 sheet=copy.deepcopy(template.sheet if sheet is None else sheet),
-                notes=copy.deepcopy(template.notes),
+                notes=copy.deepcopy(template.notes if notes is None else notes),
             )
             session.add(row)
             session.flush()

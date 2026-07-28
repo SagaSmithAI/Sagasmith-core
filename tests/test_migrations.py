@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from alembic import command
@@ -22,6 +23,9 @@ def test_bundled_migration_builds_schema(tmp_path: Path) -> None:
         assert "rule_pack_versions" in inspector.get_table_names()
         assert "campaign_rule_activations" in inspector.get_table_names()
         assert "rule_resolution_receipts" in inspector.get_table_names()
+        assert "revision" in {
+            column["name"] for column in inspector.get_columns("import_jobs")
+        }
         assert any(
             constraint["name"] == "uq_mutation_group_branch_idempotency"
             and constraint["column_names"]
@@ -37,6 +41,15 @@ def test_bundled_migration_builds_schema(tmp_path: Path) -> None:
         revision_columns = {
             column["name"] for column in inspector.get_columns("memory_revisions")
         }
+        rule_source_columns = {
+            column["name"] for column in inspector.get_columns("rule_sources")
+        }
+        snapshot_columns = {
+            column["name"] for column in inspector.get_columns("campaign_snapshots")
+        }
+        branch_columns = {
+            column["name"] for column in inspector.get_columns("campaign_branches")
+        }
         assert {"fact_key", "subject_ref", "predicate"}.issubset(memory_columns)
         assert {
             "status",
@@ -46,6 +59,10 @@ def test_bundled_migration_builds_schema(tmp_path: Path) -> None:
             "importance",
             "disclosure_scope",
         }.issubset(revision_columns)
+        assert "active" not in revision_columns
+        assert "active" in rule_source_columns
+        assert "is_head" not in snapshot_columns
+        assert "is_current" not in branch_columns
     finally:
         database.dispose()
 
@@ -199,7 +216,7 @@ def test_long_term_memory_v2_backfills_stable_legacy_fact_keys(tmp_path: Path) -
         connection.exec_driver_sql(
             "INSERT INTO memory_revisions "
             "(id, memory_id, content, metadata_json, active, created_at) VALUES "
-            "('revision-1', 'memory-1', 'Locked', '{}', 1, CURRENT_TIMESTAMP)"
+            "('revision-1', 'memory-1', 'Locked', '{}', 0, CURRENT_TIMESTAMP)"
         )
 
     command.stamp(config, "20260722_14")
@@ -215,7 +232,49 @@ def test_long_term_memory_v2_backfills_stable_legacy_fact_keys(tmp_path: Path) -
                 "SELECT status, source_event_ids, importance, disclosure_scope "
                 "FROM memory_revisions WHERE id = 'revision-1'"
             ).one()
+            revision_columns = {
+                column["name"]
+                for column in inspect(database.engine).get_columns("memory_revisions")
+            }
         assert tuple(row) == ("legacy:memory-1", "", "")
-        assert tuple(revision) == ("active", "[]", 3, "dm")
+        assert tuple(revision) == ("retracted", "[]", 3, "dm")
+        assert "active" not in revision_columns
+    finally:
+        database.dispose()
+
+
+def test_rule_profile_authority_removes_legacy_campaign_setting_copies(
+    tmp_path: Path,
+) -> None:
+    database = Database(sqlite_database_url(tmp_path / "profile-authority.db"))
+    config = alembic_config(database.url)
+    command.upgrade(config, "20260728_18")
+    with database.engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO campaigns "
+            "(id, system_id, slug, name, status, description, settings, state, revision, "
+            "created_at, updated_at) VALUES "
+            "('campaign-1', 'dnd5e', 'authority', 'Authority', 'active', '', "
+            "'{\"edition\":\"2014\",\"locale\":\"zh\",\"table_name\":\"Friday\"}', "
+            "'{}', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO campaign_rule_profiles "
+            "(campaign_id, system_id, edition, locale, publications, options, "
+            "created_at, updated_at) VALUES "
+            "('campaign-1', 'dnd5e', '2014', 'zh', '[]', '{}', "
+            "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        )
+
+    database.upgrade_schema()
+
+    try:
+        with database.engine.connect() as connection:
+            settings = connection.exec_driver_sql(
+                "SELECT settings FROM campaigns WHERE id = 'campaign-1'"
+            ).scalar_one()
+        if isinstance(settings, str):
+            settings = json.loads(settings)
+        assert settings == {"table_name": "Friday"}
     finally:
         database.dispose()

@@ -2,8 +2,10 @@ import hashlib
 
 import pytest
 
+from sagasmith_core import IdempotencyService, IdempotencyWrite
 from sagasmith_core.campaigns import CampaignService
 from sagasmith_core.documents import NormalizedDocument
+from sagasmith_core.models import ModuleSource
 from sagasmith_core.modules import (
     GenericModuleProfile,
     MarkdownModuleParser,
@@ -398,6 +400,246 @@ def test_staged_module_reparses_same_content_when_parser_version_changes(databas
     assert second.skipped is False
 
 
+def test_legacy_set_active_uses_the_candidate_activation_transaction(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="One activation path")
+    service = ModuleService(database)
+    current = service.ingest(
+        campaign_id=campaign.id,
+        source_key="module-v1",
+        logical_source_key="module",
+        title="Module",
+        content="# Chapter\n## Opening\nOld.\n",
+        activate=True,
+    )
+    candidate = service.ingest(
+        campaign_id=campaign.id,
+        source_key="module-v2",
+        logical_source_key="module",
+        title="Module",
+        content="# Chapter\n## Opening\nNew.\n",
+        activate=False,
+    )
+
+    activation = service.set_active(campaign.id, candidate.module_id, active=True)
+
+    assert activation["replaced_module_ids"] == [current.module_id]
+    visible = service.list(campaign.id)
+    assert [item["id"] for item in visible] == [candidate.module_id]
+
+
+def test_direct_active_ingest_uses_logical_key_activation_and_progress_migration(
+    database,
+) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Direct activation")
+    service = ModuleService(database)
+    current = service.ingest(
+        campaign_id=campaign.id,
+        source_key="module-v1.md",
+        logical_source_key="module",
+        title="Module",
+        content="# Chapter\n## Opening\nOld.\n",
+    )
+    old_scene = service.scene_index(campaign.id, module_id=current.module_id)[0]
+    service.set_scene_progress(
+        campaign_id=campaign.id,
+        scene_id=old_scene["scene_id"],
+        progress=45,
+        state={"clue_found": True},
+    )
+
+    replacement = service.ingest(
+        campaign_id=campaign.id,
+        source_key="module-v2.md",
+        logical_source_key="module",
+        title="Module",
+        content="# Chapter\n## Opening\nNew.\n",
+        activate=True,
+    )
+
+    visible = service.list(campaign.id)
+    assert [item["id"] for item in visible] == [replacement.module_id]
+    current_scene = service.current_scene(campaign.id)
+    assert current_scene is not None
+    assert current_scene["module_id"] == replacement.module_id
+    assert current_scene["progress"]["percent"] == 45
+    assert current_scene["progress"]["state"] == {"clue_found": True}
+
+
+def test_retired_module_scene_cannot_become_current(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Retired scene")
+    service = ModuleService(database)
+    retired = service.ingest(
+        campaign_id=campaign.id,
+        source_key="module-v1.md",
+        logical_source_key="module",
+        title="Module",
+        content="# Chapter\n## Opening\nOld.\n",
+    )
+    retired_scene = service.scene_index(campaign.id, module_id=retired.module_id)[0]
+    service.ingest(
+        campaign_id=campaign.id,
+        source_key="module-v2.md",
+        logical_source_key="module",
+        title="Module",
+        content="# Chapter\n## Opening\nNew.\n",
+    )
+
+    with pytest.raises(ValueError, match="retired module revision"):
+        service.set_scene_progress(
+            campaign_id=campaign.id,
+            scene_id=retired_scene["scene_id"],
+            status="current",
+        )
+
+
+def test_module_candidate_activation_and_exact_receipt_commit_together(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Atomic module")
+    service = ModuleService(database)
+    result = service.ingest(
+        campaign_id=campaign.id,
+        source_key="module",
+        logical_source_key="module",
+        title="Module",
+        content="# Chapter\nBody.\n",
+        activate=False,
+    )
+    payload = {"module_id": result.module_id}
+
+    activation = service.activate_candidate(
+        campaign.id,
+        result.module_id,
+        idempotency_key="activate",
+        idempotency_write=IdempotencyWrite(
+            scope=f"module-activation:{campaign.id}",
+            payload=payload,
+            response=lambda value: {"activation": value},
+        ),
+    )
+
+    replay = IdempotencyService(database).lookup(
+        f"module-activation:{campaign.id}",
+        "activate",
+        payload,
+    )
+    assert replay is not None
+    assert replay.response == {"activation": activation}
+
+
+def test_module_candidate_activation_rolls_back_when_receipt_fails(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Module rollback")
+    service = ModuleService(database)
+    result = service.ingest(
+        campaign_id=campaign.id,
+        source_key="module",
+        logical_source_key="module",
+        title="Module",
+        content="# Chapter\nBody.\n",
+        activate=False,
+    )
+
+    with pytest.raises(RuntimeError, match="receipt failed"):
+        service.activate_candidate(
+            campaign.id,
+            result.module_id,
+            idempotency_key="activate",
+            idempotency_write=IdempotencyWrite(
+                scope=f"module-activation:{campaign.id}",
+                payload={"module_id": result.module_id},
+                response=lambda _value: (_ for _ in ()).throw(
+                    RuntimeError("receipt failed")
+                ),
+            ),
+        )
+
+    with database.transaction() as session:
+        assert session.get(ModuleSource, result.module_id).active is False
+
+
+def test_module_activation_remaps_progress_by_stable_scene_identity(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Module remap")
+    service = ModuleService(database)
+    old = service.ingest(
+        campaign_id=campaign.id,
+        source_key="module",
+        logical_source_key="module",
+        title="Module",
+        content="# Chapter\n## Cave\nOld text.\n",
+    )
+    old_scene = service.scene_index(campaign.id, module_id=old.module_id)[0]
+    service.set_scene_progress(
+        campaign_id=campaign.id,
+        scene_id=old_scene["scene_id"],
+        progress=45,
+        state={"door_open": True},
+    )
+    candidate = service.ingest(
+        campaign_id=campaign.id,
+        source_key="module",
+        logical_source_key="module",
+        title="Module",
+        content="# Chapter\n## Cave\nReparsed text.\n",
+        activate=False,
+    )
+    new_scene = service.scene_index(campaign.id, module_id=candidate.module_id)[0]
+
+    activation = service.activate_candidate(campaign.id, candidate.module_id)
+
+    assert activation["progress_migrations"] == [
+        {
+            "scope_id": "party",
+            "from_scene_id": old_scene["scene_id"],
+            "to_scene_id": new_scene["scene_id"],
+            "stable_key": "chapter-cave",
+            "mode": "stable_key",
+        }
+    ]
+    current = service.current_scene(campaign.id)
+    assert current is not None
+    assert current["module_id"] == candidate.module_id
+    assert current["scene_id"] == new_scene["scene_id"]
+    assert current["progress"]["percent"] == 45
+    assert current["progress"]["state"] == {"door_open": True}
+
+
+def test_module_activation_requires_explicit_ruling_for_removed_progress(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Module ruling")
+    service = ModuleService(database)
+    old = service.ingest(
+        campaign_id=campaign.id,
+        source_key="module",
+        logical_source_key="module",
+        title="Module",
+        content="# Chapter\n## Removed Route\nOld text.\n",
+    )
+    old_scene = service.scene_index(campaign.id, module_id=old.module_id)[0]
+    service.set_scene_progress(
+        campaign_id=campaign.id,
+        scene_id=old_scene["scene_id"],
+        progress=45,
+    )
+    candidate = service.ingest(
+        campaign_id=campaign.id,
+        source_key="module",
+        logical_source_key="module",
+        title="Module",
+        content="# Chapter\n## Replacement Route\nNew text.\n",
+        activate=False,
+    )
+    new_scene = service.scene_index(campaign.id, module_id=candidate.module_id)[0]
+
+    with pytest.raises(ValueError, match="DM-reviewed progress remap"):
+        service.activate_candidate(campaign.id, candidate.module_id)
+
+    assert service.current_scene(campaign.id)["module_id"] == old.module_id
+    activation = service.activate_candidate(
+        campaign.id,
+        candidate.module_id,
+        progress_remaps={old_scene["scene_id"]: new_scene["scene_id"]},
+    )
+    assert activation["progress_migrations"][0]["mode"] == "dm_ruling"
+    assert service.current_scene(campaign.id)["scene_id"] == new_scene["scene_id"]
+
+
 def test_scene_progress_can_reference_one_spatial_location_in_the_same_module(database) -> None:
     class SpatialProfile:
         name = "spatial-test"
@@ -475,11 +717,19 @@ def test_module_reimport_preserves_snapshot_scene_references(database) -> None:
     )
     snapshot = SnapshotService(database).create(campaign.id, label="Before revision")
 
-    modules.ingest(
+    candidate = modules.ingest(
         campaign_id=campaign.id,
         source_key="keep.md",
+        logical_source_key="keep.md",
         title="The Keep",
         content="# Chapter\n## Courtyard\nThe revised entry.",
+        activate=False,
+    )
+    courtyard = modules.scene_index(campaign.id, module_id=candidate.module_id)[0]
+    modules.activate_candidate(
+        campaign.id,
+        candidate.module_id,
+        progress_remaps={original["scene_id"]: courtyard["scene_id"]},
     )
 
     assert [item["title"] for item in modules.scene_index(campaign.id)] == ["Courtyard"]
@@ -490,7 +740,7 @@ def test_module_reimport_preserves_snapshot_scene_references(database) -> None:
             module_id=original["module_id"],
         )
     ] == ["Gate"]
-    assert modules.current_scene(campaign.id)["title"] == "Gate"
+    assert modules.current_scene(campaign.id)["title"] == "Courtyard"
     assert modules.current_scene(campaign.id)["progress"]["current_location_key"] == "gate"
     restored = SnapshotService(database).restore(campaign.id, snapshot.slot)
     assert restored.parent_id == snapshot.id
@@ -698,3 +948,85 @@ def test_text_module_content_review_keeps_exact_chunk_evidence(database) -> None
     ]
     assert reviewed["evidence"]["page_start"] == 8
     assert reviewed["evidence"]["page_end"] == 8
+
+
+def test_module_domain_writes_persist_exact_receipts_atomically(
+    database,
+    tmp_path,
+) -> None:
+    campaign = CampaignService(database).create(
+        system_id="dnd5e",
+        name="Atomic module writes",
+    )
+    modules = ModuleService(database)
+    idempotency = IdempotencyService(database)
+    ingest_payload = {"source_key": "atomic.md"}
+    imported = modules.ingest(
+        campaign_id=campaign.id,
+        source_key="atomic.md",
+        title="Atomic",
+        content="# Chapter\n## Scene\nExact evidence.",
+        idempotency_key="module-ingest",
+        idempotency_write=IdempotencyWrite(
+            scope=f"module-ingest:{campaign.id}:dm:test",
+            payload=ingest_payload,
+            response=lambda result: {"module_id": result.module_id},
+        ),
+    )
+    assert idempotency.lookup(
+        f"module-ingest:{campaign.id}:dm:test",
+        "module-ingest",
+        ingest_payload,
+    ).response == {"module_id": imported.module_id}
+
+    asset_path = tmp_path / "map.png"
+    asset_path.write_bytes(b"map")
+
+    def fail_response(_result):
+        raise RuntimeError("asset response failed")
+
+    with pytest.raises(RuntimeError, match="asset response failed"):
+        modules.register_asset(
+            campaign_id=campaign.id,
+            module_id=imported.module_id,
+            source_path=str(asset_path),
+            media_type="image/png",
+            checksum="a" * 64,
+            idempotency_key="asset-failure",
+            idempotency_write=IdempotencyWrite(
+                scope=f"module-asset:{campaign.id}:dm:test",
+                payload={"path": str(asset_path)},
+                response=fail_response,
+            ),
+        )
+    assert modules.list_assets(campaign.id, imported.module_id) == []
+
+    scene = modules.scene_index(campaign.id)[0]
+    chunks = modules.list_chunks(
+        campaign.id,
+        imported.module_id,
+        scene_id=scene["scene_id"],
+    )
+
+    def fail_review_response(_result):
+        raise RuntimeError("review response failed")
+
+    with pytest.raises(RuntimeError, match="review response failed"):
+        modules.review_content(
+            campaign_id=campaign.id,
+            module_id=imported.module_id,
+            scene_id=scene["scene_id"],
+            content_key="atomic-card",
+            content_kind="statblock",
+            normalized_content="# Atomic Card",
+            source_chunk_ids=[item["id"] for item in chunks],
+            reviewer="dm:test",
+            observation="Reviewed against the exact indexed source chunks.",
+            idempotency_key="review-failure",
+            idempotency_write=IdempotencyWrite(
+                scope=f"module-review:{campaign.id}:dm:test",
+                payload={"content_key": "atomic-card"},
+                response=fail_review_response,
+            ),
+        )
+    assert modules.list_content_reviews(campaign.id, imported.module_id) == []

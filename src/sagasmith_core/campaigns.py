@@ -10,11 +10,18 @@ from typing import Any
 from sqlalchemy import select
 
 from sagasmith_core.database import Database
-from sagasmith_core.idempotency import IdempotencyService
+from sagasmith_core.idempotency import (
+    IdempotencyService,
+    IdempotencyWrite,
+)
+from sagasmith_core.idempotency import (
+    request_hash as idempotency_request_hash,
+)
 from sagasmith_core.models import (
     Campaign,
     CampaignBranch,
     CampaignMembership,
+    CampaignRuleProfile,
     MutationGroup,
     Principal,
 )
@@ -72,7 +79,6 @@ class CampaignService:
                 id=str(uuid.uuid4()),
                 campaign_id=row.id,
                 name="main",
-                is_current=True,
             )
             session.add(branch)
             session.flush()
@@ -90,16 +96,34 @@ class CampaignService:
         description: str = "",
         settings: dict[str, Any] | None = None,
         state: dict[str, Any] | None = None,
+        rule_profile: dict[str, Any] | None = None,
     ) -> CampaignInfo:
-        """Atomically create a campaign, its main branch, owner, and retry receipt."""
+        """Atomically create a campaign and every required initial authority."""
+        normalized_profile = dict(rule_profile) if rule_profile is not None else None
+        if normalized_profile is not None:
+            required_profile_fields = {
+                "edition",
+                "locale",
+                "publications",
+                "options",
+            }
+            if set(normalized_profile) != required_profile_fields:
+                raise ValueError(
+                    "rule_profile must contain edition, locale, publications, and options"
+                )
+        normalized_settings = dict(settings or {})
+        if normalized_profile is not None:
+            normalized_settings.pop("edition", None)
+            normalized_settings.pop("locale", None)
         payload = {
             "system_id": system_id,
             "name": name,
             "slug": slug,
             "description": description,
-            "settings": settings or {},
+            "settings": normalized_settings,
             "state": state or {},
             "principal_id": principal_id,
+            "rule_profile": normalized_profile,
         }
         scope = f"campaign-create:{principal_id}"
         idempotency = IdempotencyService(self.database)
@@ -125,7 +149,7 @@ class CampaignService:
                 slug=slugify(slug or name),
                 name=name,
                 description=description,
-                settings=settings or {},
+                settings=normalized_settings,
                 state=state or {},
             )
             session.add(row)
@@ -134,7 +158,6 @@ class CampaignService:
                 id=str(uuid.uuid4()),
                 campaign_id=row.id,
                 name="main",
-                is_current=True,
             )
             session.add(branch)
             session.add(
@@ -144,6 +167,20 @@ class CampaignService:
                     role="owner",
                 )
             )
+            if normalized_profile is not None:
+                session.add(
+                    CampaignRuleProfile(
+                        campaign_id=row.id,
+                        system_id=system_id,
+                        edition=str(normalized_profile["edition"]),
+                        locale=str(normalized_profile["locale"]),
+                        publications=list(normalized_profile["publications"] or []),
+                        options=dict(normalized_profile["options"] or {}),
+                    )
+                )
+                # Preserve the established public revision contract: initial
+                # campaign creation starts at 1 and its profile advances it.
+                row.revision += 1
             session.flush()
             row.active_branch_id = branch.id
             session.flush()
@@ -225,6 +262,7 @@ class CampaignService:
         branch_id: str | None = None,
         idempotency_key: str | None = None,
         request_hash: str | None = None,
+        idempotency_write: IdempotencyWrite | None = None,
     ) -> CampaignInfo:
         """Update campaign metadata and its audit row in one transaction."""
         from sagasmith_core.revisions import RevisionService
@@ -233,6 +271,13 @@ class CampaignService:
             row = session.get(Campaign, campaign_id)
             if row is None:
                 raise CampaignNotFoundError(campaign_id)
+            idempotency = IdempotencyService(self.database)
+            if idempotency_write is not None:
+                idempotency.require_uncommitted_in_session(
+                    session,
+                    idempotency_key,
+                    idempotency_write,
+                )
             effective_branch_id = branch_id or row.active_branch_id
             if idempotency_key and session.scalar(
                 select(MutationGroup.id).where(
@@ -280,7 +325,14 @@ class CampaignService:
                 actor=actor,
                 branch_id=branch_id,
                 idempotency_key=idempotency_key,
-                request_hash=request_hash,
+                request_hash=(
+                    request_hash
+                    or (
+                        idempotency_request_hash(idempotency_write.payload)
+                        if idempotency_write is not None
+                        else None
+                    )
+                ),
                 changes=[
                     {
                         "entity_type": "campaign",
@@ -290,7 +342,15 @@ class CampaignService:
                     }
                 ],
             )
-            return self._info(row)
+            result = self._info(row)
+            idempotency.remember_write_in_session(
+                session,
+                campaign_id=campaign_id,
+                key=idempotency_key,
+                write=idempotency_write,
+                result=result,
+            )
+            return result
 
     def delete(self, campaign_id: str) -> None:
         with self.database.transaction() as session:

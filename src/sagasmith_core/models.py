@@ -108,6 +108,7 @@ class RuleSource(TimestampMixin, Base):
         nullable=True,
     )
     checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
@@ -191,7 +192,8 @@ class ModuleChapter(Base):
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     content: Mapped[str] = mapped_column(Text, default="")
     source_path: Mapped[str] = mapped_column(Text, default="")
-    status: Mapped[str] = mapped_column(String(32), default="locked")
+    # Import/index lifecycle only. Play progress lives exclusively in SceneProgress.
+    status: Mapped[str] = mapped_column(String(32), default="indexed")
     page_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
     page_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
@@ -571,7 +573,6 @@ class CampaignSnapshot(Base):
     __tablename__ = "campaign_snapshots"
     __table_args__ = (
         UniqueConstraint("campaign_id", "slot", name="uq_campaign_snapshot_slot"),
-        Index("ix_campaign_snapshot_head", "campaign_id", "is_head"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -592,7 +593,6 @@ class CampaignSnapshot(Base):
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     checksum: Mapped[str] = mapped_column(String(64), nullable=False)
     recap: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
-    is_head: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -633,7 +633,6 @@ class MemoryRevision(Base):
     )
     content: Mapped[str] = mapped_column(Text, nullable=False)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    active: Mapped[bool] = mapped_column(Boolean, default=True)
     status: Mapped[str] = mapped_column(String(32), default="active")
     valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     valid_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -649,7 +648,6 @@ class CampaignBranch(TimestampMixin, Base):
     __tablename__ = "campaign_branches"
     __table_args__ = (
         UniqueConstraint("campaign_id", "name", name="uq_campaign_branch_name"),
-        Index("ix_campaign_branch_current", "campaign_id", "is_current"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -663,7 +661,6 @@ class CampaignBranch(TimestampMixin, Base):
     head_snapshot_id: Mapped[str | None] = mapped_column(
         ForeignKey("campaign_snapshots.id", ondelete="SET NULL"), nullable=True
     )
-    is_current: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class BranchFactHead(Base):
@@ -864,6 +861,7 @@ class ImportJob(TimestampMixin, Base):
     system_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     kind: Mapped[str] = mapped_column(String(32), nullable=False)
     state: Mapped[str] = mapped_column(String(32), nullable=False, default="staged")
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     artifact: Mapped[str] = mapped_column(String(500), nullable=False)
     artifact_checksum: Mapped[str] = mapped_column(String(64), default="")
     source_id: Mapped[str | None] = mapped_column(String(36), nullable=True)

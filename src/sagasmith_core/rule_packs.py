@@ -13,6 +13,7 @@ from sqlalchemy import delete, func, select
 from sagasmith_core.branches import resolve_branch
 from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.database import Database
+from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
 from sagasmith_core.models import (
     Campaign,
     CampaignRuleActivation,
@@ -229,11 +230,19 @@ class RulePackService:
         options: dict[str, Any] | None = None,
         branch_id: str | None = None,
         expected_campaign_revision: int | None = None,
+        idempotency_key: str | None = None,
+        idempotency_write: IdempotencyWrite | None = None,
     ) -> RuleActivationInfo:
         with self.database.transaction() as session:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
+            idempotency = IdempotencyService(self.database)
+            idempotency.require_uncommitted_in_session(
+                session,
+                idempotency_key,
+                idempotency_write,
+            )
             if (
                 expected_campaign_revision is not None
                 and campaign.revision != expected_campaign_revision
@@ -271,8 +280,20 @@ class RulePackService:
             row.options = dict(options or {})
             campaign.revision += 1
             session.flush()
-            self._resolve(session, campaign, branch.id)
-            return self._activation_info(row)
+            effective = self._resolve(session, campaign, branch.id)
+            result = self._activation_info(row)
+            idempotency.remember_write_in_session(
+                session,
+                campaign_id=campaign_id,
+                key=idempotency_key,
+                write=idempotency_write,
+                result={
+                    "activation": result,
+                    "effective": effective,
+                    "campaign_revision": campaign.revision,
+                },
+            )
+            return result
 
     def remove_activation(
         self,
@@ -281,11 +302,19 @@ class RulePackService:
         *,
         branch_id: str | None = None,
         expected_campaign_revision: int | None = None,
+        idempotency_key: str | None = None,
+        idempotency_write: IdempotencyWrite | None = None,
     ) -> None:
         with self.database.transaction() as session:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
+            idempotency = IdempotencyService(self.database)
+            idempotency.require_uncommitted_in_session(
+                session,
+                idempotency_key,
+                idempotency_write,
+            )
             if (
                 expected_campaign_revision is not None
                 and campaign.revision != expected_campaign_revision
@@ -307,6 +336,18 @@ class RulePackService:
             if not result.rowcount:
                 raise LookupError(f"rule-pack activation not found: {pack_id}")
             campaign.revision += 1
+            session.flush()
+            effective = self._resolve(session, campaign, branch.id)
+            idempotency.remember_write_in_session(
+                session,
+                campaign_id=campaign_id,
+                key=idempotency_key,
+                write=idempotency_write,
+                result={
+                    "effective": effective,
+                    "campaign_revision": campaign.revision,
+                },
+            )
 
     def activations(
         self, campaign_id: str, *, branch_id: str | None = None

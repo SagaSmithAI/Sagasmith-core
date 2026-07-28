@@ -16,6 +16,7 @@ from sqlalchemy import delete, func, or_, select, update
 from sagasmith_core.branches import BranchService, resolve_branch
 from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.database import Database
+from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
 from sagasmith_core.models import (
     ActorKnowledge,
     ActorKnowledgeRevision,
@@ -30,6 +31,8 @@ from sagasmith_core.models import (
     CampaignSnapshot,
     Character,
     MemoryRevision,
+    ModuleScene,
+    ModuleSource,
     MutationGroup,
     RulePackVersion,
     SceneProgress,
@@ -66,7 +69,7 @@ def _checksum(value: dict[str, Any]) -> str:
 
 
 class SnapshotService:
-    SCHEMA_VERSION = 4
+    SCHEMA_VERSION = 5
 
     def __init__(self, database: Database) -> None:
         self.database = database
@@ -78,18 +81,32 @@ class SnapshotService:
         label: str = "",
         recap: dict[str, Any] | None = None,
         parent_id: str | None = None,
+        idempotency_key: str | None = None,
+        idempotency_write: IdempotencyWrite | None = None,
     ) -> SnapshotInfo:
         with self.database.transaction() as session:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
-            return self._create_in_session(
+            idempotency = IdempotencyService(self.database)
+            idempotency.require_uncommitted_in_session(
+                session, idempotency_key, idempotency_write
+            )
+            result = self._create_in_session(
                 session,
                 campaign,
                 label=label,
                 recap=recap,
                 parent_id=parent_id,
             )
+            idempotency.remember_write_in_session(
+                session,
+                campaign_id=campaign_id,
+                key=idempotency_key,
+                write=idempotency_write,
+                result=result,
+            )
+            return result
 
     def _create_in_session(
         self,
@@ -137,30 +154,26 @@ class SnapshotService:
             payload=payload,
             checksum=_checksum(payload),
             recap=recap,
-            is_head=True,
         )
         session.add(row)
         session.flush()
         self._bind_continuity(session, row, branch)
         branch.head_snapshot_id = row.id
         session.flush()
-        self._refresh_head_flags(session, campaign.id)
         return self._info(session, row)
 
     def regenerate_recap(self, campaign_id: str, slot: int) -> dict[str, Any]:
-        """Rebuild a deterministic delta recap without changing snapshot state."""
+        """Compute a deterministic delta recap without changing snapshot state."""
         with self.database.transaction() as session:
             row = self._row(session, campaign_id, slot)
             parent = session.get(CampaignSnapshot, row.parent_id) if row.parent_id else None
             self._assert_integrity(session, row)
             if parent is not None:
                 self._assert_integrity(session, parent)
-            row.recap = self._build_recap(
+            return self._build_recap(
                 dict(parent.payload) if parent else None,
                 dict(row.payload),
             )
-            session.flush()
-            return dict(row.recap)
 
     def list(self, campaign_id: str) -> list[SnapshotInfo]:
         with self.database.transaction() as session:
@@ -198,11 +211,22 @@ class SnapshotService:
             branch = resolve_branch(session, campaign)
             self._assert_clean_branch(session, campaign, branch)
 
-    def restore(self, campaign_id: str, slot: int) -> SnapshotInfo:
+    def restore(
+        self,
+        campaign_id: str,
+        slot: int,
+        *,
+        idempotency_key: str | None = None,
+        idempotency_write: IdempotencyWrite | None = None,
+    ) -> SnapshotInfo:
         with self.database.transaction() as session:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
+            idempotency = IdempotencyService(self.database)
+            idempotency.require_uncommitted_in_session(
+                session, idempotency_key, idempotency_write
+            )
             target = self._row(session, campaign_id, slot)
             self._assert_integrity(session, target)
             self._create_in_session(session, campaign, label=f"Before restore to slot {slot}")
@@ -212,7 +236,6 @@ class SnapshotService:
                 name=f"restore-{slot}-{uuid.uuid4().hex[:8]}",
                 base_snapshot_id=target.id,
                 head_snapshot_id=target.id,
-                is_current=False,
             )
             session.add(branch)
             session.flush()
@@ -221,12 +244,20 @@ class SnapshotService:
             branch_service._copy_snapshot_revisions(session, target.id, branch.id)
             branch_service._checkout(session, campaign, branch)
             self._apply(session, campaign, dict(target.payload))
-            return self._create_in_session(
+            result = self._create_in_session(
                 session,
                 campaign,
                 label=f"Restored from slot {slot}",
                 parent_id=target.id,
             )
+            idempotency.remember_write_in_session(
+                session,
+                campaign_id=campaign_id,
+                key=idempotency_key,
+                write=idempotency_write,
+                result=result,
+            )
+            return result
 
     def restore_with_rule_profile_conversion(
         self,
@@ -236,6 +267,8 @@ class SnapshotService:
         rule_profile: dict[str, Any],
         branch_name: str,
         label: str,
+        idempotency_key: str | None = None,
+        idempotency_write: IdempotencyWrite | None = None,
     ) -> SnapshotInfo:
         """Fork an immutable snapshot while explicitly replacing its rule profile.
 
@@ -257,6 +290,12 @@ class SnapshotService:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
+            idempotency = IdempotencyService(self.database)
+            idempotency.require_uncommitted_in_session(
+                session,
+                idempotency_key,
+                idempotency_write,
+            )
             if profile_value["system_id"] != campaign.system_id:
                 raise ValueError("converted rule profile system_id does not match the campaign")
             target = self._row(session, campaign_id, slot)
@@ -275,7 +314,6 @@ class SnapshotService:
                 name=name,
                 base_snapshot_id=target.id,
                 head_snapshot_id=target.id,
-                is_current=False,
             )
             session.add(branch)
             session.flush()
@@ -285,12 +323,27 @@ class SnapshotService:
             branch_service._checkout(session, campaign, branch)
             target_payload["rule_profile"] = profile_value
             self._apply(session, campaign, target_payload)
-            return self._create_in_session(
+            result = self._create_in_session(
                 session,
                 campaign,
                 label=converted_label,
                 parent_id=target.id,
             )
+            idempotency.remember_write_in_session(
+                session,
+                campaign_id=campaign_id,
+                key=idempotency_key,
+                write=idempotency_write,
+                result={
+                    "snapshot": result,
+                    "branch": BranchService._info(
+                        branch,
+                        active_branch_id=campaign.active_branch_id,
+                    ),
+                    "campaign_revision": campaign.revision,
+                },
+            )
+            return result
 
     def checkout_branch(self, campaign_id: str, branch_id: str) -> SnapshotInfo | None:
         """Materialize a branch head without creating or deleting history."""
@@ -379,8 +432,6 @@ class SnapshotService:
             if references:
                 raise ValueError("cannot delete a snapshot referenced by a branch")
             session.delete(row)
-            session.flush()
-            self._refresh_head_flags(session, campaign_id)
 
     @staticmethod
     def _capture(session, campaign: Campaign, branch_id: str) -> dict[str, Any]:
@@ -405,6 +456,16 @@ class SnapshotService:
                 select(SceneProgress)
                 .where(SceneProgress.campaign_id == campaign.id)
                 .order_by(SceneProgress.id)
+            )
+        )
+        active_module_ids = list(
+            session.scalars(
+                select(ModuleSource.id)
+                .where(
+                    ModuleSource.campaign_id == campaign.id,
+                    ModuleSource.active.is_(True),
+                )
+                .order_by(ModuleSource.id)
             )
         )
         memory_rows = session.execute(
@@ -441,12 +502,16 @@ class SnapshotService:
                 .order_by(StateRevision.sequence)
             )
         )
+        settings = dict(campaign.settings)
+        if profile is not None:
+            settings.pop("edition", None)
+            settings.pop("locale", None)
         return {
             "campaign": {
                 "name": campaign.name,
                 "status": campaign.status,
                 "description": campaign.description,
-                "settings": dict(campaign.settings),
+                "settings": settings,
                 "state": dict(campaign.state),
                 "revision": campaign.revision,
             },
@@ -486,6 +551,7 @@ class SnapshotService:
                 }
                 for row in characters
             ],
+            "module_activations": active_module_ids,
             "scene_progress": [
                 {
                     "id": row.id,
@@ -722,7 +788,7 @@ class SnapshotService:
         campaign.name = value["name"]
         campaign.status = value["status"]
         campaign.description = value["description"]
-        campaign.settings = value["settings"]
+        campaign.settings = dict(value["settings"])
         campaign.state = value["state"]
         # Snapshot revisions describe the captured timeline, not the live
         # optimistic-concurrency token.  Never move the live token backwards
@@ -744,6 +810,11 @@ class SnapshotService:
             profile.locale = profile_value["locale"]
             profile.publications = profile_value["publications"]
             profile.options = profile_value["options"]
+            campaign.settings = {
+                key: setting
+                for key, setting in dict(campaign.settings or {}).items()
+                if key not in {"edition", "locale"}
+            }
 
         branch = resolve_branch(session, campaign)
         session.execute(
@@ -781,6 +852,11 @@ class SnapshotService:
             session.add(Character(campaign_id=campaign.id, **item))
 
         session.execute(delete(SceneProgress).where(SceneProgress.campaign_id == campaign.id))
+        SnapshotService._restore_module_activations(
+            session,
+            campaign_id=campaign.id,
+            payload=payload,
+        )
         for item in payload.get("scene_progress", []):
             item.setdefault("scope_id", "party")
             item.setdefault("current_location_key", None)
@@ -881,7 +957,7 @@ class SnapshotService:
     @classmethod
     def _assert_integrity(cls, session, row: CampaignSnapshot) -> None:
         """Verify the full payload, DAG ancestry, and indexed continuity bindings."""
-        if row.schema_version not in {3, cls.SCHEMA_VERSION}:
+        if row.schema_version not in {3, 4, cls.SCHEMA_VERSION}:
             raise SnapshotIntegrityError(
                 "snapshot schema is unsupported; create a new snapshot with the current runtime"
             )
@@ -901,6 +977,26 @@ class SnapshotService:
         }
         if not required.issubset(payload):
             raise SnapshotIntegrityError("snapshot payload is incomplete")
+        if row.schema_version >= 5:
+            active_module_ids = payload.get("module_activations")
+            if (
+                not isinstance(active_module_ids, list)
+                or any(not isinstance(item, str) or not item for item in active_module_ids)
+                or len(active_module_ids) != len(set(active_module_ids))
+            ):
+                raise SnapshotIntegrityError("snapshot module activations are malformed")
+            available_module_ids = set(
+                session.scalars(
+                    select(ModuleSource.id).where(
+                        ModuleSource.campaign_id == row.campaign_id,
+                        ModuleSource.id.in_(active_module_ids or [""]),
+                    )
+                )
+            )
+            if available_module_ids != set(active_module_ids):
+                raise SnapshotIntegrityError(
+                    "snapshot module activation references an unavailable revision"
+                )
 
         visited = {row.id}
         parent_id = row.parent_id
@@ -1067,30 +1163,6 @@ class SnapshotService:
             result[item_id] = revision_id
         return result
 
-    @staticmethod
-    def _refresh_head_flags(session, campaign_id: str) -> None:
-        """Keep the legacy flag aligned with the authoritative branch refs."""
-        session.flush()
-        head_ids = set(
-            session.scalars(
-                select(CampaignBranch.head_snapshot_id).where(
-                    CampaignBranch.campaign_id == campaign_id,
-                    CampaignBranch.head_snapshot_id.is_not(None),
-                )
-            )
-        )
-        session.execute(
-            update(CampaignSnapshot)
-            .where(CampaignSnapshot.campaign_id == campaign_id)
-            .values(is_head=False)
-        )
-        if head_ids:
-            session.execute(
-                update(CampaignSnapshot)
-                .where(CampaignSnapshot.id.in_(head_ids))
-                .values(is_head=True)
-            )
-
     @classmethod
     def _assert_clean_branch(cls, session, campaign: Campaign, branch: CampaignBranch) -> None:
         if branch.head_snapshot_id is None:
@@ -1101,6 +1173,10 @@ class SnapshotService:
         cls._assert_integrity(session, head)
         current = cls._capture(session, campaign, branch.id)
         expected = dict(head.payload)
+        if head.schema_version < 5:
+            # Older snapshots did not capture the active module-revision set.
+            # Do not mistake the new derived field for unsaved branch work.
+            current.pop("module_activations", None)
         # Campaign revision is a live optimistic-concurrency token. Checkout
         # advances it monotonically, so it is not part of worktree dirtiness.
         current_campaign = dict(current.get("campaign") or {})
@@ -1111,6 +1187,70 @@ class SnapshotService:
             raise ValueError(
                 "checked-out branch has unsaved changes; create a snapshot before switching"
             )
+
+    @staticmethod
+    def _restore_module_activations(
+        session,
+        *,
+        campaign_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """Restore the active module revisions that own playable scene progress."""
+
+        explicit_ids = payload.get("module_activations")
+        if explicit_ids is not None:
+            selected_ids = {str(item) for item in explicit_ids}
+            rows = list(
+                session.scalars(
+                    select(ModuleSource).where(ModuleSource.campaign_id == campaign_id)
+                )
+            )
+            available_ids = {row.id for row in rows}
+            if not selected_ids.issubset(available_ids):
+                raise SnapshotIntegrityError(
+                    "snapshot module activation references an unavailable revision"
+                )
+            for row in rows:
+                row.active = row.id in selected_ids
+            return
+
+        # Compatibility for schema 3/4 snapshots: their current scene rows are
+        # the only evidence of the module revisions that were playable. Restore
+        # those logical keys without disturbing unrelated active modules.
+        current_scene_ids = {
+            str(item.get("scene_id") or "")
+            for item in payload.get("scene_progress", [])
+            if item.get("status") == "current" and item.get("scene_id")
+        }
+        if not current_scene_ids:
+            return
+        referenced_modules = list(
+            session.scalars(
+                select(ModuleSource)
+                .join(ModuleScene, ModuleScene.module_id == ModuleSource.id)
+                .where(
+                    ModuleSource.campaign_id == campaign_id,
+                    ModuleScene.id.in_(current_scene_ids),
+                )
+            )
+        )
+        referenced_by_key = {
+            str(
+                dict(row.metadata_json or {}).get("logical_source_key")
+                or row.source_key
+            ): row
+            for row in referenced_modules
+        }
+        for row in session.scalars(
+            select(ModuleSource).where(ModuleSource.campaign_id == campaign_id)
+        ):
+            logical_key = str(
+                dict(row.metadata_json or {}).get("logical_source_key")
+                or row.source_key
+            )
+            selected = referenced_by_key.get(logical_key)
+            if selected is not None:
+                row.active = row.id == selected.id
 
     @staticmethod
     def _visible_events(session, campaign_id: str, branch_id: str) -> list[CampaignEvent]:

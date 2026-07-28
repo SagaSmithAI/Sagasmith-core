@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import select
 
 from sagasmith_core.database import Database
 from sagasmith_core.documents import (
@@ -20,6 +20,7 @@ from sagasmith_core.documents import (
     strip_page_markers,
 )
 from sagasmith_core.embeddings import Embedder
+from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
 from sagasmith_core.models import RuleChunk, RuleSection, RuleSource, VectorIndexJob
 from sagasmith_core.parsing import MarkdownHierarchyParser
 from sagasmith_core.retrieval import (
@@ -31,6 +32,7 @@ from sagasmith_core.retrieval import (
     structured_score,
 )
 from sagasmith_core.vector import VectorStore
+from sagasmith_core.vector_jobs import VectorIndexJobService
 
 
 @dataclass(frozen=True)
@@ -64,9 +66,15 @@ class RuleService:
         embedder: Embedder | None = None,
         vector_store: VectorStore | None = None,
         normalized_document: NormalizedDocument | None = None,
+        idempotency_campaign_id: str | None = None,
+        idempotency_key: str | None = None,
+        idempotency_write: IdempotencyWrite | None = None,
     ) -> RuleIngestResult:
         checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        source_metadata = dict(metadata or {})
+        source_metadata = {
+            **dict(metadata or {}),
+            "logical_source_key": source_key,
+        }
         if normalized_document is not None:
             source_metadata = {
                 **source_metadata,
@@ -77,7 +85,17 @@ class RuleService:
                 "warnings": list(normalized_document.warnings),
                 **normalized_document.metadata,
             }
+        source_metadata["logical_source_key"] = source_key
+        # Activation is authoritative relational state, not caller-controlled
+        # source metadata.  Strip the former compatibility shadow.
+        source_metadata.pop("import_state", None)
         with self.database.transaction() as session:
+            idempotency = IdempotencyService(self.database)
+            idempotency.require_uncommitted_in_session(
+                session,
+                idempotency_key,
+                idempotency_write,
+            )
             existing = session.scalar(
                 select(RuleSource).where(
                     RuleSource.system_id == system_id,
@@ -92,13 +110,41 @@ class RuleService:
                 existing.publication_id = publication_id
                 existing.authority = authority
                 existing.canonical_source_id = canonical_source_id
+                existing.active = True
                 existing.metadata_json = source_metadata
                 session.flush()
                 chunk_count = session.query(RuleChunk).filter_by(source_id=existing.id).count()
                 section_count = session.query(RuleSection).filter_by(source_id=existing.id).count()
-                return RuleIngestResult(existing.id, True, section_count, chunk_count, 0)
+                result = RuleIngestResult(
+                    existing.id,
+                    True,
+                    section_count,
+                    chunk_count,
+                    0,
+                )
+                idempotency.remember_write_in_session(
+                    session,
+                    campaign_id=idempotency_campaign_id,
+                    key=idempotency_key,
+                    write=idempotency_write,
+                    result={
+                        "result": result,
+                        "source_metadata": source_metadata,
+                    },
+                )
+                return result
             if existing:
-                session.execute(delete(RuleSource).where(RuleSource.id == existing.id))
+                existing.active = False
+                existing.source_key = self._retired_source_key(
+                    session,
+                    system_id,
+                    source_key,
+                    existing.checksum,
+                )
+                existing.metadata_json = {
+                    **dict(existing.metadata_json or {}),
+                    "logical_source_key": source_key,
+                }
                 session.flush()
 
             parsed = (parser or MarkdownHierarchyParser()).parse(content)
@@ -117,6 +163,7 @@ class RuleService:
                     authority=authority,
                     canonical_source_id=canonical_source_id,
                     checksum=checksum,
+                    active=True,
                     metadata_json=source_metadata,
                 )
             )
@@ -124,11 +171,6 @@ class RuleService:
             section_ids: dict[tuple[str, ...], str] = {}
             embedding_count = 0
             chunk_count = 0
-            vector_ids: list[str] = []
-            vector_values: list[list[float]] = []
-            vector_metadata: list[dict[str, Any]] = []
-            vector_documents: list[str] = []
-            vector_job_ids: list[str] = []
             for section in parsed:
                 section_id = str(uuid.uuid4())
                 parent_id = section_ids.get(section.path[:-1])
@@ -182,20 +224,14 @@ class RuleService:
                     embedding_count += int(vector is not None)
                     if vector is not None:
                         job_id = str(uuid.uuid4())
-                        vector_job_ids.append(job_id)
-                        vector_ids.append(chunk_id)
-                        vector_values.append(vector)
-                        vector_metadata.append(
-                            {
-                                "system_id": system_id,
-                                "edition": edition,
-                                "locale": locale,
-                                "publication_id": publication_id,
-                                "source_id": source_id,
-                                "section_id": section_id,
-                            }
-                        )
-                        vector_documents.append(chunk_text)
+                        vector_metadata = {
+                            "system_id": system_id,
+                            "edition": edition,
+                            "locale": locale,
+                            "publication_id": publication_id,
+                            "source_id": source_id,
+                            "section_id": section_id,
+                        }
                         session.add(
                             VectorIndexJob(
                                 id=job_id,
@@ -205,39 +241,29 @@ class RuleService:
                                 entity_id=chunk_id,
                                 payload={
                                     "document": chunk_text,
-                                    "metadata": vector_metadata[-1],
+                                    "metadata": vector_metadata,
                                     "embedding_model": embedder.model_name,
                                 },
                             )
                         )
-            if vector_store and vector_values:
-                try:
-                    vector_store.upsert(
-                        "rules",
-                        ids=vector_ids,
-                        embeddings=vector_values,
-                        metadatas=vector_metadata,
-                        documents=vector_documents,
-                        profile=getattr(embedder, "profile", None),
-                    )
-                except Exception as exc:
-                    for job_id in vector_job_ids:
-                        job = session.get(VectorIndexJob, job_id)
-                        job.status = "failed"
-                        job.attempts = 1
-                        job.error = str(exc)
-                else:
-                    for job_id in vector_job_ids:
-                        job = session.get(VectorIndexJob, job_id)
-                        job.status = "completed"
-                        job.attempts = 1
-            return RuleIngestResult(
+            result = RuleIngestResult(
                 source_id,
                 False,
                 len(parsed),
                 chunk_count,
                 embedding_count,
             )
+            idempotency.remember_write_in_session(
+                session,
+                campaign_id=idempotency_campaign_id,
+                key=idempotency_key,
+                write=idempotency_write,
+                result={
+                    "result": result,
+                    "source_metadata": source_metadata,
+                },
+            )
+            return result
 
     def ingest_path(
         self,
@@ -259,6 +285,9 @@ class RuleService:
         ocr_provider: OcrProvider | None = None,
         document_cache_dir: str | Path | None = None,
         expected_checksum: str | None = None,
+        idempotency_campaign_id: str | None = None,
+        idempotency_key: str | None = None,
+        idempotency_write: IdempotencyWrite | None = None,
     ) -> RuleIngestResult:
         """Normalize and ingest a rule document through the shared document pipeline."""
         source_path = Path(path).expanduser().resolve()
@@ -284,6 +313,9 @@ class RuleService:
             embedder=embedder,
             vector_store=vector_store,
             normalized_document=document,
+            idempotency_campaign_id=idempotency_campaign_id,
+            idempotency_key=idempotency_key,
+            idempotency_write=idempotency_write,
         )
 
     def inspect_path(
@@ -350,6 +382,8 @@ class RuleService:
                 .join(RuleSource, RuleSource.id == RuleChunk.source_id)
                 .where(RuleSource.system_id == system_id)
             )
+            if not source_ids:
+                statement = statement.where(RuleSource.active.is_(True))
             if edition is not None:
                 statement = statement.where(RuleSource.edition == edition)
             if locale is not None:
@@ -424,6 +458,12 @@ class RuleService:
         if embedder:
             query_vector = embedder.encode([query])[0]
             if vector_store and vector_store.enabled:
+                VectorIndexJobService(self.database).flush(
+                    vector_store,
+                    system_id=system_id,
+                    collection="rules",
+                    profile=getattr(embedder, "profile", None),
+                )
                 filters: list[dict[str, Any]] = [{"system_id": system_id}]
                 if edition is not None:
                     filters.append({"edition": edition})
@@ -473,7 +513,7 @@ class RuleService:
                     heading_path=tuple(row.RuleChunk.heading_path),
                     retrieval=retrieval,
                     metadata={
-                        "source_key": row.RuleSource.source_key,
+                        "source_key": self._logical_source_key(row.RuleSource),
                         "version": row.RuleSource.version,
                         "locale": row.RuleSource.locale,
                         "edition": row.RuleSource.edition,
@@ -512,7 +552,8 @@ class RuleService:
                 },
                 "source": {
                     "id": row.RuleSource.id,
-                    "key": row.RuleSource.source_key,
+                    "key": self._logical_source_key(row.RuleSource),
+                    "storage_key": row.RuleSource.source_key,
                     "title": row.RuleSource.title,
                     "version": row.RuleSource.version,
                     "locale": row.RuleSource.locale,
@@ -533,7 +574,8 @@ class RuleService:
             return {
                 "id": row.id,
                 "system_id": row.system_id,
-                "source_key": row.source_key,
+                "source_key": self._logical_source_key(row),
+                "storage_key": row.source_key,
                 "title": row.title,
                 "edition": row.edition,
                 "locale": row.locale,
@@ -541,6 +583,7 @@ class RuleService:
                 "publication_id": row.publication_id,
                 "authority": row.authority,
                 "checksum": row.checksum,
+                "active": row.active,
                 "metadata": dict(row.metadata_json or {}),
             }
 
@@ -582,9 +625,9 @@ class RuleService:
             metadata = dict(row.RuleChunk.metadata_json or {})
             source_metadata = dict(row.RuleSource.metadata_json or {})
             return {
-                "source": f"rule-source:{row.RuleSource.source_key}",
+                "source": f"rule-source:{self._logical_source_key(row.RuleSource)}",
                 "source_id": row.RuleSource.id,
-                "source_key": row.RuleSource.source_key,
+                "source_key": self._logical_source_key(row.RuleSource),
                 "source_checksum": source_metadata.get("source_checksum", row.RuleSource.checksum),
                 "chunk_id": row.RuleChunk.id,
                 "heading_path": list(row.RuleChunk.heading_path),
@@ -597,8 +640,11 @@ class RuleService:
         *,
         system_id: str,
         edition: str | None = None,
+        include_retired: bool = False,
     ) -> list[dict[str, Any]]:
         statement = select(RuleSource).where(RuleSource.system_id == system_id)
+        if not include_retired:
+            statement = statement.where(RuleSource.active.is_(True))
         if edition is not None:
             statement = statement.where(RuleSource.edition == edition)
         statement = statement.order_by(RuleSource.edition, RuleSource.locale, RuleSource.title)
@@ -606,7 +652,8 @@ class RuleService:
             return [
                 {
                     "id": row.id,
-                    "source_key": row.source_key,
+                    "source_key": self._logical_source_key(row),
+                    "storage_key": row.source_key,
                     "title": row.title,
                     "edition": row.edition,
                     "locale": row.locale,
@@ -615,7 +662,37 @@ class RuleService:
                     "authority": row.authority,
                     "canonical_source_id": row.canonical_source_id,
                     "checksum": row.checksum,
+                    "active": row.active,
                     "metadata": dict(row.metadata_json or {}),
                 }
                 for row in session.scalars(statement)
             ]
+
+    @staticmethod
+    def _logical_source_key(row: RuleSource) -> str:
+        return str(
+            dict(row.metadata_json or {}).get("logical_source_key")
+            or row.source_key
+        )
+
+    @staticmethod
+    def _retired_source_key(
+        session: Any,
+        system_id: str,
+        source_key: str,
+        checksum: str,
+    ) -> str:
+        """Return one unique storage key for an immutable retired rule revision."""
+
+        stem = f"{source_key[:180]}@{checksum[:12]}"
+        candidate = stem
+        suffix = 2
+        while session.scalar(
+            select(RuleSource.id).where(
+                RuleSource.system_id == system_id,
+                RuleSource.source_key == candidate,
+            )
+        ):
+            candidate = f"{stem[: 200 - len(str(suffix)) - 1]}-{suffix}"
+            suffix += 1
+        return candidate

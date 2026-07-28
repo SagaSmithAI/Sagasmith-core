@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 
 from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.database import Database
+from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
 from sagasmith_core.models import (
     AuditLog,
     Campaign,
@@ -179,11 +180,21 @@ class RevisionService:
         session.flush()
         return [self._info(row) for row in rows]
 
-    def undo(self, campaign_id: str) -> RevisionInfo:
+    def undo(
+        self,
+        campaign_id: str,
+        *,
+        idempotency_key: str | None = None,
+        idempotency_write: IdempotencyWrite | None = None,
+    ) -> RevisionInfo:
         with self.database.transaction() as session:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
+            idempotency = IdempotencyService(self.database)
+            idempotency.require_uncommitted_in_session(
+                session, idempotency_key, idempotency_write
+            )
             row = session.scalar(
                 select(StateRevision)
                 .join(MutationGroup, MutationGroup.id == StateRevision.mutation_group_id)
@@ -211,13 +222,31 @@ class RevisionService:
                 if group is not None:
                     group.applied = False
             session.flush()
-            return self._info(row)
+            result = self._info(row)
+            idempotency.remember_write_in_session(
+                session,
+                campaign_id=campaign_id,
+                key=idempotency_key,
+                write=idempotency_write,
+                result=result,
+            )
+            return result
 
-    def redo(self, campaign_id: str) -> RevisionInfo:
+    def redo(
+        self,
+        campaign_id: str,
+        *,
+        idempotency_key: str | None = None,
+        idempotency_write: IdempotencyWrite | None = None,
+    ) -> RevisionInfo:
         with self.database.transaction() as session:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
+            idempotency = IdempotencyService(self.database)
+            idempotency.require_uncommitted_in_session(
+                session, idempotency_key, idempotency_write
+            )
             branch_id = campaign.active_branch_id
             current = session.scalar(
                 select(StateRevision)
@@ -259,7 +288,15 @@ class RevisionService:
             group.applied = True
             row = rows[-1]
             session.flush()
-            return self._info(row)
+            result = self._info(row)
+            idempotency.remember_write_in_session(
+                session,
+                campaign_id=campaign_id,
+                key=idempotency_key,
+                write=idempotency_write,
+                result=result,
+            )
+            return result
 
     def history(self, campaign_id: str, *, limit: int = 100) -> list[RevisionInfo]:
         with self.database.transaction() as session:
