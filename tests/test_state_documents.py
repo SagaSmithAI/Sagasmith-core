@@ -2162,6 +2162,9 @@ def test_state_mutation_persists_exact_replay_response_atomically(database) -> N
     }
     assert receipt.request_hash == request_hash(public_request)
     assert receipt.mutation_group_id == revisions[0].mutation_group_id
+    history = RevisionService(database).history(campaign.id)
+    assert history[0].idempotency_key == "atomic-replay"
+    assert history[0].request_hash == request_hash(public_request)
 
 
 def test_state_mutation_rolls_back_when_atomic_replay_response_cannot_be_built(

@@ -32,6 +32,8 @@ class RevisionInfo:
     applied: bool
     redoable: bool
     mutation_group_id: str | None = None
+    idempotency_key: str | None = None
+    request_hash: str | None = None
 
 
 class RevisionService:
@@ -303,8 +305,9 @@ class RevisionService:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
-            rows = session.scalars(
+            rows = session.execute(
                 select(StateRevision)
+                .add_columns(MutationGroup)
                 .join(MutationGroup, MutationGroup.id == StateRevision.mutation_group_id)
                 .where(
                     StateRevision.campaign_id == campaign_id,
@@ -313,7 +316,10 @@ class RevisionService:
                 .order_by(StateRevision.sequence.desc())
                 .limit(max(1, min(limit, 500)))
             )
-            return [self._info(row) for row in rows]
+            return [
+                self._info(revision, mutation_group=mutation_group)
+                for revision, mutation_group in rows
+            ]
 
     @staticmethod
     def _has_redo(session, campaign_id: str, branch_id: str | None) -> bool:
@@ -413,7 +419,11 @@ class RevisionService:
         )
 
     @staticmethod
-    def _info(row: StateRevision) -> RevisionInfo:
+    def _info(
+        row: StateRevision,
+        *,
+        mutation_group: MutationGroup | None = None,
+    ) -> RevisionInfo:
         return RevisionInfo(
             id=row.id,
             campaign_id=row.campaign_id,
@@ -425,4 +435,10 @@ class RevisionService:
             applied=row.applied,
             redoable=row.redoable,
             mutation_group_id=row.mutation_group_id,
+            idempotency_key=(
+                mutation_group.idempotency_key if mutation_group is not None else None
+            ),
+            request_hash=(
+                mutation_group.request_hash if mutation_group is not None else None
+            ),
         )
