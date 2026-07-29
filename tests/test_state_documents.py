@@ -2075,6 +2075,82 @@ def test_state_mutation_atomically_transfers_complete_actor_knowledge(database) 
     }
 
 
+def test_state_mutation_transfers_only_explicit_actor_knowledge_ids(database) -> None:
+    campaign = CampaignService(database).create(
+        system_id="dnd5e",
+        name="Bounded knowledge transfer",
+        state={"phase": "before"},
+    )
+    characters = CharacterService(database)
+    source = characters.create(
+        system_id="dnd5e",
+        campaign_id=campaign.id,
+        name="Source",
+        sheet={},
+        notes={},
+    )
+    destination = characters.create(
+        system_id="dnd5e",
+        campaign_id=campaign.id,
+        name="Destination",
+        sheet={},
+        notes={},
+    )
+    knowledge = ActorKnowledgeService(database)
+    shared = knowledge.add(
+        campaign.id,
+        actor_id=source.id,
+        knowledge_key="shared-clue",
+        proposition="The red seal opens the public archive.",
+    )
+    private = knowledge.add(
+        campaign.id,
+        actor_id=source.id,
+        knowledge_key="private-clue",
+        proposition="The source secretly betrayed the archivist.",
+    )
+
+    StateMutationService(database).replace(
+        campaign.id,
+        campaign_state={"phase": "shared"},
+        actor_knowledge_transfers=[
+            ActorKnowledgeTransfer(
+                source_actor_id=source.id,
+                destination_actor_id=destination.id,
+                knowledge_key_prefix="told",
+                knowledge_ids=(shared.id,),
+                cause="told_by",
+            )
+        ],
+        expected_campaign_revision=campaign.revision,
+        operation="knowledge.transfer.selected",
+        idempotency_key="knowledge-transfer-selected",
+    )
+
+    copied = knowledge.list(campaign.id, actor_id=destination.id)
+    assert [item.proposition for item in copied] == [shared.proposition]
+    assert private.proposition not in {item.proposition for item in copied}
+
+    current = CampaignService(database).get(campaign.id)
+    with pytest.raises(ValueError, match="current active knowledge"):
+        StateMutationService(database).replace(
+            campaign.id,
+            campaign_state={"phase": "invalid"},
+            actor_knowledge_transfers=[
+                ActorKnowledgeTransfer(
+                    source_actor_id=source.id,
+                    destination_actor_id=destination.id,
+                    knowledge_key_prefix="invalid",
+                    knowledge_ids=("not-owned",),
+                )
+            ],
+            expected_campaign_revision=current.revision,
+            operation="knowledge.transfer.invalid",
+            idempotency_key="knowledge-transfer-invalid",
+        )
+    assert CampaignService(database).get(campaign.id).state == {"phase": "shared"}
+
+
 def test_state_mutation_exposes_committed_idempotency_recovery_without_a_receipt(database) -> None:
     campaign = CampaignService(database).create(system_id="dnd5e", name="Receipt recovery")
     public_request = {

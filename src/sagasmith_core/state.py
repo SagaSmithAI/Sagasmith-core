@@ -44,11 +44,12 @@ class CharacterStateUpdate:
 
 @dataclass(frozen=True)
 class ActorKnowledgeTransfer:
-    """Copy one actor's complete current subjective knowledge to another actor."""
+    """Copy selected or complete current subjective knowledge to another actor."""
 
     source_actor_id: str
     destination_actor_id: str
     knowledge_key_prefix: str
+    knowledge_ids: tuple[str, ...] = ()
     cause: str = "body_thief"
     disclosure_scope: str = "dm"
 
@@ -185,6 +186,14 @@ class StateMutationService:
                     raise ValueError(
                         "actor knowledge transfer requires distinct actors and a key prefix"
                     )
+                if (
+                    any(not str(item).strip() for item in transfer.knowledge_ids)
+                    or len(transfer.knowledge_ids)
+                    != len(set(transfer.knowledge_ids))
+                ):
+                    raise ValueError(
+                        "actor knowledge transfer ids must be non-empty and unique"
+                    )
                 for actor_id in (
                     transfer.source_actor_id,
                     transfer.destination_actor_id,
@@ -199,9 +208,8 @@ class StateMutationService:
 
             knowledge_service = ActorKnowledgeService(self.database)
             for transfer in knowledge_transfers:
-                source_rows = list(
-                    session.execute(
-                        select(ActorKnowledge, ActorKnowledgeRevision)
+                statement = (
+                    select(ActorKnowledge, ActorKnowledgeRevision)
                         .join(
                             BranchActorKnowledgeHead,
                             BranchActorKnowledgeHead.knowledge_id
@@ -220,8 +228,20 @@ class StateMutationService:
                             ),
                         )
                         .order_by(ActorKnowledge.knowledge_key)
-                    )
                 )
+                if transfer.knowledge_ids:
+                    statement = statement.where(
+                        ActorKnowledge.id.in_(transfer.knowledge_ids)
+                    )
+                source_rows = list(session.execute(statement))
+                if transfer.knowledge_ids and {
+                    source_knowledge.id
+                    for source_knowledge, _source_revision in source_rows
+                } != set(transfer.knowledge_ids):
+                    raise ValueError(
+                        "actor knowledge transfer ids must identify current active "
+                        "knowledge owned by the source actor"
+                    )
                 for source_knowledge, source_revision in source_rows:
                     knowledge_service._add_in_session(
                         session,
