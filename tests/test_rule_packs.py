@@ -249,6 +249,56 @@ def test_rule_pack_rejects_undeclared_events_and_unknown_artifact_refs(database)
     assert any("not declared" in item for item in missing_capability.validation_report["errors"])
 
 
+def test_rule_pack_distinguishes_native_and_artifact_embedded_mechanics(
+    database,
+) -> None:
+    packs = RulePackService(database)
+    manifest = {
+        **_pack("dnd5e.extension.contracts"),
+        "native_mechanic_refs": [
+            "dnd5e.core.spell.structured_resolution"
+        ],
+    }
+    draft = packs.save_draft(
+        manifest=manifest,
+        artifacts=[
+            {
+                "id": "dnd5e.extension.contracts.spell.spark",
+                "kind": "spell",
+                "card": {"name": "Spark"},
+                "mechanic_refs": [
+                    "dnd5e.core.spell.structured_resolution",
+                    "dnd5e.extension.contracts.plan.spark",
+                ],
+                "embedded_mechanic_refs": [
+                    "dnd5e.extension.contracts.plan.spark"
+                ],
+            }
+        ],
+    )
+
+    assert draft.status == "validated"
+
+    undeclared = packs.save_draft(
+        manifest=_pack("dnd5e.extension.undeclared"),
+        artifacts=[
+            {
+                "id": "dnd5e.extension.undeclared.spell.spark",
+                "kind": "spell",
+                "card": {"name": "Spark"},
+                "mechanic_refs": [
+                    "dnd5e.core.spell.structured_resolution"
+                ],
+            }
+        ],
+    )
+    assert undeclared.status == "rejected"
+    assert any(
+        "mechanic_refs are unknown" in error
+        for error in undeclared.validation_report["errors"]
+    )
+
+
 def test_effective_ruleset_rechecks_edition_after_profile_change(database) -> None:
     campaign = CampaignService(database).create(system_id="dnd5e", name="Edition lock")
     RuleProfileService(database).set(campaign.id, edition="2014")

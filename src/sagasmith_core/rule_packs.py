@@ -25,6 +25,9 @@ from sagasmith_core.models import (
 
 PACK_ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)+$")
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
+MECHANIC_REF_RE = re.compile(
+    r"^[a-z][a-z0-9]*(?:[._:-][a-z0-9]+)+$"
+)
 
 
 class RulePackError(ValueError):
@@ -458,9 +461,31 @@ class RulePackService:
             errors.append("manifest.namespace must equal manifest.id")
         if not isinstance(manifest.get("editions", []), list):
             errors.append("manifest.editions must be a list")
-        for field in ("dependencies", "conflicts", "capabilities"):
+        for field in (
+            "dependencies",
+            "conflicts",
+            "capabilities",
+            "native_mechanic_refs",
+            "native_provider_locks",
+        ):
             if field in manifest and not isinstance(manifest[field], list):
                 errors.append(f"manifest.{field} must be a list")
+        native_mechanic_refs = {
+            str(item)
+            for item in manifest.get("native_mechanic_refs", [])
+            if isinstance(item, str)
+        }
+        if (
+            len(native_mechanic_refs)
+            != len(manifest.get("native_mechanic_refs", []))
+            or any(
+                MECHANIC_REF_RE.fullmatch(item) is None
+                for item in native_mechanic_refs
+            )
+        ):
+            errors.append(
+                "manifest.native_mechanic_refs must contain unique stable ids"
+            )
         ids: set[str] = set()
         declared_capabilities = {str(item) for item in manifest.get("capabilities", [])}
         for index, mechanic in enumerate(mechanics):
@@ -481,6 +506,7 @@ class RulePackService:
             errors.append("artifact ids must be unique")
         if any(not item.startswith(f"{pack_id}.") for item in artifact_ids):
             errors.append("artifact ids must use the pack namespace")
+        embedded_ids: set[str] = set()
         for index, artifact in enumerate(artifacts):
             if not str(artifact.get("kind") or "").strip():
                 errors.append(f"artifacts[{index}].kind is required")
@@ -496,7 +522,47 @@ class RulePackService:
             if not isinstance(refs, list):
                 errors.append(f"artifacts[{index}].mechanic_refs must be a list")
                 refs = []
-            unknown_refs = sorted({str(item) for item in refs if str(item) not in ids})
+            embedded = artifact.get("embedded_mechanic_refs", [])
+            if not isinstance(embedded, list):
+                errors.append(
+                    f"artifacts[{index}].embedded_mechanic_refs must be a list"
+                )
+                embedded = []
+            normalized_embedded = [str(item) for item in embedded]
+            if (
+                len(normalized_embedded) != len(set(normalized_embedded))
+                or any(
+                    MECHANIC_REF_RE.fullmatch(item) is None
+                    or not item.startswith(f"{pack_id}.")
+                    for item in normalized_embedded
+                )
+            ):
+                errors.append(
+                    f"artifacts[{index}].embedded_mechanic_refs must contain "
+                    "unique ids in the pack namespace"
+                )
+            duplicate_embedded = sorted(
+                set(normalized_embedded) & embedded_ids
+            )
+            if duplicate_embedded:
+                errors.append(
+                    "embedded mechanic ids must be unique across artifacts: "
+                    + ", ".join(duplicate_embedded)
+                )
+            embedded_ids.update(normalized_embedded)
+            missing_embedded_refs = sorted(
+                set(normalized_embedded) - {str(item) for item in refs}
+            )
+            if missing_embedded_refs:
+                errors.append(
+                    f"artifacts[{index}].embedded_mechanic_refs are not present "
+                    "in mechanic_refs: "
+                    + ", ".join(missing_embedded_refs)
+                )
+            known_refs = ids | native_mechanic_refs | set(normalized_embedded)
+            unknown_refs = sorted(
+                {str(item) for item in refs if str(item) not in known_refs}
+            )
             if unknown_refs:
                 errors.append(
                     f"artifacts[{index}].mechanic_refs are unknown: {', '.join(unknown_refs)}"
