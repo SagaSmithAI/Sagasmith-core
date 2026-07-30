@@ -9,6 +9,13 @@ from typing import Any
 from sqlalchemy import select
 
 from sagasmith_core.branches import BranchService
+from sagasmith_core.context_anchors import (
+    CONTEXT_ANCHOR_KIND,
+    MAX_PINNED_MODULE_EVIDENCE_CHARS,
+    normalize_context_anchor_metadata,
+    normalize_context_entity_ref,
+    resolve_context_source_binding,
+)
 from sagasmith_core.database import Database
 from sagasmith_core.events import EventService
 from sagasmith_core.knowledge import (
@@ -56,6 +63,7 @@ class ContinuityService:
         audience: str = "dm",
         limit: int = 8,
         budget_chars: int = 12_000,
+        related_refs: list[str] | None = None,
     ) -> dict[str, Any]:
         if audience not in CONTINUITY_AUDIENCES:
             raise ValueError("audience must be 'dm' or 'player'")
@@ -64,7 +72,21 @@ class ContinuityService:
             if branch_id is None
             else self.branches.get(campaign_id, branch_id)
         )
-        facts = self.facts.search(campaign_id, query or " ", limit=limit, branch_id=branch.id)
+        anchors = self.facts.list(
+            campaign_id,
+            kind=CONTEXT_ANCHOR_KIND,
+            branch_id=branch.id,
+        )
+        facts = [
+            item
+            for item in self.facts.search(
+                campaign_id,
+                query or " ",
+                limit=limit + len(anchors),
+                branch_id=branch.id,
+            )
+            if item.kind != CONTEXT_ANCHOR_KIND
+        ][:limit]
         events = self.events.list_for_audience(
             campaign_id,
             audience=audience,
@@ -97,6 +119,20 @@ class ContinuityService:
             scoped_state = self.modules.current_scene(campaign_id, scope_id=scope_id)
         else:
             scoped_state = self._snapshot_scope(branch.head_snapshot_id, scope_id)
+        active_refs = self._active_context_refs(
+            actor_id=actor_id,
+            scoped_state=scoped_state,
+            related_refs=related_refs,
+        )
+        module_evidence = (
+            self._module_evidence(
+                campaign_id,
+                anchors=anchors,
+                active_refs=active_refs,
+            )
+            if audience == "dm"
+            else []
+        )
         fact_values = [asdict(item) for item in facts]
         event_values = [asdict(item) for item in events]
         knowledge_values = [asdict(item) for item in knowledge]
@@ -106,13 +142,29 @@ class ContinuityService:
             events=event_values,
             knowledge=knowledge_values,
             budget_chars=budget_chars,
+            reserved_chars=(
+                len(
+                    json.dumps(
+                        module_evidence,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                )
+                if module_evidence
+                else 0
+            ),
         )
+        if module_evidence:
+            retrieval["strategy"] = "lexical_structured_pinned_module_evidence_v3"
+        retrieval["active_context_refs"] = sorted(active_refs)
+        retrieval["pinned_module_evidence_count"] = len(module_evidence)
         return {
             "campaign_id": campaign_id,
             "branch": asdict(branch),
             "facts": selected["facts"],
             "events": selected["events"],
             "actor_knowledge": selected["actor_knowledge"],
+            "module_evidence": module_evidence,
             "scoped_scene": scoped_state,
             "retrieval": retrieval,
         }
@@ -231,8 +283,16 @@ class ContinuityService:
         events: list[dict[str, Any]],
         knowledge: list[dict[str, Any]],
         budget_chars: int,
+        reserved_chars: int = 0,
     ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, Any]]:
         budget = max(1_000, min(int(budget_chars), 100_000))
+        reserved = max(0, int(reserved_chars))
+        if reserved > MAX_PINNED_MODULE_EVIDENCE_CHARS:
+            raise ValueError(
+                "pinned module evidence exceeds the context safety cap; "
+                "narrow related_refs"
+            )
+        available = max(0, budget - reserved)
         candidates: list[tuple[float, str, int, dict[str, Any]]] = []
         for index, item in enumerate(facts):
             score = lexical_score(
@@ -271,7 +331,7 @@ class ContinuityService:
         used = 0
         for _score, ledger, _index, item in candidates:
             size = len(json.dumps(item, ensure_ascii=False, separators=(",", ":")))
-            if used and used + size > budget:
+            if used + size > available:
                 continue
             selected[ledger].append(item)
             used += size
@@ -283,11 +343,106 @@ class ContinuityService:
             "strategy": "lexical_structured_shared_budget_v2",
             "query": query,
             "budget_chars": budget,
-            "used_chars": used,
+            "used_chars": used + reserved,
+            "structured_ledger_chars": used,
+            "pinned_module_evidence_chars": reserved,
+            "pinned_budget_overflow": reserved > budget,
             "candidate_count": len(candidates),
             "returned_count": returned,
             "truncated": returned < len(candidates),
         }
+
+    @staticmethod
+    def _active_context_refs(
+        *,
+        actor_id: str | None,
+        scoped_state: dict[str, Any] | None,
+        related_refs: list[str] | None,
+    ) -> set[str]:
+        active = {
+            normalize_context_entity_ref(item, field="related_refs[]")
+            for item in list(related_refs or [])
+        }
+        if actor_id:
+            active.add(
+                normalize_context_entity_ref(
+                    f"actor:{actor_id}",
+                    field="actor_id",
+                )
+            )
+        if isinstance(scoped_state, dict):
+            scene_id = str(
+                scoped_state.get("scene_id")
+                or scoped_state.get("id")
+                or ""
+            ).strip()
+            module_id = str(scoped_state.get("module_id") or "").strip()
+            if scene_id:
+                active.add(f"scene:{scene_id}")
+            if module_id:
+                active.add(f"module:{module_id}")
+        return active
+
+    def _module_evidence(
+        self,
+        campaign_id: str,
+        *,
+        anchors: list[Any],
+        active_refs: set[str],
+    ) -> list[dict[str, Any]]:
+        if not active_refs:
+            return []
+        by_binding: dict[tuple[str, str], dict[str, Any]] = {}
+        for anchor in sorted(anchors, key=lambda item: (item.fact_key, item.id)):
+            metadata = normalize_context_anchor_metadata(
+                anchor.metadata,
+                subject_ref=anchor.subject_ref,
+                predicate=anchor.predicate,
+                disclosure_scope=anchor.disclosure_scope,
+            )
+            matched = sorted(active_refs & set(metadata["related_refs"]))
+            if not matched:
+                continue
+            for binding in metadata["source_bindings"]:
+                expanded = self.modules.expand(binding["source_ref"]["chunk_id"])
+                resolved = resolve_context_source_binding(
+                    binding,
+                    expanded=expanded,
+                    campaign_id=campaign_id,
+                )
+                key = (
+                    resolved["source_ref"]["chunk_id"],
+                    resolved["source_excerpt"],
+                )
+                existing = by_binding.get(key)
+                if existing is None:
+                    by_binding[key] = {
+                        "pinned": True,
+                        "context_role": "non_executable_module_evidence",
+                        "anchor_fact_keys": [anchor.fact_key],
+                        "matched_refs": matched,
+                        "source_ref": resolved["source_ref"],
+                        "source_excerpt": resolved["source_excerpt"],
+                        "module": dict(expanded.get("module") or {}),
+                        "chapter": dict(expanded.get("chapter") or {}),
+                        "scene": dict(expanded.get("scene") or {}),
+                    }
+                    continue
+                existing["anchor_fact_keys"] = sorted(
+                    {*existing["anchor_fact_keys"], anchor.fact_key}
+                )
+                existing["matched_refs"] = sorted(
+                    {*existing["matched_refs"], *matched}
+                )
+        return sorted(
+            by_binding.values(),
+            key=lambda item: (
+                item["source_ref"]["module_id"],
+                item["source_ref"]["scene_id"],
+                item["source_ref"]["chunk_id"],
+                item["source_excerpt"],
+            ),
+        )
 
     def _snapshot_scope(self, snapshot_id: str | None, scope_id: str) -> dict[str, Any] | None:
         if snapshot_id is None:

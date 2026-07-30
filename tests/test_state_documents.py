@@ -1493,6 +1493,202 @@ def test_continuity_context_applies_one_shared_budget_with_metrics(database) -> 
     assert context["retrieval"]["truncated"] is True
 
 
+def test_context_anchor_pins_exact_dm_module_evidence_without_encoding_behavior(
+    database,
+) -> None:
+    campaign = CampaignService(database).create(
+        system_id="dnd5e",
+        name="Pinned module context",
+    )
+    modules = ModuleService(database)
+    modules.ingest(
+        campaign_id=campaign.id,
+        source_key="ironslag.md",
+        title="Ironslag",
+        content=(
+            "# Forge of the Fire Giants\n"
+            "## Foundry Upper Level\n"
+            "Zaltember is a bully and coward. If wounded, he flees to area 31. "
+            "If captured, his parents first try to secure his release as a show "
+            "of good faith before yielding the conch.\n"
+        ),
+    )
+    expanded = modules.expand(
+        modules.search(
+            campaign_id=campaign.id,
+            query="Zaltember wounded captured conch",
+        )[0].id
+    )
+    source_ref = expanded["source_ref"]
+    metadata = {
+        "schema_version": 1,
+        "purpose": "Zaltember behavior and conch negotiation source",
+        "related_refs": [
+            "scene:foundry-upper-level",
+            "quest:obtain-fire-giant-conch",
+        ],
+        "source_bindings": [
+            {
+                "source_ref": source_ref,
+                "source_excerpt": (
+                    "Zaltember is a bully and coward. If wounded, he flees to area 31."
+                ),
+            }
+        ],
+    }
+    anchor = MemoryService(database).add(
+        campaign.id,
+        fact_key="context:actor:zaltember:ironslag",
+        kind="context_anchor",
+        subject="Zaltember module context",
+        subject_ref="actor:zaltember",
+        content="Exact module context for Zaltember.",
+        metadata=metadata,
+        disclosure_scope="dm",
+    )
+    MemoryService(database).add(
+        campaign.id,
+        fact_key="context:item:fire-giant-conch:ironslag",
+        kind="context_anchor",
+        subject="Fire giant conch module context",
+        subject_ref="item:fire-giant-conch",
+        content="The same exact source may support more than one entity link.",
+        metadata={
+            **metadata,
+            "purpose": "Fire giant conch negotiation source",
+        },
+        disclosure_scope="dm",
+    )
+    SnapshotService(database).create(campaign.id, label="Context anchored")
+    alternate = BranchService(database).create(
+        campaign.id,
+        name="context-restore",
+        checkout=False,
+    )
+
+    context = ContinuityService(database).context(
+        campaign.id,
+        query="unrelated query that cannot retrieve the source lexically",
+        related_refs=["actor:zaltember"],
+        budget_chars=1_000,
+    )
+    restored = ContinuityService(database).context(
+        campaign.id,
+        branch_id=alternate.id,
+        related_refs=["quest:obtain-fire-giant-conch"],
+        budget_chars=1_000,
+    )
+    player = ContinuityService(database).context(
+        campaign.id,
+        audience="player",
+        related_refs=["actor:zaltember"],
+        budget_chars=1_000,
+    )
+
+    assert anchor.metadata["related_refs"] == [
+        "actor:zaltember",
+        "scene:foundry-upper-level",
+        "quest:obtain-fire-giant-conch",
+    ]
+    assert context["facts"] == []
+    assert context["module_evidence"][0]["pinned"] is True
+    assert context["module_evidence"][0]["context_role"] == (
+        "non_executable_module_evidence"
+    )
+    assert context["module_evidence"][0]["anchor_fact_keys"] == [
+        "context:actor:zaltember:ironslag"
+    ]
+    assert "purposes" not in context["module_evidence"][0]
+    assert context["module_evidence"][0]["source_ref"] == source_ref
+    assert context["module_evidence"][0]["source_excerpt"].endswith(
+        "he flees to area 31."
+    )
+    assert context["retrieval"]["strategy"] == (
+        "lexical_structured_pinned_module_evidence_v3"
+    )
+    assert context["retrieval"]["pinned_module_evidence_count"] == 1
+    assert restored["module_evidence"][0]["source_ref"] == (
+        context["module_evidence"][0]["source_ref"]
+    )
+    assert restored["module_evidence"][0]["source_excerpt"] == (
+        context["module_evidence"][0]["source_excerpt"]
+    )
+    assert restored["module_evidence"][0]["matched_refs"] == [
+        "quest:obtain-fire-giant-conch"
+    ]
+    assert restored["module_evidence"][0]["anchor_fact_keys"] == [
+        "context:actor:zaltember:ironslag",
+        "context:item:fire-giant-conch:ironslag",
+    ]
+    assert restored["retrieval"]["pinned_module_evidence_count"] == 1
+    assert player["module_evidence"] == []
+
+
+def test_context_anchor_rejects_conditions_player_visibility_and_paraphrased_source(
+    database,
+) -> None:
+    campaign = CampaignService(database).create(
+        system_id="dnd5e",
+        name="Strict context anchors",
+    )
+    modules = ModuleService(database)
+    modules.ingest(
+        campaign_id=campaign.id,
+        source_key="strict.md",
+        title="Strict",
+        content="# Chapter\n## Scene\nThe guard retreats when wounded.\n",
+    )
+    expanded = modules.expand(
+        modules.search(campaign_id=campaign.id, query="guard retreats")[0].id
+    )
+    metadata = {
+        "schema_version": 1,
+        "purpose": "Guard behavior source",
+        "related_refs": [],
+        "source_bindings": [
+            {
+                "source_ref": expanded["source_ref"],
+                "source_excerpt": "The guard invents a different response.",
+            }
+        ],
+    }
+    with pytest.raises(ValueError, match="predicate"):
+        MemoryService(database).add(
+            campaign.id,
+            fact_key="context:guard:predicate",
+            kind="context_anchor",
+            subject_ref="actor:guard",
+            predicate="hp.value < hp.max",
+            content="Must fail.",
+            metadata=metadata,
+            disclosure_scope="dm",
+        )
+    with pytest.raises(ValueError, match="DM-only"):
+        MemoryService(database).add(
+            campaign.id,
+            fact_key="context:guard:party",
+            kind="context_anchor",
+            subject_ref="actor:guard",
+            content="Must fail.",
+            metadata=metadata,
+            disclosure_scope="party",
+        )
+    anchor = MemoryService(database).add(
+        campaign.id,
+        fact_key="context:guard:bad-excerpt",
+        kind="context_anchor",
+        subject_ref="actor:guard",
+        content="Shape is valid until its source is resolved.",
+        metadata=metadata,
+        disclosure_scope="dm",
+    )
+    with pytest.raises(ValueError, match="source_excerpt is absent"):
+        ContinuityService(database).context(
+            campaign.id,
+            related_refs=[anchor.subject_ref],
+        )
+
+
 def test_continuity_diagnostics_reports_ledger_and_snapshot_health(database) -> None:
     campaign = CampaignService(database).create(system_id="dnd5e", name="Diagnostics")
     event = EventService(database).add(

@@ -11,6 +11,10 @@ from sqlalchemy import select
 
 from sagasmith_core.branches import resolve_branch
 from sagasmith_core.campaigns import CampaignNotFoundError
+from sagasmith_core.context_anchors import (
+    CONTEXT_ANCHOR_KIND,
+    normalize_context_anchor_metadata,
+)
 from sagasmith_core.database import Database
 from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
 from sagasmith_core.models import (
@@ -453,14 +457,27 @@ class MemoryService:
         disclosure_scope: str | None,
     ) -> MemoryInfo:
         self._validate_snapshot(session, memory.campaign_id, snapshot_id)
-        self._validate_revision_fields(status, importance, disclosure_scope, metadata)
         resolved_scope = disclosure_scope or str((metadata or {}).get("disclosure_scope", "dm"))
+        resolved_metadata = dict(metadata or {})
+        if memory.kind == CONTEXT_ANCHOR_KIND:
+            resolved_metadata = normalize_context_anchor_metadata(
+                resolved_metadata,
+                subject_ref=memory.subject_ref,
+                predicate=memory.predicate,
+                disclosure_scope=resolved_scope,
+            )
+        self._validate_revision_fields(
+            status,
+            importance,
+            resolved_scope,
+            resolved_metadata,
+        )
         revision = MemoryRevision(
             id=str(uuid.uuid4()),
             memory_id=memory.id,
             snapshot_id=snapshot_id,
             content=content,
-            metadata_json=metadata or {},
+            metadata_json=resolved_metadata,
             status=status,
             valid_from=valid_from,
             valid_to=valid_to,
@@ -508,6 +525,13 @@ class MemoryService:
         resolved_importance = importance if importance is not None else current.importance
         resolved_metadata = dict(current.metadata_json) if metadata is None else dict(metadata)
         resolved_scope = disclosure_scope or current.disclosure_scope
+        if memory.kind == CONTEXT_ANCHOR_KIND:
+            resolved_metadata = normalize_context_anchor_metadata(
+                resolved_metadata,
+                subject_ref=memory.subject_ref,
+                predicate=memory.predicate,
+                disclosure_scope=resolved_scope,
+            )
         self._validate_revision_fields(
             resolved_status, resolved_importance, resolved_scope, resolved_metadata
         )
