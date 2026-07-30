@@ -39,6 +39,7 @@ class RuleProfileService:
         expected_campaign_revision: int | None = None,
         idempotency_key: str | None = None,
         idempotency_write: IdempotencyWrite | None = None,
+        active_combat_option_keys: set[str] | frozenset[str] | None = None,
     ) -> RuleProfileInfo:
         with self.database.transaction() as session:
             campaign = session.get(Campaign, campaign_id)
@@ -50,8 +51,33 @@ class RuleProfileService:
                 idempotency_key,
                 idempotency_write,
             )
+            row = session.get(CampaignRuleProfile, campaign_id)
             if dict(campaign.state or {}).get("combat", {}).get("active", False):
-                raise ValueError("rule profile cannot change during active combat")
+                mutable_option_keys = set(active_combat_option_keys or ())
+                if not mutable_option_keys:
+                    raise ValueError("rule profile cannot change during active combat")
+                if (
+                    row is None
+                    or row.edition != edition
+                    or row.locale != locale
+                    or list(row.publications or []) != list(publications or [])
+                ):
+                    raise ValueError(
+                        "active-combat rule maintenance cannot change edition, "
+                        "locale, or publications"
+                    )
+                current_options = dict(row.options or {})
+                requested_options = dict(options or {})
+                changed_option_keys = {
+                    key
+                    for key in set(current_options) | set(requested_options)
+                    if current_options.get(key) != requested_options.get(key)
+                }
+                if not changed_option_keys <= mutable_option_keys:
+                    raise ValueError(
+                        "active-combat rule maintenance changed options outside "
+                        "its explicit allowlist"
+                    )
             if (
                 expected_campaign_revision is not None
                 and campaign.revision != expected_campaign_revision
@@ -60,7 +86,6 @@ class RuleProfileService:
                     "campaign revision conflict: "
                     f"expected {expected_campaign_revision}, found {campaign.revision}"
                 )
-            row = session.get(CampaignRuleProfile, campaign_id)
             if (
                 row is not None
                 and row.edition

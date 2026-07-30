@@ -85,6 +85,62 @@ def test_rule_profile_cannot_diverge_from_an_active_combat(database) -> None:
         RuleProfileService(database).set(campaign.id, edition="2024")
 
 
+def test_rule_profile_allows_only_explicit_option_maintenance_in_combat(
+    database,
+) -> None:
+    campaigns = CampaignService(database)
+    campaign = campaigns.create(system_id="dnd5e", name="Core maintenance")
+    profiles = RuleProfileService(database)
+    profiles.set(
+        campaign.id,
+        edition="2014",
+        locale="en",
+        options={
+            "house_option": "preserved",
+            "_core_rule_pack_lock": {"fingerprint": "old"},
+        },
+    )
+    campaign = campaigns.get(campaign.id)
+    campaigns.update(
+        campaign.id,
+        state={"combat": {"active": True}},
+        expected_revision=campaign.revision,
+    )
+
+    maintained = profiles.set(
+        campaign.id,
+        edition="2014",
+        locale="en",
+        options={
+            "house_option": "preserved",
+            "_core_rule_pack_lock": {"fingerprint": "new"},
+        },
+        active_combat_option_keys={"_core_rule_pack_lock"},
+    )
+
+    assert maintained.options["house_option"] == "preserved"
+    assert maintained.options["_core_rule_pack_lock"]["fingerprint"] == "new"
+    with pytest.raises(ValueError, match="outside its explicit allowlist"):
+        profiles.set(
+            campaign.id,
+            edition="2014",
+            locale="en",
+            options={
+                "house_option": "changed",
+                "_core_rule_pack_lock": {"fingerprint": "newer"},
+            },
+            active_combat_option_keys={"_core_rule_pack_lock"},
+        )
+    with pytest.raises(ValueError, match="cannot change edition, locale, or publications"):
+        profiles.set(
+            campaign.id,
+            edition="2014",
+            locale="zh-CN",
+            options=maintained.options,
+            active_combat_option_keys={"_core_rule_pack_lock"},
+        )
+
+
 def test_rule_profile_cannot_diverge_from_existing_character_editions(database) -> None:
     campaign = CampaignService(database).create(system_id="dnd5e", name="Locked actor rules")
     profiles = RuleProfileService(database)
