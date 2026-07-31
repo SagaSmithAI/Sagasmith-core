@@ -12,6 +12,8 @@ depends_on = None
 
 
 def upgrade() -> None:
+    if sa.inspect(op.get_bind()).has_table("campaign_event_participants"):
+        return
     op.create_table(
         "campaign_event_participants",
         sa.Column("event_id", sa.String(length=36), nullable=False),
@@ -39,6 +41,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if not sa.inspect(op.get_bind()).has_table("campaign_event_participants"):
+        return
     op.drop_index(
         "ix_campaign_event_participant_actor",
         table_name="campaign_event_participants",
