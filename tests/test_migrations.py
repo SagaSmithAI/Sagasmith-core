@@ -35,6 +35,11 @@ def test_bundled_migration_builds_schema(tmp_path: Path) -> None:
         assert "event_sequence" in {
             column["name"] for column in inspector.get_columns("campaigns")
         }
+        assert "campaign_event_participants" in inspector.get_table_names()
+        assert {"event_id", "actor_id", "role"} == {
+            column["name"]
+            for column in inspector.get_columns("campaign_event_participants")
+        }
         memory_columns = {
             column["name"] for column in inspector.get_columns("campaign_memories")
         }

@@ -386,6 +386,32 @@ class CampaignEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class CampaignEventParticipant(Base):
+    """Immutable actor participation index for one campaign event.
+
+    ``actor_id`` deliberately is not a foreign key. Snapshot restore rebuilds
+    character rows in place, while historical event participants must remain
+    addressable by their stable actor ids throughout that operation.
+    """
+
+    __tablename__ = "campaign_event_participants"
+    __table_args__ = (
+        UniqueConstraint(
+            "event_id",
+            "actor_id",
+            "role",
+            name="uq_campaign_event_participant_role",
+        ),
+        Index("ix_campaign_event_participant_actor", "actor_id", "event_id"),
+    )
+
+    event_id: Mapped[str] = mapped_column(
+        ForeignKey("campaign_events.id", ondelete="CASCADE"), primary_key=True
+    )
+    actor_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    role: Mapped[str] = mapped_column(String(32), primary_key=True)
+
+
 class StateRevision(Base):
     __tablename__ = "state_revisions"
     __table_args__ = (

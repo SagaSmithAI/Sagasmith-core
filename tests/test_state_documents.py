@@ -50,6 +50,7 @@ from sagasmith_core.models import (
     AuditLog,
     Campaign,
     CampaignBranch,
+    CampaignEventParticipant,
     CampaignSnapshot,
     MutationGroup,
     SnapshotActorKnowledgeBinding,
@@ -1424,6 +1425,127 @@ def test_actor_scoped_events_follow_visible_actor_knowledge(database) -> None:
     assert [item.id for item in witness_log] == [event.id]
     assert unaware_log == []
     assert unscoped_player_log == []
+
+
+def test_actor_scoped_events_follow_explicit_participants_without_fake_knowledge(
+    database,
+) -> None:
+    campaign = CampaignService(database).create(
+        system_id="dnd5e", name="Private conversation"
+    )
+    characters = CharacterService(database)
+    speaker = characters.create(
+        system_id="dnd5e", campaign_id=campaign.id, name="Speaker", character_type="npc"
+    )
+    listener = characters.create(
+        system_id="dnd5e", campaign_id=campaign.id, name="Listener", character_type="pc"
+    )
+    outsider = characters.create(
+        system_id="dnd5e", campaign_id=campaign.id, name="Outsider", character_type="pc"
+    )
+    events = EventService(database)
+    event = events.add(
+        campaign.id,
+        event_type="npc_dialogue_turn",
+        summary="The speaker whispers an opinion that establishes no durable fact.",
+        audience_scope="actor",
+        participants=[
+            {"actor_id": speaker.id, "role": "speaker"},
+            {"actor_id": listener.id, "role": "listener"},
+        ],
+    )
+
+    assert [item.id for item in events.list_for_actor(campaign.id, actor_id=speaker.id)] == [
+        event.id
+    ]
+    assert [
+        item.id
+        for item in events.list_for_audience(
+            campaign.id,
+            audience="player",
+            actor_id=listener.id,
+        )
+    ] == [event.id]
+    assert (
+        events.list_for_audience(
+            campaign.id,
+            audience="player",
+            actor_id=outsider.id,
+        )
+        == []
+    )
+    assert ActorKnowledgeService(database).list(campaign.id, actor_id=listener.id) == []
+    assert event.participants == (
+        {"actor_id": listener.id, "role": "listener"},
+        {"actor_id": speaker.id, "role": "speaker"},
+    )
+
+
+def test_continuity_commit_snapshots_event_participants_and_detects_index_tampering(
+    database,
+) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Dialogue snapshot")
+    characters = CharacterService(database)
+    speaker = characters.create(
+        system_id="dnd5e", campaign_id=campaign.id, name="Speaker", character_type="npc"
+    )
+    listener = characters.create(
+        system_id="dnd5e", campaign_id=campaign.id, name="Listener", character_type="pc"
+    )
+    result = ContinuityCommitService(database).commit(
+        campaign.id,
+        event={
+            "event_type": "npc_dialogue_turn",
+            "summary": "A private exchange occurs.",
+            "audience_scope": "actor",
+            "participants": [
+                {"actor_id": speaker.id, "role": "speaker"},
+                {"actor_id": listener.id, "role": "listener"},
+            ],
+        },
+        snapshot={"label": "After private exchange"},
+    )
+
+    slot = result["snapshot"]["slot"]
+    assert SnapshotService(database).verify(campaign.id, slot)
+    with database.transaction() as session:
+        session.execute(
+            delete(CampaignEventParticipant).where(
+                CampaignEventParticipant.event_id == result["event"]["id"],
+                CampaignEventParticipant.actor_id == listener.id,
+            )
+        )
+    assert not SnapshotService(database).verify(campaign.id, slot)
+
+
+def test_exact_memory_subject_projection_avoids_lexical_cross_actor_leaks(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Actor state")
+    memories = MemoryService(database)
+    zaltember = memories.upsert(
+        campaign.id,
+        fact_key="actor.relationship:zaltember:party",
+        subject_ref="actor:zaltember",
+        predicate="relationship_to",
+        kind="actor_state",
+        content="Zaltember distrusts the party.",
+    )
+    memories.upsert(
+        campaign.id,
+        fact_key="actor.relationship:duke-zalto:party",
+        subject_ref="actor:duke-zalto",
+        predicate="relationship_to",
+        kind="actor_state",
+        content="Duke Zalto hates the party.",
+    )
+
+    projected = memories.list_for_subject_refs(
+        campaign.id,
+        subject_refs={"actor:zaltember"},
+        predicates={"relationship_to", "goal"},
+        kinds={"actor_state"},
+    )
+
+    assert [item.id for item in projected] == [zaltember.id]
 
 
 def test_actor_event_authorization_is_not_limited_by_knowledge_top_n(database) -> None:

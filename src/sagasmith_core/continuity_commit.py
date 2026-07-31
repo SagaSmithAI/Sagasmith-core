@@ -63,6 +63,7 @@ class ContinuityCommitService:
                 summary=self._required_text(event, "summary"),
                 payload=dict(event.get("payload") or {}),
                 audience_scope=str(event.get("audience_scope", "dm")),
+                participants=list(event.get("participants") or []),
             )
 
             fact_results = [

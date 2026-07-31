@@ -18,6 +18,7 @@ from sagasmith_core.models import (
     BranchActorKnowledgeHead,
     Campaign,
     CampaignEvent,
+    CampaignEventParticipant,
     Character,
     SnapshotEventBinding,
 )
@@ -28,6 +29,8 @@ from sagasmith_core.visibility import (
     PLAYER_EVENT_AUDIENCE_SCOPES,
     PLAYER_OWNED_ACTOR_DISCLOSURE_SCOPES,
 )
+
+EVENT_PARTICIPANT_ROLES = frozenset({"speaker", "listener", "witness", "target"})
 
 
 @dataclass(frozen=True)
@@ -40,6 +43,7 @@ class CampaignEventInfo:
     payload: dict[str, Any]
     audience_scope: str
     created_at: str
+    participants: tuple[dict[str, str], ...] = ()
 
 
 class EventService:
@@ -54,6 +58,7 @@ class EventService:
         summary: str,
         payload: dict[str, Any] | None = None,
         audience_scope: str = "dm",
+        participants: list[dict[str, str]] | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
         idempotency_write: IdempotencyWrite | None = None,
@@ -77,6 +82,7 @@ class EventService:
                 summary=summary,
                 payload=payload,
                 audience_scope=audience_scope,
+                participants=participants,
             )
             idempotency.remember_write_in_session(
                 session,
@@ -99,6 +105,7 @@ class EventService:
         payload: dict[str, Any] | None = None,
         audience_scope: str = "dm",
         disclosure_scope: str = "owner",
+        participants: list[dict[str, str]] | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
         idempotency_write: IdempotencyWrite | None = None,
@@ -162,6 +169,7 @@ class EventService:
                 summary=summary,
                 payload=payload,
                 audience_scope=audience_scope,
+                participants=participants,
             )
             event = session.get(CampaignEvent, event_info.id)
             assert event is not None
@@ -208,6 +216,7 @@ class EventService:
         summary: str,
         payload: dict[str, Any] | None,
         audience_scope: str,
+        participants: list[dict[str, str]] | None = None,
     ) -> CampaignEventInfo:
         if audience_scope not in EVENT_AUDIENCE_SCOPES:
             raise ValueError(f"invalid event audience scope: {audience_scope}")
@@ -231,7 +240,21 @@ class EventService:
         )
         session.add(row)
         session.flush()
-        return self._info(row)
+        normalized_participants = self._normalize_participants(
+            session,
+            campaign.id,
+            participants,
+        )
+        session.add_all(
+            CampaignEventParticipant(
+                event_id=row.id,
+                actor_id=item["actor_id"],
+                role=item["role"],
+            )
+            for item in normalized_participants
+        )
+        session.flush()
+        return self._info(row, normalized_participants)
 
     def list(
         self, campaign_id: str, *, limit: int = 50, branch_id: str | None = None
@@ -243,7 +266,47 @@ class EventService:
             branch = resolve_branch(session, campaign, branch_id)
             rows = self._branch_rows(session, campaign_id, branch)
             rows = rows[-max(1, min(limit, 500)) :]
-            return [self._info(row) for row in rows]
+            participants = self._participant_map(session, [row.id for row in rows])
+            return [self._info(row, participants.get(row.id, [])) for row in rows]
+
+    def list_for_actor(
+        self,
+        campaign_id: str,
+        *,
+        actor_id: str,
+        roles: set[str] | frozenset[str] | None = None,
+        limit: int = 50,
+        branch_id: str | None = None,
+    ) -> list[CampaignEventInfo]:
+        """List visible branch events explicitly indexed to one actor."""
+
+        selected_roles = set(roles or EVENT_PARTICIPANT_ROLES)
+        unknown_roles = selected_roles - EVENT_PARTICIPANT_ROLES
+        if unknown_roles:
+            raise ValueError(f"invalid event participant roles: {sorted(unknown_roles)}")
+        with self.database.transaction() as session:
+            campaign = session.get(Campaign, campaign_id)
+            if campaign is None:
+                raise CampaignNotFoundError(campaign_id)
+            actor = session.get(Character, actor_id)
+            if actor is None or actor.campaign_id != campaign_id:
+                raise LookupError(actor_id)
+            branch = resolve_branch(session, campaign, branch_id)
+            participant_event_ids = set(
+                session.scalars(
+                    select(CampaignEventParticipant.event_id).where(
+                        CampaignEventParticipant.actor_id == actor_id,
+                        CampaignEventParticipant.role.in_(selected_roles),
+                    )
+                )
+            )
+            rows = [
+                row
+                for row in self._branch_rows(session, campaign_id, branch)
+                if row.id in participant_event_ids
+            ][-max(1, min(limit, 500)) :]
+            participants = self._participant_map(session, [row.id for row in rows])
+            return [self._info(row, participants.get(row.id, [])) for row in rows]
 
     def list_for_audience(
         self,
@@ -293,6 +356,14 @@ class EventService:
                             )
                         )
                     }
+                    actor_event_ids.update(
+                        session.scalars(
+                            select(CampaignEventParticipant.event_id).where(
+                                CampaignEventParticipant.actor_id == actor_id,
+                                CampaignEventParticipant.role.in_(EVENT_PARTICIPANT_ROLES),
+                            )
+                        )
+                    )
                 rows = [
                     row
                     for row in rows
@@ -300,7 +371,8 @@ class EventService:
                     or (row.audience_scope == "actor" and row.id in actor_event_ids)
                 ]
             rows = rows[-max(1, min(limit, 500)) :]
-            return [self._info(row) for row in rows]
+            participants = self._participant_map(session, [row.id for row in rows])
+            return [self._info(row, participants.get(row.id, [])) for row in rows]
 
     @staticmethod
     def _branch_rows(session, campaign_id: str, branch) -> list[CampaignEvent]:
@@ -334,7 +406,62 @@ class EventService:
         return sorted(rows.values(), key=lambda row: (row.sequence, row.id))
 
     @staticmethod
-    def _info(row: CampaignEvent) -> CampaignEventInfo:
+    def _normalize_participants(
+        session,
+        campaign_id: str,
+        participants: list[dict[str, str]] | None,
+    ) -> list[dict[str, str]]:
+        normalized: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for index, raw in enumerate(participants or []):
+            if not isinstance(raw, dict):
+                raise ValueError(f"event participants[{index}] must be an object")
+            unknown = set(raw) - {"actor_id", "role"}
+            if unknown:
+                raise ValueError(
+                    f"event participants[{index}] has unknown fields: {sorted(unknown)}"
+                )
+            actor_id = str(raw.get("actor_id") or "").strip()
+            role = str(raw.get("role") or "").strip()
+            if not actor_id:
+                raise ValueError(f"event participants[{index}].actor_id is required")
+            if role not in EVENT_PARTICIPANT_ROLES:
+                raise ValueError(f"invalid event participant role: {role}")
+            actor = session.get(Character, actor_id)
+            if actor is None or actor.campaign_id != campaign_id:
+                raise ValueError("every event participant must be a character in this campaign")
+            key = (actor_id, role)
+            if key in seen:
+                raise ValueError("event participants must be unique by actor and role")
+            seen.add(key)
+            normalized.append({"actor_id": actor_id, "role": role})
+        return sorted(normalized, key=lambda item: (item["role"], item["actor_id"]))
+
+    @staticmethod
+    def _participant_map(session, event_ids: list[str]) -> dict[str, list[dict[str, str]]]:
+        result: dict[str, list[dict[str, str]]] = {}
+        if not event_ids:
+            return result
+        rows = session.scalars(
+            select(CampaignEventParticipant)
+            .where(CampaignEventParticipant.event_id.in_(event_ids))
+            .order_by(
+                CampaignEventParticipant.event_id,
+                CampaignEventParticipant.role,
+                CampaignEventParticipant.actor_id,
+            )
+        )
+        for row in rows:
+            result.setdefault(row.event_id, []).append(
+                {"actor_id": row.actor_id, "role": row.role}
+            )
+        return result
+
+    @staticmethod
+    def _info(
+        row: CampaignEvent,
+        participants: list[dict[str, str]] | None = None,
+    ) -> CampaignEventInfo:
         return CampaignEventInfo(
             id=row.id,
             campaign_id=row.campaign_id,
@@ -344,4 +471,5 @@ class EventService:
             payload=dict(row.payload),
             audience_scope=row.audience_scope,
             created_at=row.created_at.isoformat(),
+            participants=tuple(dict(item) for item in participants or []),
         )

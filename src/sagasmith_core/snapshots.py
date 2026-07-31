@@ -25,6 +25,7 @@ from sagasmith_core.models import (
     Campaign,
     CampaignBranch,
     CampaignEvent,
+    CampaignEventParticipant,
     CampaignMemory,
     CampaignRuleActivation,
     CampaignRuleProfile,
@@ -73,7 +74,7 @@ def _checksum(value: dict[str, Any]) -> str:
 
 
 class SnapshotService:
-    SCHEMA_VERSION = 5
+    SCHEMA_VERSION = 6
 
     def __init__(self, database: Database) -> None:
         self.database = database
@@ -479,6 +480,21 @@ class SnapshotService:
             .order_by(CampaignMemory.id)
         )
         events = SnapshotService._visible_events(session, campaign.id, branch_id)
+        event_participants: dict[str, list[dict[str, str]]] = {}
+        event_ids = [row.id for row in events]
+        if event_ids:
+            for participant in session.scalars(
+                select(CampaignEventParticipant)
+                .where(CampaignEventParticipant.event_id.in_(event_ids))
+                .order_by(
+                    CampaignEventParticipant.event_id,
+                    CampaignEventParticipant.role,
+                    CampaignEventParticipant.actor_id,
+                )
+            ):
+                event_participants.setdefault(participant.event_id, []).append(
+                    {"actor_id": participant.actor_id, "role": participant.role}
+                )
         knowledge_rows = session.execute(
             select(ActorKnowledge, ActorKnowledgeRevision)
             .join(
@@ -578,6 +594,7 @@ class SnapshotService:
                     "payload": dict(row.payload),
                     "audience_scope": row.audience_scope,
                     "created_at": row.created_at.isoformat(),
+                    "participants": event_participants.get(row.id, []),
                 }
                 for row in events
             ],
@@ -960,7 +977,7 @@ class SnapshotService:
     @classmethod
     def _assert_integrity(cls, session, row: CampaignSnapshot) -> None:
         """Verify the full payload, DAG ancestry, and indexed continuity bindings."""
-        if row.schema_version not in {3, 4, cls.SCHEMA_VERSION}:
+        if row.schema_version not in {3, 4, 5, cls.SCHEMA_VERSION}:
             raise SnapshotIntegrityError(
                 "snapshot schema is unsupported; create a new snapshot with the current runtime"
             )
@@ -1126,6 +1143,21 @@ class SnapshotService:
         for event_id in actual_events:
             event = session.get(CampaignEvent, event_id)
             item = payload_events[event_id]
+            participant_rows = list(
+                session.scalars(
+                    select(CampaignEventParticipant)
+                    .where(CampaignEventParticipant.event_id == event_id)
+                    .order_by(
+                        CampaignEventParticipant.role,
+                        CampaignEventParticipant.actor_id,
+                    )
+                )
+            )
+            actual_participants = [
+                {"actor_id": participant.actor_id, "role": participant.role}
+                for participant in participant_rows
+            ]
+            expected_participants = list(item.get("participants") or [])
             if (
                 event is None
                 or event.campaign_id != row.campaign_id
@@ -1135,6 +1167,7 @@ class SnapshotService:
                 or dict(event.payload) != dict(item.get("payload") or {})
                 or event.audience_scope != item.get("audience_scope")
                 or event.created_at.isoformat() != item.get("created_at")
+                or (row.schema_version >= 6 and actual_participants != expected_participants)
             ):
                 raise SnapshotIntegrityError("snapshot event ledger differs from its full payload")
 

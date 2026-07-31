@@ -392,6 +392,50 @@ class MemoryService:
         )
         return ranked[: max(1, min(limit, 100))]
 
+    def list_for_subject_refs(
+        self,
+        campaign_id: str,
+        *,
+        subject_refs: list[str] | set[str] | frozenset[str],
+        predicates: list[str] | set[str] | frozenset[str] | None = None,
+        kinds: list[str] | set[str] | frozenset[str] | None = None,
+        branch_id: str | None = None,
+        include_inactive: bool = False,
+    ) -> list[MemoryInfo]:
+        """Return exact branch heads for actor-centric context projection."""
+
+        normalized_refs = {str(item).strip() for item in subject_refs if str(item).strip()}
+        if not normalized_refs:
+            return []
+        normalized_predicates = {
+            str(item).strip() for item in predicates or [] if str(item).strip()
+        }
+        normalized_kinds = {str(item).strip() for item in kinds or [] if str(item).strip()}
+        with self.database.transaction() as session:
+            campaign = session.get(Campaign, campaign_id)
+            if campaign is None:
+                raise CampaignNotFoundError(campaign_id)
+            branch = resolve_branch(session, campaign, branch_id)
+            statement = (
+                select(CampaignMemory, MemoryRevision)
+                .join(BranchFactHead, BranchFactHead.memory_id == CampaignMemory.id)
+                .join(MemoryRevision, MemoryRevision.id == BranchFactHead.revision_id)
+                .where(
+                    BranchFactHead.branch_id == branch.id,
+                    CampaignMemory.subject_ref.in_(normalized_refs),
+                )
+                .order_by(CampaignMemory.fact_key, CampaignMemory.id)
+            )
+            if normalized_predicates:
+                statement = statement.where(
+                    CampaignMemory.predicate.in_(normalized_predicates)
+                )
+            if normalized_kinds:
+                statement = statement.where(CampaignMemory.kind.in_(normalized_kinds))
+            if not include_inactive:
+                statement = statement.where(MemoryRevision.status == "active")
+            return [self._info(*row) for row in session.execute(statement)]
+
     def _add_in_session(
         self,
         session,
