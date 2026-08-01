@@ -1,8 +1,9 @@
-"""Safe branch-aware context assembly for D&D agents and narrators."""
+"""Safe branch-aware context assembly for TTRPG agents and narrators."""
 
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from dataclasses import asdict
 from typing import Any
 
@@ -39,6 +40,7 @@ from sagasmith_core.snapshots import SnapshotService
 from sagasmith_core.visibility import (
     CONTINUITY_AUDIENCES,
     PLAYER_MEMORY_DISCLOSURE_SCOPES,
+    PLAYER_MODULE_VISIBILITY_SCOPES,
     PLAYER_OWNED_ACTOR_DISCLOSURE_SCOPES,
 )
 
@@ -119,6 +121,8 @@ class ContinuityService:
             scoped_state = self.modules.current_scene(campaign_id, scope_id=scope_id)
         else:
             scoped_state = self._snapshot_scope(branch.head_snapshot_id, scope_id)
+        if audience == "player":
+            scoped_state = self._player_scene_projection(scoped_state)
         active_refs = self._active_context_refs(
             actor_id=actor_id,
             scoped_state=scoped_state,
@@ -168,6 +172,37 @@ class ContinuityService:
             "scoped_scene": scoped_state,
             "retrieval": retrieval,
         }
+
+    @staticmethod
+    def _player_scene_projection(scene: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Remove keeper prose and arbitrary progress state from a player context."""
+
+        if not isinstance(scene, dict):
+            return None
+        progress = dict(scene.get("progress") or {})
+        safe_progress = {
+            key: progress[key]
+            for key in ("status", "percent", "state_version")
+            if key in progress
+        }
+        if scene.get("visibility", "keeper") not in PLAYER_MODULE_VISIBILITY_SCOPES:
+            return {
+                "campaign_id": scene.get("campaign_id"),
+                "scope_id": scene.get("scope_id"),
+                "requested_scope_id": scene.get("requested_scope_id"),
+                "inherited_from_party": scene.get("inherited_from_party", False),
+                "scene_id": scene.get("scene_id"),
+                "visibility": scene.get("visibility", "keeper"),
+                "redacted": True,
+                "content": "[GM-only scene content hidden]",
+                "progress": safe_progress,
+            }
+        projected = deepcopy(scene)
+        projected["progress"] = safe_progress
+        spatial = dict(projected.get("spatial") or {})
+        spatial.pop("review", None)
+        projected["spatial"] = spatial
+        return projected
 
     def diagnostics(
         self,

@@ -4,6 +4,7 @@ import pytest
 
 from sagasmith_core import (
     CampaignService,
+    ContinuityCommitService,
     MemoryService,
     SubjectContextService,
     validate_subject_context_fact,
@@ -112,3 +113,63 @@ def test_actor_subject_context_contains_state_but_not_world_facts(database) -> N
     )
 
     assert [item.id for item in context] == [state.id]
+
+
+def test_fact_key_cannot_change_subject_identity_through_upsert(database) -> None:
+    campaign = CampaignService(database).create(system_id="neutral", name="Identity")
+    memories = MemoryService(database)
+    original = memories.add(
+        campaign.id,
+        fact_key="shared:key",
+        kind="fact",
+        subject="World record",
+        subject_ref="world:one",
+        predicate="state",
+        content="Original world state.",
+    )
+
+    with pytest.raises(ValueError, match="fact_key identity conflict.*kind"):
+        memories.upsert(
+            campaign.id,
+            fact_key="shared:key",
+            kind="actor_state",
+            subject_ref="actor:npc-2",
+            predicate="goal",
+            content="NPC overwrite.",
+            expected_revision_id=original.revision_id,
+        )
+
+    stored = memories.list(campaign.id)[0]
+    assert stored.content == "Original world state."
+    assert stored.subject_ref == "world:one"
+
+
+def test_atomic_continuity_commit_rejects_fact_key_identity_collision(database) -> None:
+    campaign = CampaignService(database).create(system_id="neutral", name="Atomic identity")
+    original = MemoryService(database).add(
+        campaign.id,
+        fact_key="shared:key",
+        kind="fact",
+        subject_ref="world:one",
+        predicate="state",
+        content="Original world state.",
+    )
+
+    with pytest.raises(ValueError, match="fact_key identity conflict.*kind"):
+        ContinuityCommitService(database).commit(
+            campaign.id,
+            event={"summary": "The invalid overwrite must roll back."},
+            facts=[
+                {
+                    "action": "upsert",
+                    "fact_key": "shared:key",
+                    "kind": "actor_state",
+                    "subject_ref": "actor:npc-2",
+                    "predicate": "goal",
+                    "content": "NPC overwrite.",
+                    "expected_revision_id": original.revision_id,
+                }
+            ],
+        )
+
+    assert MemoryService(database).list(campaign.id)[0].content == "Original world state."

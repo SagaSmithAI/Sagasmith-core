@@ -44,7 +44,7 @@ _LATIN_WORD = re.compile(r"[A-Za-z0-9_'-]+")
 _CJK = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
 
 # \u2500\u2500 Built-in Chinese \u2194 English query expansions \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-# System-neutral TTRPG terms. System profiles (D&D, CoC) can add their
+# System-neutral TTRPG terms. System profiles can add their
 # own domain vocabulary via the ``query_hints`` parameter on search().
 _TTRPG_TERMS: dict[str, Sequence[str]] = {
     "\u8c41\u514d": ("save", "saving"),
@@ -147,7 +147,7 @@ def enrich_query(
     Appends English aliases behind the original query so both Chinese and
     English lexical matching fire on the same search.  Built-in mappings
     are system-neutral; system profiles inject domain vocabulary (e.g.
-    D&D-specific terms like ``"\u8c41\u514d" \u2192 "saving throw"``) via
+    domain-specific terms and translations via
     ``extra_terms``.
 
     Returns the original query unchanged when no expansions fire.
@@ -353,4 +353,3 @@ def fts5_hits(
     except Exception:
         # Table may not exist (migration not yet applied)
         return []
-

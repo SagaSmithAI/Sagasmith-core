@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Mapping
 
 from sqlalchemy import select
 
@@ -123,6 +123,15 @@ class MemoryService:
                     )
                 )
                 if existing is not None:
+                    self._require_existing_fact_identity(
+                        existing,
+                        {
+                            "kind": kind,
+                            "subject": subject,
+                            "subject_ref": subject_ref,
+                            "predicate": predicate,
+                        },
+                    )
                     head = session.get(
                         BranchFactHead,
                         {"branch_id": branch.id, "memory_id": existing.id},
@@ -252,10 +261,10 @@ class MemoryService:
         *,
         fact_key: str,
         content: str,
-        kind: str = "fact",
-        subject: str = "",
-        subject_ref: str = "",
-        predicate: str = "",
+        kind: str | None = None,
+        subject: str | None = None,
+        subject_ref: str | None = None,
+        predicate: str | None = None,
         metadata: dict[str, Any] | None = None,
         snapshot_id: str | None = None,
         branch_id: str | None = None,
@@ -293,13 +302,13 @@ class MemoryService:
                     campaign_id,
                     branch.id,
                     content=content,
-                    kind=kind,
-                    subject=subject,
+                    kind=kind or "fact",
+                    subject=subject or "",
                     metadata=metadata,
                     snapshot_id=snapshot_id,
                     fact_key=normalized_key,
-                    subject_ref=subject_ref,
-                    predicate=predicate,
+                    subject_ref=subject_ref or "",
+                    predicate=predicate or "",
                     status=status,
                     valid_from=valid_from,
                     valid_to=valid_to,
@@ -308,6 +317,19 @@ class MemoryService:
                     disclosure_scope=disclosure_scope,
                 )
             else:
+                self._require_existing_fact_identity(
+                    memory,
+                    {
+                        key: value
+                        for key, value in {
+                            "kind": kind,
+                            "subject": subject,
+                            "subject_ref": subject_ref,
+                            "predicate": predicate,
+                        }.items()
+                        if value is not None
+                    },
+                )
                 head = session.get(
                     BranchFactHead,
                     {"branch_id": branch.id, "memory_id": memory.id},
@@ -641,6 +663,24 @@ class MemoryService:
         if not value or len(value) > 300:
             raise ValueError("fact_key must contain 1-300 characters")
         return value
+
+    @staticmethod
+    def _require_existing_fact_identity(
+        memory: CampaignMemory,
+        proposed: Mapping[str, Any],
+    ) -> None:
+        """Keep a campaign-wide fact key bound to one immutable identity."""
+
+        for field in ("kind", "subject", "subject_ref", "predicate"):
+            if field not in proposed:
+                continue
+            value = str(proposed[field] or "")
+            current = str(getattr(memory, field) or "")
+            if value != current:
+                raise ValueError(
+                    f"fact_key identity conflict for {memory.fact_key}: "
+                    f"{field} is {current!r}, not {value!r}"
+                )
 
     @staticmethod
     def _validate_revision_fields(

@@ -823,7 +823,6 @@ def test_campaign_memory_upsert_has_stable_identity_and_optimistic_revision(data
     updated = memories.upsert(
         campaign.id,
         fact_key="location:cellar:door-state",
-        subject="Ignored immutable label",
         content="The cellar door is open.",
         expected_revision_id=created.revision_id,
         source_event_ids=["event:door-opened"],
@@ -841,6 +840,15 @@ def test_campaign_memory_upsert_has_stable_identity_and_optimistic_revision(data
     assert updated.importance == 5
     assert updated.disclosure_scope == "public"
     assert len(memories.list(campaign.id)) == 1
+
+    with pytest.raises(ValueError, match="fact_key identity conflict.*subject"):
+        memories.upsert(
+            campaign.id,
+            fact_key="location:cellar:door-state",
+            subject="Conflicting identity",
+            content="An invalid writer tries to rename the fact.",
+            expected_revision_id=updated.revision_id,
+        )
 
     with pytest.raises(ValueError, match="current revision"):
         memories.upsert(
@@ -1587,6 +1595,38 @@ def test_actor_event_authorization_is_not_limited_by_knowledge_top_n(database) -
         "decoy-query-match"
     ]
     assert [item["id"] for item in context["events"]] == [event.id]
+
+
+def test_player_continuity_redacts_keeper_scene_content_and_progress_state(database) -> None:
+    campaign = CampaignService(database).create(system_id="neutral", name="Private scene")
+    modules = ModuleService(database)
+    modules.ingest(
+        campaign_id=campaign.id,
+        source_key="private-scene.md",
+        title="Private Scene",
+        content="# Chapter\n## Hidden Bargain\nThe captive can be exchanged for the relic.",
+    )
+    scene = modules.scene_index(campaign.id)[0]
+    progress = modules.set_scene_progress(
+        campaign_id=campaign.id,
+        scene_id=scene["scene_id"],
+        state={"gm_secret": "the relic is hidden below the throne"},
+    )
+
+    context = ContinuityService(database).context(
+        campaign.id,
+        audience="player",
+    )
+
+    projected = context["scoped_scene"]
+    assert projected["redacted"] is True
+    assert projected["content"] == "[GM-only scene content hidden]"
+    assert projected["progress"] == {
+        "status": "current",
+        "percent": 0,
+        "state_version": progress["state_version"],
+    }
+    assert "gm_secret" not in str(projected)
 
 
 def test_continuity_context_applies_one_shared_budget_with_metrics(database) -> None:

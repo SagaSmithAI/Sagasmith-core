@@ -673,7 +673,7 @@ class MemoryRevision(Base):
 
 
 class CampaignBranch(TimestampMixin, Base):
-    """A playable D&D timeline; branches are refs, never destructive restores."""
+    """A playable campaign timeline; branches are refs, never destructive restores."""
 
     __tablename__ = "campaign_branches"
     __table_args__ = (

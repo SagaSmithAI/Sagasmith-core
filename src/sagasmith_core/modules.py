@@ -15,6 +15,8 @@ from sqlalchemy import select
 from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.database import Database
 from sagasmith_core.documents import (
+    GENERIC_DOCUMENT_LAYOUT_PROFILE,
+    DocumentLayoutProfile,
     NormalizedDocument,
     OcrProvider,
     PageLocator,
@@ -703,6 +705,7 @@ class ModuleService:
         expected_checksum: str | None = None,
         idempotency_key: str | None = None,
         idempotency_write: IdempotencyWrite | None = None,
+        layout_profile: DocumentLayoutProfile = GENERIC_DOCUMENT_LAYOUT_PROFILE,
     ) -> ModuleIngestResult:
         source_path = Path(path).expanduser().resolve()
         document = normalize_document(
@@ -710,6 +713,7 @@ class ModuleService:
             ocr_provider=ocr_provider,
             cache_dir=document_cache_dir,
             expected_checksum=expected_checksum,
+            layout_profile=layout_profile,
         )
         return self.ingest(
             campaign_id=campaign_id,
@@ -741,12 +745,14 @@ class ModuleService:
         ocr_provider: OcrProvider | None = None,
         document_cache_dir: str | Path | None = None,
         expected_checksum: str | None = None,
+        layout_profile: DocumentLayoutProfile = GENERIC_DOCUMENT_LAYOUT_PROFILE,
     ) -> dict[str, Any]:
         document = normalize_document(
             path,
             ocr_provider=ocr_provider,
             cache_dir=document_cache_dir,
             expected_checksum=expected_checksum,
+            layout_profile=layout_profile,
         )
         selected_parser = parser or MarkdownModuleParser()
         parsed = selected_parser.parse(document.content)
@@ -774,6 +780,7 @@ class ModuleService:
         ocr_provider: OcrProvider | None = None,
         document_cache_dir: str | Path | None = None,
         expected_checksum: str | None = None,
+        layout_profile: DocumentLayoutProfile = GENERIC_DOCUMENT_LAYOUT_PROFILE,
     ) -> dict[str, Any]:
         """Parse a module without persistence and expose stable scene/package evidence."""
         document = normalize_document(
@@ -781,6 +788,7 @@ class ModuleService:
             ocr_provider=ocr_provider,
             cache_dir=document_cache_dir,
             expected_checksum=expected_checksum,
+            layout_profile=layout_profile,
         )
         selected_parser = parser or MarkdownModuleParser()
         parsed = selected_parser.parse(document.content)

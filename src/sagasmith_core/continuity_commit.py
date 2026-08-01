@@ -156,6 +156,14 @@ class ContinuityCommitService:
             )
         )
         if memory is not None:
+            self.facts._require_existing_fact_identity(
+                memory,
+                {
+                    field: data[field]
+                    for field in ("kind", "subject", "subject_ref", "predicate")
+                    if field in data
+                },
+            )
             head = session.get(
                 BranchFactHead,
                 {"branch_id": branch_id, "memory_id": memory.id},

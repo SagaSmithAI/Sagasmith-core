@@ -13,6 +13,8 @@ from sqlalchemy import select
 
 from sagasmith_core.database import Database
 from sagasmith_core.documents import (
+    GENERIC_DOCUMENT_LAYOUT_PROFILE,
+    DocumentLayoutProfile,
     NormalizedDocument,
     OcrProvider,
     PageLocator,
@@ -289,6 +291,7 @@ class RuleService:
         idempotency_campaign_id: str | None = None,
         idempotency_key: str | None = None,
         idempotency_write: IdempotencyWrite | None = None,
+        layout_profile: DocumentLayoutProfile = GENERIC_DOCUMENT_LAYOUT_PROFILE,
     ) -> RuleIngestResult:
         """Normalize and ingest a rule document through the shared document pipeline."""
         source_path = Path(path).expanduser().resolve()
@@ -297,6 +300,7 @@ class RuleService:
             ocr_provider=ocr_provider,
             cache_dir=document_cache_dir,
             expected_checksum=expected_checksum,
+            layout_profile=layout_profile,
         )
         return self.ingest(
             system_id=system_id,
@@ -327,6 +331,7 @@ class RuleService:
         ocr_provider: OcrProvider | None = None,
         document_cache_dir: str | Path | None = None,
         expected_checksum: str | None = None,
+        layout_profile: DocumentLayoutProfile = GENERIC_DOCUMENT_LAYOUT_PROFILE,
     ) -> dict[str, Any]:
         """Normalize a rule document without writing it to the rule index."""
         document = normalize_document(
@@ -334,6 +339,7 @@ class RuleService:
             ocr_provider=ocr_provider,
             cache_dir=document_cache_dir,
             expected_checksum=expected_checksum,
+            layout_profile=layout_profile,
         )
         parsed = (parser or MarkdownHierarchyParser()).parse(document.content)
         page_locator = PageLocator(document.content)

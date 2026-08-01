@@ -16,7 +16,7 @@ from statistics import median
 from typing import Any, Protocol
 from uuid import uuid4
 
-DOCUMENT_NORMALIZER_VERSION = "19"
+DOCUMENT_NORMALIZER_VERSION = "20"
 DOCUMENT_SOURCE_SUFFIXES = frozenset({".md", ".markdown", ".pdf", ".txt"})
 _DOCUMENT_CACHE_SCHEMA = 1
 _PDF_EXTRACTION_CACHE_SCHEMA = 1
@@ -29,6 +29,30 @@ class DocumentQualityError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+@dataclass(frozen=True)
+class DocumentLayoutProfile:
+    """System-provided visual-layout exclusions for generic document conversion."""
+
+    name: str = "generic"
+    visual_heading_exclusion_patterns: tuple[str, ...] = ()
+
+    def excludes_visual_heading(self, value: str) -> bool:
+        return any(
+            re.search(pattern, value) is not None
+            for pattern in self.visual_heading_exclusion_patterns
+        )
+
+    @property
+    def cache_identity(self) -> str:
+        digest = hashlib.sha256(
+            "\x1e".join(self.visual_heading_exclusion_patterns).encode("utf-8")
+        ).hexdigest()[:12]
+        return f"{self.name}:{digest}"
+
+
+GENERIC_DOCUMENT_LAYOUT_PROFILE = DocumentLayoutProfile()
 
 
 @dataclass(frozen=True)
@@ -1054,7 +1078,10 @@ def _ocr_page_layout(
     )
 
 
-def _visual_headings(text_page: Any) -> list[tuple[str, int]]:
+def _visual_headings(
+    text_page: Any,
+    layout_profile: DocumentLayoutProfile = GENERIC_DOCUMENT_LAYOUT_PROFILE,
+) -> list[tuple[str, int]]:
     """Recover headings from PDF font weight and rendered glyph height."""
     try:
         import ctypes
@@ -1135,22 +1162,12 @@ def _visual_headings(text_page: Any) -> list[tuple[str, int]]:
         {weight for _line, _height, weight, _font in eligible}
     ) > 1
     result: list[tuple[str, int]] = []
-    field_label = re.compile(
-        r"(?i)^(?:armor|weapons|tools|skills|saving throws|hit dice|hit points at|"
-        r"casting time|range|components|duration)\s*:"
-    )
     for line, height, weight, font in eligible:
         if _TERMINAL_RE.search(line) or _LIST_RE.match(line):
             continue
         if _looks_like_corrupt_visual_heading(line):
             continue
-        if field_label.match(line):
-            continue
-        if re.search(
-            r"\b(?:Melee|Ranged)\s+(?:Weapon|Spell)\s+Attack\s*:",
-            line,
-            re.IGNORECASE,
-        ):
+        if layout_profile.excludes_visual_heading(line):
             continue
         ratio = height / max(body_height, 0.1)
         strong_size = height >= 8.0 and ratio >= 1.35
@@ -1178,7 +1195,10 @@ def _looks_like_corrupt_visual_heading(value: str) -> bool:
     )
 
 
-def _extract_pdfium_pages(path: Path) -> tuple[list[str], dict[int, list[tuple[str, int]]]]:
+def _extract_pdfium_pages(
+    path: Path,
+    layout_profile: DocumentLayoutProfile = GENERIC_DOCUMENT_LAYOUT_PROFILE,
+) -> tuple[list[str], dict[int, list[tuple[str, int]]]]:
     try:
         import pypdfium2 as pdfium
     except ImportError as exc:
@@ -1195,7 +1215,7 @@ def _extract_pdfium_pages(path: Path) -> tuple[list[str], dict[int, list[tuple[s
                 text_page = page.get_textpage()
                 try:
                     result.append(text_page.get_text_bounded() or "")
-                    page_headings = _visual_headings(text_page)
+                    page_headings = _visual_headings(text_page, layout_profile)
                     if page_headings:
                         headings[index + 1] = page_headings
                 finally:
@@ -1261,11 +1281,17 @@ def _ocr_suspect_pages(
     return replaced
 
 
-def _pdf_extraction_profile(ocr_provider: OcrProvider | None) -> str:
+def _pdf_extraction_profile(
+    ocr_provider: OcrProvider | None,
+    layout_profile: DocumentLayoutProfile,
+) -> str:
     ocr = getattr(ocr_provider, "cache_profile", None) or getattr(
         ocr_provider, "name", "none"
     )
-    return f"pypdfium2:{_PDF_TEXT_EXTRACTOR_VERSION}:ocr={ocr}"
+    return (
+        f"pypdfium2:{_PDF_TEXT_EXTRACTOR_VERSION}:ocr={ocr}:"
+        f"layout={layout_profile.cache_identity}"
+    )
 
 
 def _pdf_extraction_cache_path(
@@ -1345,6 +1371,7 @@ class PdfDocumentConverter:
         *,
         ocr_provider: OcrProvider | None = None,
         extraction_cache_dir: str | Path | None = None,
+        layout_profile: DocumentLayoutProfile = GENERIC_DOCUMENT_LAYOUT_PROFILE,
     ) -> None:
         self.ocr_provider = ocr_provider
         self.extraction_cache_dir = (
@@ -1352,6 +1379,7 @@ class PdfDocumentConverter:
             if extraction_cache_dir is not None
             else None
         )
+        self.layout_profile = layout_profile
 
     def convert(
         self,
@@ -1367,7 +1395,10 @@ class PdfDocumentConverter:
                 "PDF conversion requires `pip install sagasmith-core[documents]`"
             ) from exc
         checksum = source_checksum or file_sha256(source)
-        extraction_profile = _pdf_extraction_profile(self.ocr_provider)
+        extraction_profile = _pdf_extraction_profile(
+            self.ocr_provider,
+            self.layout_profile,
+        )
         extraction_target = (
             _pdf_extraction_cache_path(
                 self.extraction_cache_dir,
@@ -1402,7 +1433,10 @@ class PdfDocumentConverter:
                 pass
         extraction_cache_hit = extracted is not None
         if extracted is None:
-            pages, visual_headings = _extract_pdfium_pages(source)
+            pages, visual_headings = _extract_pdfium_pages(
+                source,
+                self.layout_profile,
+            )
             initial_quality = _document_quality(pages)
             corrupt_pages = list(initial_quality["corrupt_text_pages"])
             sparse_pages = list(initial_quality["sparse_pages"])
@@ -1519,12 +1553,19 @@ class PdfDocumentConverter:
         return result
 
 
-def _cache_profile(path: Path, ocr_provider: OcrProvider | None) -> str:
+def _cache_profile(
+    path: Path,
+    ocr_provider: OcrProvider | None,
+    layout_profile: DocumentLayoutProfile,
+) -> str:
     if path.suffix.casefold() == ".pdf":
         ocr = getattr(ocr_provider, "cache_profile", None) or getattr(
             ocr_provider, "name", "none"
         )
-        return f"pdf-layout:{DOCUMENT_NORMALIZER_VERSION}:ocr={ocr}"
+        return (
+            f"pdf-layout:{DOCUMENT_NORMALIZER_VERSION}:ocr={ocr}:"
+            f"layout={layout_profile.cache_identity}"
+        )
     return f"markdown:{DOCUMENT_NORMALIZER_VERSION}"
 
 
@@ -1539,6 +1580,7 @@ def normalize_document(
     ocr_provider: OcrProvider | None = None,
     cache_dir: str | Path | None = None,
     expected_checksum: str | None = None,
+    layout_profile: DocumentLayoutProfile = GENERIC_DOCUMENT_LAYOUT_PROFILE,
 ) -> NormalizedDocument:
     """Convert a document once and reuse a content-addressed normalized form."""
     source = Path(path).expanduser().resolve()
@@ -1548,7 +1590,7 @@ def normalize_document(
             "source_checksum_mismatch",
             "managed document checksum no longer matches its staged import job",
         )
-    profile = _cache_profile(source, ocr_provider)
+    profile = _cache_profile(source, ocr_provider, layout_profile)
     target = (
         _cache_path(Path(cache_dir).expanduser().resolve(), checksum, profile)
         if cache_dir is not None
@@ -1590,6 +1632,7 @@ def normalize_document(
         source,
         ocr_provider=ocr_provider,
         extraction_cache_dir=cache_dir,
+        layout_profile=layout_profile,
     ).convert(
         source,
         source_checksum=checksum,
@@ -1691,12 +1734,14 @@ def converter_for(
     *,
     ocr_provider: OcrProvider | None = None,
     extraction_cache_dir: str | Path | None = None,
+    layout_profile: DocumentLayoutProfile = GENERIC_DOCUMENT_LAYOUT_PROFILE,
 ):
     suffix = Path(path).suffix.casefold()
     if suffix == ".pdf":
         return PdfDocumentConverter(
             ocr_provider=ocr_provider,
             extraction_cache_dir=extraction_cache_dir,
+            layout_profile=layout_profile,
         )
     if suffix in DOCUMENT_SOURCE_SUFFIXES - {".pdf"}:
         return MarkdownDocumentConverter()
