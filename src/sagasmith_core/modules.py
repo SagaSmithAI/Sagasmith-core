@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import re
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -28,6 +29,8 @@ from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
 from sagasmith_core.integrity import json_sha256, unique_retired_source_key
 from sagasmith_core.models import (
     Campaign,
+    Character,
+    ModuleActorBinding,
     ModuleAsset,
     ModuleChapter,
     ModuleChunk,
@@ -37,7 +40,12 @@ from sagasmith_core.models import (
     SceneProgress,
     VectorIndexJob,
 )
-from sagasmith_core.parsing import MarkdownHierarchyParser
+from sagasmith_core.parsing import MarkdownHierarchyParser, ParsedChunk
+from sagasmith_core.portable import (
+    build_actor_card,
+    build_module_pack,
+    validate_module_pack,
+)
 from sagasmith_core.retrieval import (
     SearchHit,
     cosine_similarity,
@@ -415,6 +423,96 @@ class MarkdownModuleParser:
                 "absolute_end": global_end,
             },
         )
+
+
+@dataclass(frozen=True)
+class _PortableModuleProfile:
+    """Preserve the source parser identity while replaying stored structure."""
+
+    name: str
+    version: str
+
+    @staticmethod
+    def document_metadata(_content: str) -> dict[str, Any]:
+        return {}
+
+
+class _PortableModuleParser:
+    """Rebuild an imported module from its signed Scene Atlas, not local heuristics."""
+
+    def __init__(self, package: dict[str, Any]) -> None:
+        payload = package["payload"]
+        source = payload["source"]
+        self.document_checksum = payload["document"]["checksum"]
+        self.scene_atlas = list(payload["scene_atlas"])
+        self.profile = _PortableModuleProfile(
+            name=str(source["parser_profile"]),
+            version=str(source["parser_version"]),
+        )
+
+    def document_metadata(self, content: str) -> dict[str, Any]:
+        if hashlib.sha256(content.encode("utf-8")).hexdigest() != self.document_checksum:
+            raise ValueError("portable module document checksum changed before import")
+        return {}
+
+    def parse(self, content: str) -> list[ParsedChapter]:
+        self.document_metadata(content)
+        chapters: dict[int, list[dict[str, Any]]] = {}
+        for scene in self.scene_atlas:
+            chapters.setdefault(int(scene["chapter_ordinal"]), []).append(scene)
+        parsed: list[ParsedChapter] = []
+        for chapter_ordinal in sorted(chapters):
+            scene_rows = sorted(
+                chapters[chapter_ordinal], key=lambda item: int(item["scene_ordinal"])
+            )
+            parsed_scenes = []
+            for scene in scene_rows:
+                metadata = {
+                    **dict(scene["metadata"]),
+                    "stable_key": scene["stable_key"],
+                    "scene_type": scene["scene_type"],
+                    "page_start": scene["page_start"],
+                    "page_end": scene["page_end"],
+                    "headings": list(scene["headings"]),
+                    "keywords": list(scene["keywords"]),
+                }
+                parsed_scenes.append(
+                    ParsedScene(
+                        ordinal=int(scene["scene_ordinal"]),
+                        title=str(scene["title"]),
+                        content=str(scene["content"]),
+                        heading_path=tuple(str(value) for value in scene["headings"]),
+                        chunks=tuple(
+                            ParsedChunk(
+                                ordinal=int(chunk["ordinal"]),
+                                heading_path=tuple(
+                                    str(value) for value in chunk["heading_path"]
+                                ),
+                                content=str(chunk["content"]),
+                                start_offset=int(chunk["start_offset"]),
+                                end_offset=int(chunk["end_offset"]),
+                                metadata={
+                                    **dict(chunk["metadata"]),
+                                    "content_hash": chunk["content_hash"],
+                                },
+                            )
+                            for chunk in sorted(
+                                scene["chunks"], key=lambda item: int(item["ordinal"])
+                            )
+                        ),
+                        metadata=metadata,
+                    )
+                )
+            parsed.append(
+                ParsedChapter(
+                    ordinal=chapter_ordinal,
+                    title=str(scene_rows[0]["chapter"]),
+                    content="\n\n".join(scene["content"] for scene in scene_rows),
+                    scenes=tuple(parsed_scenes),
+                    metadata={},
+                )
+            )
+        return parsed
 
 
 @dataclass(frozen=True)
@@ -987,6 +1085,561 @@ class ModuleService:
                 for row in rows
             ]
 
+    def export_portable_pack(
+        self,
+        campaign_id: str,
+        module_id: str,
+        *,
+        portable_id: str,
+        version: str = "1.0.0",
+        actors: Sequence[dict[str, Any]] | None = None,
+        metadata: dict[str, Any] | None = None,
+        dependencies: Sequence[dict[str, Any]] | None = None,
+        asset_loader: Callable[[str], bytes] | None = None,
+    ) -> dict[str, Any]:
+        """Export one immutable module revision as a self-contained package.
+
+        Runtime ids are replaced by scene stable keys, asset content keys, and
+        chunk hashes.  Actor knowledge, scene progress, snapshots, and other
+        campaign state are intentionally outside this authoring package.
+        """
+
+        with self.database.transaction() as session:
+            source = session.get(ModuleSource, module_id)
+            if source is None or source.campaign_id != campaign_id:
+                raise LookupError(module_id)
+            chapters = list(
+                session.scalars(
+                    select(ModuleChapter)
+                    .where(ModuleChapter.module_id == module_id)
+                    .order_by(ModuleChapter.ordinal, ModuleChapter.id)
+                )
+            )
+            scenes = list(
+                session.execute(
+                    select(ModuleScene, ModuleChapter)
+                    .join(ModuleChapter, ModuleChapter.id == ModuleScene.chapter_id)
+                    .where(ModuleScene.module_id == module_id)
+                    .order_by(ModuleChapter.ordinal, ModuleScene.ordinal, ModuleScene.id)
+                )
+            )
+            if not scenes:
+                raise ValueError("cannot export a module without scenes")
+            scene_keys = {
+                scene.id: str(dict(scene.metadata_json or {}).get("stable_key") or "")
+                for scene, _chapter in scenes
+            }
+            if any(not key for key in scene_keys.values()):
+                raise ValueError("cannot export a module with missing scene stable keys")
+            assets = list(
+                session.scalars(
+                    select(ModuleAsset)
+                    .where(ModuleAsset.module_id == module_id)
+                    .order_by(ModuleAsset.created_at, ModuleAsset.id)
+                )
+            )
+            asset_keys = {
+                asset.id: f"asset-{asset.checksum[:16]}-{index + 1}"
+                for index, asset in enumerate(assets)
+            }
+            asset_payload: list[dict[str, Any]] = []
+            for asset in assets:
+                content: bytes | None = None
+                if asset_loader is not None:
+                    try:
+                        content = asset_loader(asset.source_path)
+                    except (LookupError, OSError):
+                        content = None
+                if content is None and asset.normalized_content is not None:
+                    normalized_bytes = asset.normalized_content.encode("utf-8")
+                    if hashlib.sha256(normalized_bytes).hexdigest() == asset.checksum:
+                        content = normalized_bytes
+                if content is not None and hashlib.sha256(content).hexdigest() != asset.checksum:
+                    raise ValueError(
+                        f"module asset checksum mismatch while exporting: {asset.source_path}"
+                    )
+                if content is None:
+                    raise ValueError(
+                        "module asset bytes are unavailable; provide asset_loader for a "
+                        f"self-contained export: {asset.source_path}"
+                    )
+                asset_payload.append(
+                    {
+                        "asset_key": asset_keys[asset.id],
+                        "name": Path(asset.source_path).name or asset_keys[asset.id],
+                        "media_type": asset.media_type,
+                        "checksum": asset.checksum,
+                        "size": len(content) if content is not None else 0,
+                        "data_base64": (
+                            base64.b64encode(content).decode("ascii")
+                            if content is not None
+                            else None
+                        ),
+                        "normalized_content": asset.normalized_content,
+                        "metadata": dict(asset.metadata_json or {}),
+                    }
+                )
+
+            chunks = {
+                chunk.id: chunk
+                for chunk in session.scalars(
+                    select(ModuleChunk).where(ModuleChunk.module_id == module_id)
+                )
+            }
+            chunks_by_scene: dict[str, list[ModuleChunk]] = {}
+            for chunk in chunks.values():
+                chunks_by_scene.setdefault(chunk.scene_id, []).append(chunk)
+            for scene_chunks in chunks_by_scene.values():
+                scene_chunks.sort(key=lambda item: (item.ordinal, item.id))
+            reviews = list(
+                session.scalars(
+                    select(ModuleContentReview)
+                    .where(ModuleContentReview.module_id == module_id)
+                    .order_by(ModuleContentReview.created_at, ModuleContentReview.id)
+                )
+            )
+            review_payload = []
+            for review in reviews:
+                evidence = dict(review.evidence_json or {})
+                if evidence.get("asset_id"):
+                    asset_key = asset_keys.get(str(evidence["asset_id"]))
+                    if asset_key is None:
+                        raise ValueError("content review refers to an unknown module asset")
+                    portable_evidence = {
+                        "asset_key": asset_key,
+                        "page": evidence.get("page"),
+                        "reviewer": evidence.get("reviewer"),
+                        "observation": evidence.get("observation"),
+                    }
+                else:
+                    chunk_ids = list(evidence.get("source_chunk_ids") or [])
+                    if not chunk_ids or any(chunk_id not in chunks for chunk_id in chunk_ids):
+                        raise ValueError("content review refers to unknown module chunks")
+                    portable_evidence = {
+                        "chunk_hashes": [
+                            chunks[chunk_id].content_hash
+                            or hashlib.sha256(chunks[chunk_id].content.encode("utf-8")).hexdigest()
+                            for chunk_id in chunk_ids
+                        ],
+                        "reviewer": evidence.get("reviewer"),
+                        "observation": evidence.get("observation"),
+                    }
+                review_payload.append(
+                    {
+                        "scene_key": scene_keys[review.scene_id],
+                        "content_key": review.content_key,
+                        "content_kind": review.content_kind,
+                        "normalized_content": review.normalized_content,
+                        "evidence": portable_evidence,
+                        "metadata": dict(review.metadata_json or {}),
+                    }
+                )
+
+            normalized_documents = [
+                asset.normalized_content
+                for asset in assets
+                if asset.normalized_content
+                and asset.media_type
+                in {"application/pdf", "text/markdown", "text/plain"}
+            ]
+            document_content = (
+                normalized_documents[0]
+                if normalized_documents
+                else "\n\n".join(chapter.content for chapter in chapters).strip()
+            )
+            if not document_content:
+                raise ValueError("cannot export a module without normalized source content")
+            source_metadata = {
+                key: value
+                for key, value in dict(source.metadata_json or {}).items()
+                if key not in {"import_state", "source_path"}
+            }
+            source_key = str(source_metadata.get("logical_source_key") or source.source_key)
+            scene_atlas = [
+                {
+                    "stable_key": scene_keys[scene.id],
+                    "title": scene.title,
+                    "chapter": chapter.title,
+                    "chapter_ordinal": chapter.ordinal,
+                    "scene_ordinal": scene.ordinal,
+                    "scene_type": scene.scene_type,
+                    "page_start": scene.page_start,
+                    "page_end": scene.page_end,
+                    "headings": list(scene.headings),
+                    "keywords": list(scene.keywords),
+                    "content": scene.content,
+                    "chunks": [
+                        {
+                            "ordinal": chunk.ordinal,
+                            "heading_path": list(chunk.heading_path),
+                            "content": chunk.content,
+                            "start_offset": chunk.char_start,
+                            "end_offset": chunk.char_end,
+                            "metadata": dict(chunk.metadata_json or {}),
+                            "content_hash": chunk.content_hash
+                            or hashlib.sha256(chunk.content.encode("utf-8")).hexdigest(),
+                        }
+                        for chunk in chunks_by_scene.get(scene.id, [])
+                    ],
+                    "metadata": {
+                        key: value
+                        for key, value in dict(scene.metadata_json or {}).items()
+                        if key not in {"stable_key", "content_checksum"}
+                    },
+                    "content_checksum": hashlib.sha256(
+                        scene.content.encode("utf-8")
+                    ).hexdigest(),
+                }
+                for scene, chapter in scenes
+            ]
+            if actors is None:
+                actor_rows = list(
+                    session.execute(
+                        select(ModuleActorBinding, Character)
+                        .join(Character, Character.id == ModuleActorBinding.character_id)
+                        .where(ModuleActorBinding.module_id == module_id)
+                        .order_by(
+                            ModuleActorBinding.portable_actor_id,
+                            ModuleActorBinding.scene_key,
+                            ModuleActorBinding.id,
+                        )
+                    )
+                )
+                grouped: dict[str, tuple[Character, list[ModuleActorBinding]]] = {}
+                for binding, character in actor_rows:
+                    if binding.portable_actor_id in grouped:
+                        grouped[binding.portable_actor_id][1].append(binding)
+                    else:
+                        grouped[binding.portable_actor_id] = (character, [binding])
+                actors = [
+                    build_actor_card(
+                        portable_id=portable_actor_id,
+                        version=version,
+                        system_id=character.system_id,
+                        actor_type=character.character_type,
+                        name=character.name,
+                        player_name=character.player_name,
+                        summary=character.summary,
+                        sheet=dict(character.sheet),
+                        notes=dict(character.notes),
+                        provenance=dict(bindings[0].metadata_json or {}).get(
+                            "portable_provenance", {}
+                        ),
+                        metadata=dict(bindings[0].metadata_json or {}).get(
+                            "portable_metadata", {}
+                        ),
+                        dependencies=dict(bindings[0].metadata_json or {}).get(
+                            "portable_dependencies", []
+                        ),
+                        bindings=[
+                            {
+                                "kind": "module_scene" if binding.scene_key else "module",
+                                "module_key": source_key,
+                                **(
+                                    {"scene_key": binding.scene_key}
+                                    if binding.scene_key
+                                    else {}
+                                ),
+                                "binding_kind": binding.binding_kind,
+                                "role": binding.role,
+                                "metadata": {
+                                    key: value
+                                    for key, value in dict(
+                                        binding.metadata_json or {}
+                                    ).items()
+                                    if not key.startswith("portable_")
+                                },
+                            }
+                            for binding in bindings
+                        ],
+                    )
+                    for portable_actor_id, (character, bindings) in grouped.items()
+                ]
+            return build_module_pack(
+                portable_id=portable_id,
+                version=version,
+                system_id=source.system_id,
+                source={
+                    "source_key": source_key,
+                    "title": source.title,
+                    "parser_profile": source.parser_profile,
+                    "parser_version": source.parser_version,
+                    "metadata": source_metadata,
+                },
+                document={
+                    "media_type": "text/markdown",
+                    "content": document_content,
+                    "checksum": hashlib.sha256(document_content.encode("utf-8")).hexdigest(),
+                },
+                scene_atlas=scene_atlas,
+                assets=asset_payload,
+                content_reviews=review_payload,
+                actors=actors,
+                metadata=metadata,
+                dependencies=dependencies,
+            )
+
+    def import_portable_pack(
+        self,
+        campaign_id: str,
+        package: dict[str, Any],
+        *,
+        parser: MarkdownModuleParser | None = None,
+        embedder: Embedder | None = None,
+        vector_store: VectorStore | None = None,
+        activate: bool = True,
+        asset_writer: Callable[[str, dict[str, Any]], str] | None = None,
+    ) -> dict[str, Any]:
+        """Import a portable module and remap logical evidence references."""
+
+        value = validate_module_pack(package)
+        with self.database.transaction() as session:
+            campaign = session.get(Campaign, campaign_id)
+            if campaign is None:
+                raise CampaignNotFoundError(campaign_id)
+            if campaign.system_id != value["system_id"]:
+                raise ValueError("module package and campaign must use the same system_id")
+        payload = value["payload"]
+        source = payload["source"]
+        ingest_result = self.ingest(
+            campaign_id=campaign_id,
+            source_key=source["source_key"],
+            logical_source_key=source["source_key"],
+            title=source["title"],
+            content=payload["document"]["content"],
+            metadata={
+                **dict(source.get("metadata") or {}),
+                "portable_package": {
+                    "id": value["id"],
+                    "version": value["version"],
+                    "checksum": value["checksum"],
+                },
+            },
+            # The signed Scene Atlas is the portable structure.  Re-running a
+            # locally installed parser could silently change boundaries when
+            # parser versions differ, so imports always replay the stored atlas.
+            parser=_PortableModuleParser(value),
+            embedder=embedder,
+            vector_store=vector_store,
+            activate=activate,
+        )
+        scene_rows = self.scene_index(campaign_id, module_id=ingest_result.module_id)
+        scene_map = {str(scene["stable_key"]): str(scene["scene_id"]) for scene in scene_rows}
+        expected_scene_keys = {
+            str(scene["stable_key"]) for scene in payload["scene_atlas"]
+        }
+        if set(scene_map) != expected_scene_keys:
+            raise ValueError(
+                "imported module scene atlas does not match the portable package; "
+                "use the package parser profile or migrate the package"
+            )
+
+        asset_map: dict[str, str] = {}
+        if payload["assets"] and asset_writer is None:
+            raise ValueError("asset_writer is required to import module package assets")
+        for asset in payload["assets"]:
+            assert asset_writer is not None
+            path = asset_writer(ingest_result.module_id, dict(asset))
+            registered = self.register_asset(
+                campaign_id=campaign_id,
+                module_id=ingest_result.module_id,
+                source_path=path,
+                media_type=asset["media_type"],
+                checksum=asset["checksum"],
+                normalized_content=asset["normalized_content"],
+                metadata={
+                    **dict(asset["metadata"]),
+                    "portable_asset_key": asset["asset_key"],
+                },
+            )
+            asset_map[asset["asset_key"]] = registered["id"]
+
+        chunks = self.list_chunks(campaign_id, ingest_result.module_id)
+        chunks_by_scene_and_hash: dict[tuple[str, str], list[str]] = {}
+        for chunk in chunks:
+            scene = next(
+                (key for key, scene_id in scene_map.items() if scene_id == chunk["scene_id"]),
+                None,
+            )
+            if scene is None:
+                continue
+            content_hash = str(chunk.get("content_hash") or "") or hashlib.sha256(
+                chunk["content"].encode("utf-8")
+            ).hexdigest()
+            chunks_by_scene_and_hash.setdefault((scene, content_hash), []).append(chunk["id"])
+
+        imported_reviews = []
+        for review in payload["content_reviews"]:
+            evidence = review["evidence"]
+            common = {
+                "campaign_id": campaign_id,
+                "module_id": ingest_result.module_id,
+                "scene_id": scene_map[review["scene_key"]],
+                "content_key": review["content_key"],
+                "content_kind": review["content_kind"],
+                "normalized_content": review["normalized_content"],
+                "reviewer": str(evidence.get("reviewer") or "portable-package"),
+                "observation": str(
+                    evidence.get("observation") or "Imported source-backed review"
+                ),
+                "metadata": dict(review["metadata"]),
+            }
+            if evidence.get("asset_key") is not None:
+                imported = self.review_content(
+                    **common,
+                    source_asset_id=asset_map[evidence["asset_key"]],
+                    page_number=int(evidence["page"]),
+                )
+            else:
+                source_chunk_ids: list[str] = []
+                for chunk_hash in evidence["chunk_hashes"]:
+                    candidates = chunks_by_scene_and_hash.get(
+                        (review["scene_key"], str(chunk_hash)), []
+                    )
+                    if not candidates:
+                        raise ValueError(
+                            "portable content review chunk evidence could not be remapped"
+                        )
+                    source_chunk_ids.append(candidates.pop(0))
+                imported = self.review_content(
+                    **common,
+                    source_chunk_ids=source_chunk_ids,
+                )
+            imported_reviews.append(imported["id"])
+        return {
+            "module_id": ingest_result.module_id,
+            "skipped": ingest_result.skipped,
+            "package": {
+                "id": value["id"],
+                "version": value["version"],
+                "checksum": value["checksum"],
+            },
+            "scene_map": scene_map,
+            "asset_map": asset_map,
+            "content_review_ids": imported_reviews,
+            "actor_cards": list(payload["actors"]),
+        }
+
+    def bind_actor(
+        self,
+        *,
+        campaign_id: str,
+        module_id: str,
+        character_id: str,
+        portable_actor_id: str,
+        binding_kind: str,
+        role: str = "",
+        scene_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Associate a local actor with a module using a portable logical identity."""
+
+        portable_id = str(portable_actor_id).strip()
+        kind = str(binding_kind).strip().casefold()
+        role_value = str(role).strip()
+        if not portable_id or len(portable_id) > 200:
+            raise ValueError("portable_actor_id must contain 1 to 200 characters")
+        if kind not in {"cast", "encounter", "preset_pc"}:
+            raise ValueError("binding_kind must be cast, encounter, or preset_pc")
+        if len(role_value) > 200:
+            raise ValueError("module actor role must not exceed 200 characters")
+        with self.database.transaction() as session:
+            source = session.get(ModuleSource, module_id)
+            if source is None or source.campaign_id != campaign_id:
+                raise LookupError(module_id)
+            character = session.get(Character, character_id)
+            if character is None:
+                raise LookupError(character_id)
+            if character.system_id != source.system_id or character.campaign_id not in {
+                None,
+                campaign_id,
+            }:
+                raise ValueError("module actor must be a same-system library or campaign actor")
+            scene_key = ""
+            if scene_id is not None:
+                scene = session.get(ModuleScene, scene_id)
+                if scene is None or scene.module_id != module_id:
+                    raise ValueError("module actor scene must belong to the module")
+                scene_key = str(dict(scene.metadata_json or {}).get("stable_key") or "")
+                if not scene_key:
+                    raise ValueError("module actor scene has no stable key")
+            existing = session.scalar(
+                select(ModuleActorBinding).where(
+                    ModuleActorBinding.module_id == module_id,
+                    ModuleActorBinding.scene_key == scene_key,
+                    ModuleActorBinding.character_id == character_id,
+                    ModuleActorBinding.binding_kind == kind,
+                    ModuleActorBinding.role == role_value,
+                )
+            )
+            if existing is None:
+                existing = ModuleActorBinding(
+                    id=str(uuid.uuid4()),
+                    module_id=module_id,
+                    scene_id=scene_id,
+                    scene_key=scene_key,
+                    character_id=character_id,
+                    portable_actor_id=portable_id,
+                    binding_kind=kind,
+                    role=role_value,
+                    metadata_json=dict(metadata or {}),
+                )
+                session.add(existing)
+            elif existing.portable_actor_id != portable_id:
+                raise ValueError("module actor binding has a different portable_actor_id")
+            else:
+                existing.metadata_json = {
+                    **dict(existing.metadata_json or {}),
+                    **dict(metadata or {}),
+                }
+            session.flush()
+            return self._actor_binding_view(existing)
+
+    def list_actor_bindings(
+        self,
+        campaign_id: str,
+        module_id: str,
+        *,
+        scene_id: str | None = None,
+        binding_kind: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List module cast, encounter, and preset-PC associations."""
+
+        with self.database.transaction() as session:
+            source = session.get(ModuleSource, module_id)
+            if source is None or source.campaign_id != campaign_id:
+                raise LookupError(module_id)
+            statement = (
+                select(ModuleActorBinding, Character)
+                .join(Character, Character.id == ModuleActorBinding.character_id)
+                .where(ModuleActorBinding.module_id == module_id)
+                .order_by(
+                    ModuleActorBinding.scene_key,
+                    ModuleActorBinding.binding_kind,
+                    ModuleActorBinding.role,
+                    Character.name,
+                )
+            )
+            if scene_id is not None:
+                statement = statement.where(ModuleActorBinding.scene_id == scene_id)
+            if binding_kind is not None:
+                statement = statement.where(
+                    ModuleActorBinding.binding_kind == str(binding_kind).casefold()
+                )
+            return [
+                {
+                    **self._actor_binding_view(row.ModuleActorBinding),
+                    "character": {
+                        "id": row.Character.id,
+                        "name": row.Character.name,
+                        "character_type": row.Character.character_type,
+                        "campaign_id": row.Character.campaign_id,
+                        "template_id": row.Character.template_id,
+                    },
+                }
+                for row in session.execute(statement)
+            ]
+
     def list_assets(self, campaign_id: str, module_id: str) -> list[dict[str, Any]]:
         """List source and derived assets belonging to one campaign module."""
         with self.database.transaction() as session:
@@ -1018,6 +1671,7 @@ class ModuleService:
         source_path: str,
         media_type: str,
         checksum: str,
+        normalized_content: str | None = None,
         metadata: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
         idempotency_write: IdempotencyWrite | None = None,
@@ -1047,7 +1701,7 @@ class ModuleService:
                     source_path=resolved,
                     media_type=media_type,
                     checksum=checksum,
-                    normalized_content=None,
+                    normalized_content=normalized_content,
                     metadata_json=dict(metadata or {}),
                 )
                 session.add(row)
@@ -1055,6 +1709,8 @@ class ModuleService:
                 raise ValueError("managed module asset path has different content")
             else:
                 row.media_type = media_type
+                if normalized_content is not None:
+                    row.normalized_content = normalized_content
                 row.metadata_json = {**dict(row.metadata_json or {}), **dict(metadata or {})}
             session.flush()
             result = self._asset_view(row)
@@ -1353,6 +2009,7 @@ class ModuleService:
                         canonical_heading_path(row.ModuleChunk.heading_path)
                     ),
                     "content": row.ModuleChunk.content,
+                    "content_hash": row.ModuleChunk.content_hash,
                     "chunk_type": row.ModuleChunk.chunk_type,
                     "page_start": row.ModuleChunk.page_start,
                     "page_end": row.ModuleChunk.page_end,
@@ -1772,7 +2429,10 @@ class ModuleService:
         occurrences: dict[str, int] = {}
         for chapter in parsed:
             for scene in chapter.scenes:
-                base = ModuleService._scene_stable_key(scene.heading_path, scene.title)
+                supplied = str(dict(scene.metadata or {}).get("stable_key") or "").strip()
+                base = supplied or ModuleService._scene_stable_key(
+                    scene.heading_path, scene.title
+                )
                 occurrences[base] = occurrences.get(base, 0) + 1
                 occurrence = occurrences[base]
                 result[(chapter.ordinal, scene.ordinal)] = (
@@ -2355,6 +3015,20 @@ class ModuleService:
             "metadata": dict(row.metadata_json or {}),
             "created_at": row.created_at.isoformat() if row.created_at else None,
             "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        }
+
+    @staticmethod
+    def _actor_binding_view(row: ModuleActorBinding) -> dict[str, Any]:
+        return {
+            "id": row.id,
+            "module_id": row.module_id,
+            "scene_id": row.scene_id,
+            "scene_key": row.scene_key or None,
+            "character_id": row.character_id,
+            "portable_actor_id": row.portable_actor_id,
+            "binding_kind": row.binding_kind,
+            "role": row.role,
+            "metadata": dict(row.metadata_json or {}),
         }
 
     @staticmethod

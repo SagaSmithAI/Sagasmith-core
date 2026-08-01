@@ -13,6 +13,7 @@ from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.database import Database
 from sagasmith_core.idempotency import IdempotencyService
 from sagasmith_core.models import Campaign, Character
+from sagasmith_core.portable import build_actor_card, validate_actor_card
 
 
 class CharacterNotFoundError(LookupError):
@@ -73,6 +74,77 @@ class CharacterService:
             if row is None:
                 raise CharacterNotFoundError(character_id)
             return self._info(row)
+
+    def export_portable_card(
+        self,
+        character_id: str,
+        *,
+        portable_id: str,
+        version: str = "1.0.0",
+        metadata: dict[str, Any] | None = None,
+        provenance: dict[str, Any] | None = None,
+        bindings: list[dict[str, Any]] | None = None,
+        dependencies: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Export an actor without leaking campaign identity or runtime revision."""
+
+        character = self.get(character_id)
+        return build_actor_card(
+            portable_id=portable_id,
+            version=version,
+            system_id=character.system_id,
+            actor_type=character.character_type,
+            name=character.name,
+            player_name=character.player_name,
+            summary=character.summary,
+            sheet=character.sheet,
+            notes=character.notes,
+            provenance=provenance,
+            bindings=bindings,
+            metadata=metadata,
+            dependencies=dependencies,
+        )
+
+    def import_portable_card(
+        self,
+        card: dict[str, Any],
+        *,
+        campaign_id: str | None = None,
+        player_name: str | None = None,
+        name: str | None = None,
+        principal_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> CharacterInfo:
+        """Create a fresh local actor from a validated portable card.
+
+        System-specific callers must validate the sheet and notes before this
+        boundary.  Import never transfers actor knowledge, campaign state, a
+        source database id, or a source revision.
+        """
+
+        value = validate_actor_card(card)
+        payload = value["payload"]
+        arguments = {
+            "system_id": value["system_id"],
+            "name": name if name is not None else payload["name"],
+            "character_type": payload["actor_type"],
+            "campaign_id": campaign_id,
+            "player_name": (
+                player_name if player_name is not None else payload["player_name"]
+            ),
+            "summary": payload["summary"],
+            "sheet": copy.deepcopy(payload["sheet"]),
+            "notes": copy.deepcopy(payload["notes"]),
+        }
+        if principal_id is None and idempotency_key is None:
+            return self.create(**arguments)
+        if principal_id is None or idempotency_key is None:
+            raise ValueError("principal_id and idempotency_key must be supplied together")
+        return self.create_idempotent(
+            **arguments,
+            principal_id=principal_id,
+            idempotency_key=idempotency_key,
+        )
 
     def list(
         self,

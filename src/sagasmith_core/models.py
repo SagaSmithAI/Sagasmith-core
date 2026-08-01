@@ -875,6 +875,39 @@ class ModuleContentReview(TimestampMixin, Base):
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+class ModuleActorBinding(TimestampMixin, Base):
+    """Portable cast/preset association owned by an immutable module revision."""
+
+    __tablename__ = "module_actor_bindings"
+    __table_args__ = (
+        UniqueConstraint(
+            "module_id",
+            "scene_key",
+            "character_id",
+            "binding_kind",
+            "role",
+            name="uq_module_actor_binding",
+        ),
+        Index("ix_module_actor_binding_scene", "module_id", "scene_key"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    module_id: Mapped[str] = mapped_column(
+        ForeignKey("module_sources.id", ondelete="CASCADE"), index=True
+    )
+    scene_id: Mapped[str | None] = mapped_column(
+        ForeignKey("module_scenes.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    scene_key: Mapped[str] = mapped_column(String(300), default="")
+    character_id: Mapped[str] = mapped_column(
+        ForeignKey("characters.id", ondelete="CASCADE"), index=True
+    )
+    portable_actor_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    binding_kind: Mapped[str] = mapped_column(String(50), default="cast")
+    role: Mapped[str] = mapped_column(String(200), default="")
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
 class ImportJob(TimestampMixin, Base):
     """Durable authoring workflow state for rulebooks and adventure modules."""
 

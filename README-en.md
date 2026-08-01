@@ -14,6 +14,7 @@
 - **Events and long-term memory** — event logs, stable fact identity, branch revisions, recaps, and continuity context.
 - **Rule packs** — core/extension packages, profile locks, provenance, rule receipts, and mechanic IR.
 - **Content ingestion** — resumable import jobs, content-addressed normalization/page caches, PDFium text extraction, selective OCR quality gates, and page-aware indexes.
+- **Portable content** — one actor-card schema for PCs/NPCs/monsters, self-contained Scene Atlas module packages, and reusable preset-card libraries.
 - **Retrieval** — exact and lexical search, SQLite FTS5, plus optional ChromaDB and sentence-transformers.
 - **System plugins** — D&D, CoC, and future systems register through the `sagasmith.systems` entry point.
 
@@ -31,15 +32,39 @@ flowchart TB
 
 Core does not decide GM style, MCP exposure, or system-specific rules. Skills own operating guidance, system runtimes own rules, MCP servers own the capability/storage boundary, and Core owns consistent data semantics.
 
+## Shareable content formats
+
+`sagasmith.portable` v1 is a system-neutral JSON envelope protected by
+canonical JSON and SHA-256 checksums:
+
+- `actor_card` is the shared PC/NPC/monster form; `actor_type` selects the role.
+  Import creates a fresh local identity. Database ids, campaign ids, revisions,
+  access grants, and ActorKnowledge are never exported.
+- `module_pack` carries the normalized document, a signed Scene Atlas with exact
+  scene text and retrieval chunks, content-addressed assets, reviewed content,
+  cards, and stable scene bindings. Import replays that structure instead of
+  asking the receiver's current parser to guess boundaries again.
+  It excludes progress, world state, memory, random streams, branches, and
+  Snapshots.
+- `preset_pack` distributes a reusable actor-card library, such as a game
+  system's bundled standard creature cards.
+
+Core validates the generic envelope and rebuilds content through public service
+paths. System plugins still validate sheets, editions, and rule dependencies;
+applications/MCP servers still own authorization and import roots. See
+`CharacterService.export_portable_card/import_portable_card`,
+`ModuleService.export_portable_pack/import_portable_pack`, and
+`ModuleService.bind_actor/list_actor_bindings`.
+
 ## Domain services
 
 | Domain | Main services | Contract |
 |---|---|---|
 | Campaign | `CampaignService`, `AccessService` | system partitioning and principal/role boundaries |
-| Character | `CharacterService`, `StateMutationService` | revisioned sheets and controlled mutation |
+| Character | `CharacterService`, `StateMutationService` | revisioned sheets, controlled mutation, actor-card import/export |
 | Knowledge | `ActorKnowledgeService` | actor viewpoints and branch validity |
 | Timeline | `SnapshotService`, `BranchService`, `ContinuityService` | ancestry, checkout, and continuity context |
-| Content | `ImportJobService`, `ModuleService`, `PdfDocumentConverter` | resumable imports, provenance, structure, quality |
+| Content | `ImportJobService`, `ModuleService`, `PdfDocumentConverter` | resumable imports, provenance, structure, portable module/preset packs |
 | Rules | `RulePackService`, `RuleProfileService`, `RuleReceiptService` | versioned packs, active context, settlement evidence |
 | Retrieval | `RuleService`, `VectorStore` | graceful degradation; vectors never own truth |
 
@@ -85,6 +110,7 @@ The package supplies its profile, character schema, module parser, and rules eng
 - Checkout never silently discards a dirty worktree; save a snapshot before switching branches.
 - Writes should use expected revisions and idempotency keys so agent retries cannot duplicate effects.
 - Player reads are limited to visible branches, scene scopes, and actor knowledge; GM authority requires an explicit principal/role.
+- Portable packages are not saves or permission carriers. Imported actors receive fresh identities and must acquire subjective knowledge in the target campaign.
 - Parsed content retains provenance, pages, parser profile, and quality warnings; rich metadata is best effort.
 - Document caches are checksum- and profile-bound. Corrupt cache entries are ignored, and
   parser-version changes can reuse verified PDF page extraction/OCR without accepting stale
