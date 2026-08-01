@@ -44,7 +44,7 @@ from sagasmith_core.idempotency import (
 )
 from sagasmith_core.import_jobs import ImportJobError, ImportJobService
 from sagasmith_core.knowledge import ActorKnowledgeService
-from sagasmith_core.memory import MemoryService
+from sagasmith_core.memory import MemoryService, validate_subject_context_fact
 from sagasmith_core.modules import (
     EXACT_MODULE_SOURCE_FIELD_ORDER,
     EXACT_MODULE_SOURCE_FIELDS,
@@ -64,6 +64,7 @@ from sagasmith_core.state import (
     CharacterStateUpdate,
     StateMutationService,
 )
+from sagasmith_core.subject_context import SubjectContextService
 from sagasmith_core.systems import SystemDefinition, SystemRegistry
 from sagasmith_core.vector import VectorStore
 from sagasmith_core.vector_jobs import VectorFlushResult, VectorIndexJobService
@@ -114,6 +115,7 @@ __all__ = [
     "RuleService",
     "SnapshotService",
     "StateMutationService",
+    "SubjectContextService",
     "SystemDefinition",
     "SystemRegistry",
     "VectorStore",
@@ -129,6 +131,7 @@ __all__ = [
     "normalize_source_evidence_text",
     "request_hash",
     "render_pdf_page",
+    "validate_subject_context_fact",
 ]
 
 __version__ = "0.2.0"

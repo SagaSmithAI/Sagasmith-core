@@ -14,6 +14,7 @@ from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.context_anchors import (
     CONTEXT_ANCHOR_KIND,
     normalize_context_anchor_metadata,
+    normalize_context_entity_ref,
 )
 from sagasmith_core.database import Database
 from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
@@ -53,6 +54,28 @@ class MemoryInfo:
 
 
 _STATUSES = {"active", "superseded", "retracted"}
+SUBJECT_CONTEXT_KIND_PREFIXES = {
+    "actor_state": "actor",
+    "faction_state": "faction",
+    "faction_knowledge": "faction",
+}
+
+
+def validate_subject_context_fact(*, kind: Any, subject_ref: Any) -> None:
+    """Reject subject-context kinds stored under a different epistemic owner."""
+
+    normalized_kind = str(kind or "").strip()
+    expected_prefix = SUBJECT_CONTEXT_KIND_PREFIXES.get(normalized_kind)
+    if expected_prefix is None:
+        return
+    normalized_ref = normalize_context_entity_ref(
+        subject_ref,
+        field=f"{normalized_kind} subject_ref",
+    )
+    if not normalized_ref.startswith(f"{expected_prefix}:"):
+        raise ValueError(
+            f"{normalized_kind} subject_ref must use {expected_prefix}:<id>"
+        )
 
 
 class MemoryService:
@@ -457,6 +480,7 @@ class MemoryService:
         importance: int,
         disclosure_scope: str | None,
     ) -> MemoryInfo:
+        validate_subject_context_fact(kind=kind, subject_ref=subject_ref)
         memory_id = str(uuid.uuid4())
         memory = CampaignMemory(
             id=memory_id,
