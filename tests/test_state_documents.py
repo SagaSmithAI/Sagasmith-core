@@ -174,11 +174,11 @@ def test_rapidocr_page_cache_survives_provider_restart_and_rejects_tampering(
     cache = tmp_path / "cache"
     calls: list[list[int]] = []
 
-    def recovered_layouts(path, *, page_numbers=None):
+    def recovered_layouts(path, *, page_numbers=None, on_page=None):
         assert path == source.resolve()
         pages = list(page_numbers or [])
         calls.append(pages)
-        return [
+        layouts = [
             OcrPageLayout(
                 page_number=page_number,
                 width=600,
@@ -196,6 +196,10 @@ def test_rapidocr_page_cache_survives_provider_restart_and_rejects_tampering(
             )
             for page_number in pages
         ]
+        if on_page is not None:
+            for layout in layouts:
+                on_page(layout)
+        return layouts
 
     first = RapidOcrProvider(model_type="medium", cache_dir=cache)
     monkeypatch.setattr(first, "_extract_layout_uncached", recovered_layouts)
@@ -210,7 +214,9 @@ def test_rapidocr_page_cache_survives_provider_restart_and_rejects_tampering(
     monkeypatch.setattr(
         restarted,
         "_extract_layout_uncached",
-        lambda path, *, page_numbers=None: pytest.fail("page should be cached"),
+        lambda path, *, page_numbers=None, on_page=None: pytest.fail(
+            "page should be cached"
+        ),
     )
     cached = restarted.extract_layout(source, page_numbers=[1, 2])
 
@@ -236,6 +242,60 @@ def test_rapidocr_page_cache_survives_provider_restart_and_rejects_tampering(
     ]
     assert repaired.cache_hits == 1
     assert repaired.cache_misses == 1
+
+
+def test_rapidocr_page_cache_commits_each_page_before_batch_failure(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "source.pdf"
+    source.write_bytes(b"immutable source bytes")
+    cache = tmp_path / "cache"
+
+    def interrupted(path, *, page_numbers=None, on_page=None):
+        del path
+        assert page_numbers == [1, 2]
+        first = OcrPageLayout(
+            page_number=1,
+            width=600,
+            height=800,
+            blocks=(OcrTextBlock("Recovered first page", 0.99, 20, 20, 580, 60),),
+        )
+        assert on_page is not None
+        on_page(first)
+        raise RuntimeError("model process interrupted")
+
+    provider = RapidOcrProvider(model_type="medium", cache_dir=cache)
+    monkeypatch.setattr(provider, "_extract_layout_uncached", interrupted)
+    with pytest.raises(RuntimeError, match="interrupted"):
+        provider.extract_layout(source, page_numbers=[1, 2])
+
+    requested: list[int] = []
+
+    def resume(path, *, page_numbers=None, on_page=None):
+        del path
+        requested.extend(page_numbers or [])
+        second = OcrPageLayout(
+            page_number=2,
+            width=600,
+            height=800,
+            blocks=(OcrTextBlock("Recovered second page", 0.99, 20, 20, 580, 60),),
+        )
+        assert on_page is not None
+        on_page(second)
+        return [second]
+
+    restarted = RapidOcrProvider(model_type="medium", cache_dir=cache)
+    monkeypatch.setattr(restarted, "_extract_layout_uncached", resume)
+    layouts = restarted.extract_layout(source, page_numbers=[1, 2])
+
+    assert requested == [2]
+    assert [layout.blocks[0].text for layout in layouts] == [
+        "Recovered first page",
+        "Recovered second page",
+    ]
+    assert restarted.cache_hits == 1
+    assert restarted.cache_misses == 1
 
 
 def test_ocr_cascade_uses_stronger_model_only_for_unusable_pages() -> None:

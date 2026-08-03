@@ -9,7 +9,7 @@ import re
 import unicodedata
 from bisect import bisect_right
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from importlib.metadata import PackageNotFoundError
@@ -1251,10 +1251,12 @@ class RapidOcrProvider:
         source = Path(path).expanduser().resolve()
         selected = list(page_numbers) if page_numbers is not None else None
         if selected is None:
-            layouts = self._extract_layout_uncached(source, page_numbers=None)
-            if self.cache_dir is not None:
-                source_checksum = file_sha256(source)
-                for layout in layouts:
+            source_checksum = (
+                file_sha256(source) if self.cache_dir is not None else ""
+            )
+
+            def persist_all(layout: OcrPageLayout) -> None:
+                if self.cache_dir is not None:
                     _write_ocr_page_cache(
                         self.cache_dir,
                         source_checksum=source_checksum,
@@ -1262,7 +1264,12 @@ class RapidOcrProvider:
                         layout=layout,
                     )
                     self.cache_misses += 1
-            return layouts
+
+            return self._extract_layout_uncached(
+                source,
+                page_numbers=None,
+                on_page=persist_all,
+            )
 
         if not selected:
             return []
@@ -1294,7 +1301,20 @@ class RapidOcrProvider:
                 layouts_by_page[page_number] = cached
                 self.cache_hits += 1
         if missing:
-            recovered = self._extract_layout_uncached(source, page_numbers=missing)
+            def persist_recovered(layout: OcrPageLayout) -> None:
+                layouts_by_page[layout.page_number] = layout
+                _write_ocr_page_cache(
+                    self.cache_dir,
+                    source_checksum=source_checksum,
+                    profile=profile,
+                    layout=layout,
+                )
+
+            recovered = self._extract_layout_uncached(
+                source,
+                page_numbers=missing,
+                on_page=persist_recovered,
+            )
             if len(recovered) != len(missing):
                 raise DocumentQualityError(
                     "pdf_ocr_page_mismatch",
@@ -1307,12 +1327,6 @@ class RapidOcrProvider:
                         "OCR provider returned a layout for the wrong page",
                     )
                 layouts_by_page[expected_page] = layout
-                _write_ocr_page_cache(
-                    self.cache_dir,
-                    source_checksum=source_checksum,
-                    profile=profile,
-                    layout=layout,
-                )
         return [layouts_by_page[page_number] for page_number in selected]
 
     def _extract_layout_uncached(
@@ -1320,6 +1334,7 @@ class RapidOcrProvider:
         source: Path,
         *,
         page_numbers: Sequence[int] | None,
+        on_page: Callable[[OcrPageLayout], None] | None = None,
     ) -> list[OcrPageLayout]:
         """Run the configured image model without consulting the page cache."""
 
@@ -1349,9 +1364,14 @@ class RapidOcrProvider:
                         bitmap.close()
                 finally:
                     page.close()
-                pages.append(
-                    _ocr_page_layout(output, page_number=page_number, image_shape=image.shape)
+                layout = _ocr_page_layout(
+                    output,
+                    page_number=page_number,
+                    image_shape=image.shape,
                 )
+                pages.append(layout)
+                if on_page is not None:
+                    on_page(layout)
             return pages
         finally:
             document.close()
