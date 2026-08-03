@@ -37,6 +37,7 @@ from sagasmith_core.documents import (
     NormalizedDocument,
     PageLocator,
     PdfDocumentConverter,
+    RapidOcrProvider,
     _looks_like_corrupt_visual_heading,
     _ocr_page_layout,
     _pdf_form_metadata,
@@ -135,6 +136,19 @@ def test_ocr_page_layout_retains_coordinates_for_text_only_recovery() -> None:
             },
         ],
     }
+
+
+def test_rapidocr_profile_binds_model_version_and_scale() -> None:
+    small = RapidOcrProvider(scale=2.0, model_type="small")
+    medium = RapidOcrProvider(scale=2.0, model_type="medium")
+
+    assert "ocr=PP-OCRv6" in small.cache_profile
+    assert "model=small" in small.cache_profile
+    assert "scale=2.00" in small.cache_profile
+    assert small.cache_profile != medium.cache_profile
+
+    with pytest.raises(ValueError, match="model_type"):
+        RapidOcrProvider(model_type="server")
 
 
 def test_rule_document_path_ingest_preserves_source_and_page_provenance(database, tmp_path) -> None:

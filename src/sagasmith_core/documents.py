@@ -11,6 +11,8 @@ from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as package_version
 from pathlib import Path
 from statistics import median
 from typing import Any, Protocol
@@ -955,15 +957,57 @@ class RapidOcrProvider:
 
     name = "rapidocr"
 
-    def __init__(self, *, scale: float = 2.0) -> None:
+    def __init__(self, *, scale: float = 2.0, model_type: str = "small") -> None:
         if not 1.0 <= scale <= 4.0:
             raise ValueError("OCR scale must be between 1.0 and 4.0")
+        if model_type not in {"small", "medium"}:
+            raise ValueError("OCR model_type must be small or medium")
         self.scale = float(scale)
+        self.model_type = model_type
         self._engine: Any | None = None
 
     @property
     def cache_profile(self) -> str:
-        return f"{self.name}:scale={self.scale:.2f}"
+        try:
+            rapidocr_version = package_version("rapidocr")
+        except PackageNotFoundError:
+            rapidocr_version = "unavailable"
+        return (
+            f"{self.name}:package={rapidocr_version}:ocr=PP-OCRv6:"
+            f"model={self.model_type}:scale={self.scale:.2f}"
+        )
+
+    def _load_engine(self) -> Any:
+        try:
+            from rapidocr import (
+                EngineType,
+                LangDet,
+                LangRec,
+                ModelType,
+                OCRVersion,
+                RapidOCR,
+            )
+        except ImportError as exc:
+            raise RuntimeError(
+                "OCR requires `pip install sagasmith-core[documents,ocr]`"
+            ) from exc
+        if self._engine is None:
+            model_type = (
+                ModelType.MEDIUM if self.model_type == "medium" else ModelType.SMALL
+            )
+            self._engine = RapidOCR(
+                params={
+                    "Det.engine_type": EngineType.ONNXRUNTIME,
+                    "Det.lang_type": LangDet.EN,
+                    "Det.model_type": model_type,
+                    "Det.ocr_version": OCRVersion.PPOCRV6,
+                    "Rec.engine_type": EngineType.ONNXRUNTIME,
+                    "Rec.lang_type": LangRec.EN,
+                    "Rec.model_type": model_type,
+                    "Rec.ocr_version": OCRVersion.PPOCRV6,
+                }
+            )
+        return self._engine
 
     def extract(
         self,
@@ -973,13 +1017,11 @@ class RapidOcrProvider:
     ) -> list[str]:
         try:
             import pypdfium2 as pdfium
-            from rapidocr import RapidOCR
         except ImportError as exc:
             raise RuntimeError(
                 "OCR requires `pip install sagasmith-core[documents,ocr]`"
             ) from exc
-        if self._engine is None:
-            self._engine = RapidOCR()
+        engine = self._load_engine()
         source = Path(path).expanduser().resolve()
         document = pdfium.PdfDocument(str(source))
         try:
@@ -994,7 +1036,7 @@ class RapidOcrProvider:
                 try:
                     bitmap = page.render(scale=self.scale)
                     try:
-                        output = self._engine(bitmap.to_numpy())
+                        output = engine(bitmap.to_numpy())
                     finally:
                         bitmap.close()
                 finally:
@@ -1015,13 +1057,11 @@ class RapidOcrProvider:
 
         try:
             import pypdfium2 as pdfium
-            from rapidocr import RapidOCR
         except ImportError as exc:
             raise RuntimeError(
                 "OCR requires `pip install sagasmith-core[documents,ocr]`"
             ) from exc
-        if self._engine is None:
-            self._engine = RapidOCR()
+        engine = self._load_engine()
         source = Path(path).expanduser().resolve()
         document = pdfium.PdfDocument(str(source))
         try:
@@ -1037,7 +1077,7 @@ class RapidOcrProvider:
                     bitmap = page.render(scale=self.scale)
                     try:
                         image = bitmap.to_numpy()
-                        output = self._engine(image)
+                        output = engine(image)
                     finally:
                         bitmap.close()
                 finally:
