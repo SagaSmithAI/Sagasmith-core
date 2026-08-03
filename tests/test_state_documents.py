@@ -144,6 +144,8 @@ def test_ocr_page_layout_retains_coordinates_for_text_only_recovery() -> None:
 
 
 def test_rapidocr_profile_binds_model_version_and_scale() -> None:
+    assert RapidOcrProvider().model_type == "medium"
+
     small = RapidOcrProvider(scale=2.0, model_type="small")
     medium = RapidOcrProvider(scale=2.0, model_type="medium")
 
@@ -197,6 +199,37 @@ def test_ocr_cascade_uses_stronger_model_only_for_unusable_pages() -> None:
     assert cascade.cache_profile == (
         "rapidocr-cascade:small:v1=>medium:v1"
     )
+
+
+def test_ocr_cascade_prefers_confidence_over_extra_garbage_characters() -> None:
+    class FakeLayoutOcr:
+        def __init__(self, name: str, text: str, confidence: float) -> None:
+            self.name = name
+            self.text = text
+            self.confidence = confidence
+
+        def extract_layout(self, path, *, page_numbers=None):
+            del path
+            return [
+                OcrPageLayout(
+                    page_number=page,
+                    width=600,
+                    height=800,
+                    blocks=(
+                        OcrTextBlock(self.text, self.confidence, 20, 20, 580, 60),
+                    ),
+                )
+                for page in list(page_numbers or [])
+            ]
+
+    noisy = FakeLayoutOcr("small", "ABCDEFGHIJKLMNO1234567", 0.7)
+    accurate = FakeLayoutOcr("medium", "CORRECT TEXT EVIDENCE", 0.99)
+
+    layouts = CascadingOcrProvider(noisy, accurate).extract_layout(
+        "unused.pdf", page_numbers=[3]
+    )
+
+    assert layouts[0].blocks[0].text == "CORRECT TEXT EVIDENCE"
 
 
 def test_layout_reading_order_keeps_columns_contiguous() -> None:

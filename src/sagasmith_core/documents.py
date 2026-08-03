@@ -982,7 +982,7 @@ class RapidOcrProvider:
 
     name = "rapidocr"
 
-    def __init__(self, *, scale: float = 2.0, model_type: str = "small") -> None:
+    def __init__(self, *, scale: float = 2.0, model_type: str = "medium") -> None:
         if not 1.0 <= scale <= 4.0:
             raise ValueError("OCR scale must be between 1.0 and 4.0")
         if model_type not in {"small", "medium"}:
@@ -1260,11 +1260,12 @@ def _ocr_text_needs_fallback(text: str) -> bool:
     )
 
 
-def _ocr_layout_score(layout: OcrPageLayout) -> tuple[int, int, float]:
+def _ocr_layout_score(layout: OcrPageLayout) -> tuple[int, float, int]:
     text, _used_columns = _layout_reading_order_text(layout)
     base = _ocr_text_score(text)
     confidences = [float(block.confidence) for block in layout.blocks]
-    return (*base, sum(confidences) / len(confidences) if confidences else 0.0)
+    average_confidence = sum(confidences) / len(confidences) if confidences else 0.0
+    return (base[0], average_confidence, base[1])
 
 
 class PdfTextLayoutProvider:
