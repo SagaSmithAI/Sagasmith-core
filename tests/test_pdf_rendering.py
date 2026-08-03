@@ -4,6 +4,7 @@ import pytest
 
 from sagasmith_core.documents import (
     PdfTextLayoutProvider,
+    _layout_repairs_missing_word_spaces,
     _pdf_text_layout_blocks,
     render_pdf_page,
 )
@@ -98,6 +99,31 @@ def test_pdf_text_layout_character_grouping_separates_same_line_columns() -> Non
     )
 
     assert [block.text for block in blocks] == ["LEFT CREATURE", "RIGHT CREATURE"]
+
+
+def test_pdf_text_layout_restores_word_spaces_from_character_gaps() -> None:
+    values = []
+    x = 10.0
+    for index, character in enumerate("CircleofWildfire"):
+        values.append((character, x, 70.0))
+        x += 5.0
+        if index in {5, 7}:
+            x += 2.0
+
+    blocks = _pdf_text_layout_blocks(
+        _PositionedTextPage(values),
+        page_height=100.0,
+    )
+
+    assert [block.text for block in blocks] == ["Circle of Wildfire"]
+    assert _layout_repairs_missing_word_spaces(
+        "CircleofWildfire",
+        "Circle of Wildfire",
+    ) is True
+    assert _layout_repairs_missing_word_spaces(
+        "Circle of Wildfire",
+        "Circle of Wildfire",
+    ) is False
 
 
 def test_pdf_text_layout_respects_an_explicit_empty_page_selection(

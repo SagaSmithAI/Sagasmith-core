@@ -18,12 +18,12 @@ from statistics import median
 from typing import Any, Protocol
 from uuid import uuid4
 
-DOCUMENT_NORMALIZER_VERSION = "24"
+DOCUMENT_NORMALIZER_VERSION = "25"
 _MAX_STRUCTURAL_HEADING_CHARS = 200
 DOCUMENT_SOURCE_SUFFIXES = frozenset({".md", ".markdown", ".pdf", ".txt"})
 _DOCUMENT_CACHE_SCHEMA = 1
 _PDF_EXTRACTION_CACHE_SCHEMA = 2
-_PDF_TEXT_EXTRACTOR_VERSION = "4"
+_PDF_TEXT_EXTRACTOR_VERSION = "5"
 
 
 class DocumentQualityError(RuntimeError):
@@ -1395,7 +1395,25 @@ def _pdf_text_layout_blocks(text_page: Any, *, page_height: float) -> list[OcrTe
                 segments.append([])
             segments[-1].append(character)
         for segment in segments:
-            raw_text = "".join(str(item["text"]) for item in segment)
+            reconstructed: list[str] = []
+            previous = None
+            for character in segment:
+                value = str(character["text"])
+                if previous is not None:
+                    gap = float(character["x0"]) - float(previous["x1"])
+                    spacing_threshold = max(
+                        0.8,
+                        float(line["height"]) * 0.12,
+                    )
+                    if (
+                        gap > spacing_threshold
+                        and not str(previous["text"]).isspace()
+                        and not value.isspace()
+                    ):
+                        reconstructed.append(" ")
+                reconstructed.append(value)
+                previous = character
+            raw_text = "".join(reconstructed)
             text = " ".join(raw_text.split())
             if not text:
                 continue
@@ -1416,6 +1434,22 @@ def _pdf_text_layout_blocks(text_page: Any, *, page_height: float) -> list[OcrTe
                 )
             )
     return blocks
+
+
+def _layout_repairs_missing_word_spaces(embedded: str, layout: str) -> bool:
+    """Prefer positioned text when it restores separators without changing glyphs."""
+
+    embedded_letters = "".join(character for character in embedded if character.isalpha())
+    layout_letters = "".join(character for character in layout if character.isalpha())
+    if not embedded_letters or embedded_letters != layout_letters:
+        return False
+    embedded_words = len(re.findall(r"[^\W\d_]+", embedded, flags=re.UNICODE))
+    layout_words = len(re.findall(r"[^\W\d_]+", layout, flags=re.UNICODE))
+    return (
+        layout_words >= embedded_words + 2
+        and sum(character.isspace() for character in layout)
+        >= sum(character.isspace() for character in embedded) + 2
+    )
 
 
 def _layout_reading_order_text(layout: OcrPageLayout) -> tuple[str, bool]:
@@ -1710,8 +1744,12 @@ def _extract_pdfium_pages(
                             ),
                         )
                     )
-                    result.append(layout_text if used_columns else embedded_text)
-                    if used_columns:
+                    use_layout = used_columns or _layout_repairs_missing_word_spaces(
+                        embedded_text,
+                        layout_text,
+                    )
+                    result.append(layout_text if use_layout else embedded_text)
+                    if use_layout:
                         layout_ordered_pages.append(index + 1)
                     page_headings = _visual_headings(text_page, layout_profile)
                     if page_headings:
