@@ -329,6 +329,7 @@ class RulePackVersion(Base):
     manifest: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     artifacts: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     mechanics: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     checksum: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(32), default="draft", index=True)
     validation_report: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
@@ -357,6 +358,61 @@ class CampaignRuleActivation(TimestampMixin, Base):
     version: Mapped[str] = mapped_column(String(64), nullable=False)
     checksum: Mapped[str] = mapped_column(String(64), nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    options: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class ContentAddon(TimestampMixin, Base):
+    """System-neutral identity for an installed portable addon release."""
+
+    __tablename__ = "content_addons"
+
+    id: Mapped[str] = mapped_column(String(200), primary_key=True)
+    system_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(300), nullable=False)
+
+
+class ContentAddonVersion(Base):
+    """Immutable addon manifest and exact embedded-component lock."""
+
+    __tablename__ = "content_addon_versions"
+
+    addon_id: Mapped[str] = mapped_column(
+        ForeignKey("content_addons.id", ondelete="CASCADE"), primary_key=True
+    )
+    version: Mapped[str] = mapped_column(String(64), primary_key=True)
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    components: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    package: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    checksum: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), default="imported", index=True)
+    validation_report: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class CampaignAddonActivation(TimestampMixin, Base):
+    """Exact addon lock selected by one campaign branch."""
+
+    __tablename__ = "campaign_addon_activations"
+    __table_args__ = (
+        UniqueConstraint(
+            "campaign_id", "branch_id", "addon_id", name="uq_campaign_branch_addon"
+        ),
+    )
+
+    campaign_id: Mapped[str] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="CASCADE"), primary_key=True
+    )
+    branch_id: Mapped[str] = mapped_column(
+        ForeignKey("campaign_branches.id", ondelete="CASCADE"), primary_key=True
+    )
+    addon_id: Mapped[str] = mapped_column(
+        ForeignKey("content_addons.id", ondelete="RESTRICT"), primary_key=True
+    )
+    version: Mapped[str] = mapped_column(String(64), nullable=False)
+    checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    component_locks: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     options: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 

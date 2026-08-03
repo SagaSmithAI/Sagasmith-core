@@ -16,7 +16,7 @@
 - **事件与长期记忆** — 事件日志、事实身份、分支修订、continuity context 与 recap 数据面。
 - **规则包** — core/extension 包、profile 锁定、版本与来源、规则 receipt 和机械 IR。
 - **内容导入** — 可恢复 import job、内容寻址的标准化/页面缓存、PDFium 文本提取、选择性 OCR 质量门禁与页码索引。
-- **可移植内容** — 同一 actor-card schema 覆盖 PC/NPC/怪物；module pack 保留 Scene Atlas、资产、审核内容与角色关联；preset pack 分发可复用卡库。
+- **可移植内容** — 同一 actor-card schema 覆盖 PC/NPC/怪物；module、preset、source-bound rule pack 可独立迁移，并可用无权限语义的 release manifest 组合发布。
 - **检索** — 精确与词法检索、SQLite FTS5，以及可选的 ChromaDB + sentence-transformers。
 - **插件系统** — 通过 `sagasmith.systems` entry point 注册 D&D、CoC 或新的系统实现。
 
@@ -42,12 +42,16 @@ Core 不负责主持风格、MCP 工具暴露或具体规则裁决。Agent Skill
 - `actor_card`：PC、NPC 和怪物统一格式，`actor_type` 只表示角色类别。导入总是创建新的本地 identity；数据库 id、campaign、revision、权限和 ActorKnowledge 不会被导出。
 - `module_pack`：封装标准化文档、带场景正文与检索 chunks 的签名 Scene Atlas、内容寻址资产、审核记录、角色卡与稳定场景关联；导入重放包内结构，不用接收端的新解析器重新猜边界。它不封装进度、世界状态、记忆、随机流、分支或 Snapshot。
 - `preset_pack`：可复用 actor card 集合，例如某规则系统随附的标准怪物/NPC 卡库。
+- `rule_pack`：封装规则 manifest、catalog artifacts、mechanic IR、来源 provenance 与完整检索 source/section/chunk。数据库 UUID 会替换为稳定 `source_key`/`chunk_key`，接收端再创建本地 id；`metadata.definition_checksum` 只锁定规则语义与依赖，不受本地 UUID 或 private/shareable 发布元数据影响。
+- `release_manifest`：只以精确版本与完整 envelope checksum 组合 `rule_pack`、`preset_pack`、`module_pack`；它不是安装、启用或权限载体。
 
 Core 只校验通用 envelope 并通过公开服务重建内容。系统插件仍需校验
 sheet、edition 和规则依赖；应用/MCP 仍需负责授权和导入根目录。可使用
 `CharacterService.export_portable_card/import_portable_card`、
 `ModuleService.export_portable_pack/import_portable_pack` 与
-`ModuleService.bind_actor/list_actor_bindings`。
+`ModuleService.bind_actor/list_actor_bindings`。规则来源通过
+`RuleService.export_portable_source/import_portable_source` 重建；规则包仍由
+`RulePackService` 独立完成 draft、install 与 campaign activation 生命周期。
 
 ## 核心领域
 
@@ -58,7 +62,7 @@ sheet、edition 和规则依赖；应用/MCP 仍需负责授权和导入根目�
 | Knowledge | `ActorKnowledgeService` | actor 视角隔离、分支有效性 |
 | Timeline | `SnapshotService`, `BranchService`, `ContinuityService` | DAG 祖先链、checkout、连续性上下文 |
 | Content | `ImportJobService`, `ModuleService`, `PdfDocumentConverter` | 可恢复导入、来源、结构、portable module/preset pack |
-| Rules | `RulePackService`, `RuleProfileService`, `RuleReceiptService` | 规则包版本、激活上下文和结算证据 |
+| Rules | `RuleService`, `RulePackService`, `RuleProfileService`, `RuleReceiptService` | portable 来源、规则包版本、精确依赖、激活上下文和结算证据 |
 | Retrieval | `RuleService`, `VectorStore` | 检索可降级，权威状态不交给向量库 |
 
 ## 安装
@@ -112,7 +116,7 @@ my_system = "my_package.system:get_system"
 - checkout 不会静默丢弃工作区：当前分支有未保存变化时，必须先创建 Snapshot。
 - 写操作应携带 expected revision 与幂等键，避免 Agent 重试造成重复副作用。
 - 玩家读取只允许当前可见分支、场景作用域和角色知识；GM 权限需要显式 principal/role。
-- Portable 包从不充当存档或权限载体；导入 actor 必须使用新身份，主观知识必须在目标战役中重新获得或合理传递。
+- Portable 包从不充当存档或权限载体；导入 actor 必须使用新身份，主观知识必须在目标战役中重新获得或合理传递；导入 rule pack 也不能自动安装或启用。
 - 文档解析结果保留来源、页码、质量警告和 parser profile；调用方必须处理缺失的富元数据。
 - 这是 Alpha 项目；主线迁移会保留当前已发布 schema 的数据，但不承诺任意旧实验版本或 downgrade 路径。
 

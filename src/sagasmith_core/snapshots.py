@@ -23,6 +23,7 @@ from sagasmith_core.models import (
     BranchActorKnowledgeHead,
     BranchFactHead,
     Campaign,
+    CampaignAddonActivation,
     CampaignBranch,
     CampaignEvent,
     CampaignEventParticipant,
@@ -31,6 +32,7 @@ from sagasmith_core.models import (
     CampaignRuleProfile,
     CampaignSnapshot,
     Character,
+    ContentAddonVersion,
     MemoryRevision,
     ModuleScene,
     ModuleSource,
@@ -74,7 +76,7 @@ def _checksum(value: dict[str, Any]) -> str:
 
 
 class SnapshotService:
-    SCHEMA_VERSION = 6
+    SCHEMA_VERSION = 7
 
     def __init__(self, database: Database) -> None:
         self.database = database
@@ -450,6 +452,16 @@ class SnapshotService:
                 .order_by(CampaignRuleActivation.pack_id)
             )
         )
+        addon_lock = list(
+            session.scalars(
+                select(CampaignAddonActivation)
+                .where(
+                    CampaignAddonActivation.campaign_id == campaign.id,
+                    CampaignAddonActivation.branch_id == branch_id,
+                )
+                .order_by(CampaignAddonActivation.addon_id)
+            )
+        )
         characters = list(
             session.scalars(
                 select(Character).where(Character.campaign_id == campaign.id).order_by(Character.id)
@@ -554,6 +566,17 @@ class SnapshotService:
                     "options": dict(row.options),
                 }
                 for row in rule_lock
+            ],
+            "addon_lock": [
+                {
+                    "addon_id": row.addon_id,
+                    "version": row.version,
+                    "checksum": row.checksum,
+                    "enabled": row.enabled,
+                    "component_locks": list(row.component_locks or []),
+                    "options": dict(row.options or {}),
+                }
+                for row in addon_lock
             ],
             "characters": [
                 {
@@ -804,6 +827,20 @@ class SnapshotService:
                 raise SnapshotIntegrityError(
                     "snapshot rule lock is unavailable; install the exact pack version first"
                 )
+        addon_lock = list(payload.get("addon_lock") or [])
+        for item in addon_lock:
+            version = session.get(
+                ContentAddonVersion,
+                {"addon_id": item["addon_id"], "version": item["version"]},
+            )
+            if (
+                version is None
+                or version.status != "installed"
+                or version.checksum != item["checksum"]
+            ):
+                raise SnapshotIntegrityError(
+                    "snapshot addon lock is unavailable; install the exact addon version first"
+                )
         value = payload["campaign"]
         campaign.name = value["name"]
         campaign.status = value["status"]
@@ -852,6 +889,25 @@ class SnapshotService:
                     version=item["version"],
                     checksum=item["checksum"],
                     enabled=bool(item.get("enabled", True)),
+                    options=dict(item.get("options") or {}),
+                )
+            )
+        session.execute(
+            delete(CampaignAddonActivation).where(
+                CampaignAddonActivation.campaign_id == campaign.id,
+                CampaignAddonActivation.branch_id == branch.id,
+            )
+        )
+        for item in addon_lock:
+            session.add(
+                CampaignAddonActivation(
+                    campaign_id=campaign.id,
+                    branch_id=branch.id,
+                    addon_id=item["addon_id"],
+                    version=item["version"],
+                    checksum=item["checksum"],
+                    enabled=bool(item.get("enabled", True)),
+                    component_locks=list(item.get("component_locks") or []),
                     options=dict(item.get("options") or {}),
                 )
             )
@@ -977,7 +1033,7 @@ class SnapshotService:
     @classmethod
     def _assert_integrity(cls, session, row: CampaignSnapshot) -> None:
         """Verify the full payload, DAG ancestry, and indexed continuity bindings."""
-        if row.schema_version not in {3, 4, 5, cls.SCHEMA_VERSION}:
+        if row.schema_version not in {3, 4, 5, 6, cls.SCHEMA_VERSION}:
             raise SnapshotIntegrityError(
                 "snapshot schema is unsupported; create a new snapshot with the current runtime"
             )
@@ -1005,6 +1061,45 @@ class SnapshotService:
                 or len(active_module_ids) != len(set(active_module_ids))
             ):
                 raise SnapshotIntegrityError("snapshot module activations are malformed")
+        if row.schema_version >= 7:
+            addon_lock = payload.get("addon_lock")
+            if not isinstance(addon_lock, list):
+                raise SnapshotIntegrityError("snapshot addon lock is malformed")
+            identities: set[str] = set()
+            rule_locks = {
+                (str(item.get("pack_id") or ""), str(item.get("version") or ""))
+                for item in payload.get("rule_lock") or []
+                if bool(item.get("enabled", True))
+            }
+            for item in addon_lock:
+                if not isinstance(item, dict):
+                    raise SnapshotIntegrityError("snapshot addon lock is malformed")
+                addon_id = str(item.get("addon_id") or "")
+                if not addon_id or addon_id in identities:
+                    raise SnapshotIntegrityError("snapshot addon lock identities are malformed")
+                identities.add(addon_id)
+                components = item.get("component_locks")
+                if not isinstance(components, list):
+                    raise SnapshotIntegrityError(
+                        "snapshot addon component locks are malformed"
+                    )
+                if bool(item.get("enabled", True)):
+                    missing_rule_locks = sorted(
+                        str(component.get("id") or "")
+                        for component in components
+                        if isinstance(component, dict)
+                        and component.get("kind") == "rule_pack"
+                        and (
+                            str(component.get("id") or ""),
+                            str(component.get("version") or ""),
+                        )
+                        not in rule_locks
+                    )
+                    if missing_rule_locks:
+                        raise SnapshotIntegrityError(
+                            "snapshot addon rule locks are absent from the runtime rule lock: "
+                            + ", ".join(missing_rule_locks)
+                        )
             available_module_ids = set(
                 session.scalars(
                     select(ModuleSource.id).where(

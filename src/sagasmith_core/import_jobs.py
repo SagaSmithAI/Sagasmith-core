@@ -39,7 +39,10 @@ _TRANSITIONS = {
     "extracted": {"review_required", "failed"},
     "review_required": {"reviewed", "failed"},
     "reviewed": {"compiled", "failed"},
-    "compiled": {"installed", "failed"},
+    # A validated but not-yet-installed draft may be reopened when improved
+    # extraction or review evidence becomes available. Installed versions stay
+    # immutable and require a new version/job instead.
+    "compiled": {"extracted", "review_required", "installed", "failed"},
     "installed": {"activated", "failed"},
     "validated": {"imported", "failed"},
     "imported": {"activated", "failed"},
@@ -185,6 +188,10 @@ class ImportJobService:
             job_id,
             state="review_required" if normalized else "extracted",
             candidates=normalized,
+            # Candidate replacement invalidates any earlier compiled draft.
+            # The state transition prevents installation until a fresh review
+            # and compile have succeeded.
+            validation={},
             expected_revision=expected_revision,
             idempotency_key=idempotency_key,
             idempotency_write=idempotency_write,

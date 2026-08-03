@@ -26,6 +26,10 @@ from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
 from sagasmith_core.integrity import unique_retired_source_key
 from sagasmith_core.models import RuleChunk, RuleSection, RuleSource, VectorIndexJob
 from sagasmith_core.parsing import MarkdownHierarchyParser
+from sagasmith_core.portable import (
+    portable_rule_chunk_key,
+    validate_portable_rule_source,
+)
 from sagasmith_core.retrieval import (
     SearchHit,
     cosine_similarity,
@@ -600,22 +604,356 @@ class RuleService:
             source = session.get(RuleSource, source_id)
             if source is None:
                 raise LookupError(source_id)
-            rows = session.scalars(
-                select(RuleChunk)
+            rows = session.execute(
+                select(
+                    RuleChunk,
+                    RuleSection.ordinal.label("section_ordinal"),
+                )
+                .join(RuleSection, RuleSection.id == RuleChunk.section_id)
                 .where(RuleChunk.source_id == source_id)
-                .order_by(RuleChunk.ordinal, RuleChunk.id)
-            )
+                .order_by(
+                    RuleSection.ordinal,
+                    RuleChunk.ordinal,
+                    RuleChunk.id,
+                )
+            ).all()
             return [
                 {
-                    "id": row.id,
-                    "ordinal": row.ordinal,
-                    "heading_path": list(row.heading_path),
-                    "content": row.content,
-                    "page_start": dict(row.metadata_json or {}).get("page_start"),
-                    "page_end": dict(row.metadata_json or {}).get("page_end"),
+                    "id": row.RuleChunk.id,
+                    "section_ordinal": row.section_ordinal,
+                    "ordinal": row.RuleChunk.ordinal,
+                    "heading_path": list(row.RuleChunk.heading_path),
+                    "content": row.RuleChunk.content,
+                    "page_start": dict(row.RuleChunk.metadata_json or {}).get("page_start"),
+                    "page_end": dict(row.RuleChunk.metadata_json or {}).get("page_end"),
                 }
                 for row in rows
             ]
+
+    def export_portable_source(self, source_id: str) -> dict[str, Any]:
+        """Export one indexed source without leaking local row identifiers."""
+
+        with self.database.transaction() as session:
+            source = session.get(RuleSource, source_id)
+            if source is None:
+                raise LookupError(source_id)
+            rows = list(
+                session.scalars(
+                    select(RuleSection)
+                    .where(RuleSection.source_id == source_id)
+                    .order_by(RuleSection.ordinal, RuleSection.id)
+                )
+            )
+            parent_ordinals = {row.id: row.ordinal for row in rows}
+            chunks_by_section: dict[str, list[RuleChunk]] = {}
+            for chunk in session.scalars(
+                select(RuleChunk)
+                .where(RuleChunk.source_id == source_id)
+                .order_by(RuleChunk.ordinal, RuleChunk.id)
+            ):
+                chunks_by_section.setdefault(chunk.section_id, []).append(chunk)
+            canonical_source_key = None
+            if source.canonical_source_id:
+                canonical = session.get(RuleSource, source.canonical_source_id)
+                if canonical is not None:
+                    canonical_source_key = self._logical_source_key(canonical)
+            source_key = self._logical_source_key(source)
+            metadata = {
+                key: value
+                for key, value in dict(source.metadata_json or {}).items()
+                if key not in {"logical_source_key", "source_path"}
+            }
+            sections = []
+            for row in rows:
+                chunks = []
+                for chunk in chunks_by_section.get(row.id, []):
+                    content_hash = hashlib.sha256(chunk.content.encode("utf-8")).hexdigest()
+                    chunks.append(
+                        {
+                            "key": portable_rule_chunk_key(
+                                source_key,
+                                row.ordinal,
+                                chunk.ordinal,
+                                chunk.content,
+                            ),
+                            "ordinal": chunk.ordinal,
+                            "heading_path": list(chunk.heading_path),
+                            "content": chunk.content,
+                            "content_hash": content_hash,
+                            "token_count": chunk.token_count,
+                            "metadata": {
+                                key: value
+                                for key, value in dict(chunk.metadata_json or {}).items()
+                                if key not in {"source_id", "section_id"}
+                            },
+                        }
+                    )
+                sections.append(
+                    {
+                        "ordinal": row.ordinal,
+                        "parent_ordinal": parent_ordinals.get(row.parent_id),
+                        "level": row.level,
+                        "title": row.title,
+                        "path": list(row.path),
+                        "content": row.content,
+                        "content_hash": hashlib.sha256(row.content.encode("utf-8")).hexdigest(),
+                        "start_offset": row.start_offset,
+                        "end_offset": row.end_offset,
+                        "chunks": chunks,
+                    }
+                )
+            return validate_portable_rule_source(
+                {
+                    "source_key": source_key,
+                    "title": source.title,
+                    "edition": source.edition,
+                    "locale": source.locale,
+                    "version": source.version,
+                    "publication_id": source.publication_id,
+                    "authority": source.authority,
+                    "canonical_source_key": canonical_source_key,
+                    "checksum": source.checksum,
+                    "metadata": metadata,
+                    "sections": sections,
+                }
+            )
+
+    def import_portable_source(
+        self,
+        value: dict[str, Any],
+        *,
+        system_id: str,
+        canonical_source_id: str | None = None,
+        embedder: Embedder | None = None,
+    ) -> dict[str, Any]:
+        """Rehydrate one portable source with fresh source, section, and chunk ids."""
+
+        source_value = validate_portable_rule_source(value)
+        source_key = source_value["source_key"]
+        checksum = source_value["checksum"]
+        if source_value["canonical_source_key"] and not canonical_source_id:
+            raise ValueError("portable canonical_source_key must be resolved before source import")
+        if canonical_source_id and not source_value["canonical_source_key"]:
+            raise ValueError("canonical_source_id requires portable canonical_source_key evidence")
+        with self.database.transaction() as session:
+            existing = session.scalar(
+                select(RuleSource).where(
+                    RuleSource.system_id == system_id,
+                    RuleSource.source_key == source_key,
+                )
+            )
+            if existing is not None and existing.checksum == checksum:
+                existing_id = existing.id
+            else:
+                if existing is not None:
+                    existing.active = False
+                    existing.source_key = self._retired_source_key(
+                        session,
+                        system_id,
+                        source_key,
+                        existing.checksum,
+                    )
+                    existing.metadata_json = {
+                        **dict(existing.metadata_json or {}),
+                        "logical_source_key": source_key,
+                    }
+                    session.flush()
+                existing_id = ""
+
+            if existing_id:
+                local_sections = list(
+                    session.scalars(
+                        select(RuleSection)
+                        .where(RuleSection.source_id == existing_id)
+                        .order_by(RuleSection.ordinal, RuleSection.id)
+                    )
+                )
+                local_chunk_rows = list(
+                    session.execute(
+                        select(
+                            RuleChunk,
+                            RuleSection.ordinal.label("section_ordinal"),
+                        )
+                        .join(RuleSection, RuleSection.id == RuleChunk.section_id)
+                        .where(RuleChunk.source_id == existing_id)
+                        .order_by(
+                            RuleSection.ordinal,
+                            RuleChunk.ordinal,
+                            RuleChunk.id,
+                        )
+                    )
+                )
+                portable_sections = sorted(
+                    source_value["sections"], key=lambda item: item["ordinal"]
+                )
+                expected_chunk_rows = [
+                    (section, chunk)
+                    for section in portable_sections
+                    for chunk in sorted(section["chunks"], key=lambda item: item["ordinal"])
+                ]
+                local_parent_ordinals = {section.id: section.ordinal for section in local_sections}
+                local_metadata = {
+                    key: value
+                    for key, value in dict(existing.metadata_json or {}).items()
+                    if key not in {"logical_source_key", "source_path"}
+                }
+                if (
+                    existing.title != source_value["title"]
+                    or existing.edition != source_value["edition"]
+                    or existing.locale != source_value["locale"]
+                    or existing.version != source_value["version"]
+                    or existing.publication_id != source_value["publication_id"]
+                    or existing.authority != source_value["authority"]
+                    or existing.canonical_source_id != canonical_source_id
+                    or local_metadata != source_value["metadata"]
+                    or len(local_sections) != len(portable_sections)
+                    or len(local_chunk_rows) != len(expected_chunk_rows)
+                    or any(
+                        local.ordinal != portable["ordinal"]
+                        or local_parent_ordinals.get(local.parent_id) != portable["parent_ordinal"]
+                        or local.level != portable["level"]
+                        or local.title != portable["title"]
+                        or list(local.path) != portable["path"]
+                        or local.content != portable["content"]
+                        or local.start_offset != portable["start_offset"]
+                        or local.end_offset != portable["end_offset"]
+                        for local, portable in zip(local_sections, portable_sections, strict=True)
+                    )
+                    or any(
+                        local.section_ordinal != portable_section["ordinal"]
+                        or local.RuleChunk.ordinal != portable_chunk["ordinal"]
+                        or list(local.RuleChunk.heading_path) != portable_chunk["heading_path"]
+                        or local.RuleChunk.content != portable_chunk["content"]
+                        or local.RuleChunk.token_count != portable_chunk["token_count"]
+                        or {
+                            key: value
+                            for key, value in dict(local.RuleChunk.metadata_json or {}).items()
+                            if key not in {"source_id", "section_id"}
+                        }
+                        != portable_chunk["metadata"]
+                        for local, (
+                            portable_section,
+                            portable_chunk,
+                        ) in zip(local_chunk_rows, expected_chunk_rows, strict=True)
+                    )
+                ):
+                    raise ValueError(
+                        "an existing rule source has the same checksum but an "
+                        "incompatible portable chunk layout"
+                    )
+                return {
+                    "source_id": existing_id,
+                    "skipped": True,
+                    "sections": len(local_sections),
+                    "chunks": len(local_chunk_rows),
+                    "embeddings": 0,
+                    "chunk_map": {
+                        portable_chunk["key"]: local.RuleChunk.id
+                        for local, (
+                            _portable_section,
+                            portable_chunk,
+                        ) in zip(local_chunk_rows, expected_chunk_rows, strict=True)
+                    },
+                }
+
+            source_id = str(uuid.uuid4())
+            session.add(
+                RuleSource(
+                    id=source_id,
+                    system_id=system_id,
+                    source_key=source_key,
+                    title=source_value["title"],
+                    locale=source_value["locale"],
+                    edition=source_value["edition"],
+                    version=source_value["version"],
+                    publication_id=source_value["publication_id"],
+                    authority=source_value["authority"],
+                    canonical_source_id=canonical_source_id,
+                    checksum=checksum,
+                    active=True,
+                    metadata_json={
+                        **dict(source_value["metadata"]),
+                        "logical_source_key": source_key,
+                    },
+                )
+            )
+            session.flush()
+            section_ids: dict[int, str] = {}
+            chunk_map: dict[str, str] = {}
+            embedding_count = 0
+            portable_sections = sorted(source_value["sections"], key=lambda item: item["ordinal"])
+            for section in portable_sections:
+                section_id = str(uuid.uuid4())
+                parent_ordinal = section["parent_ordinal"]
+                session.add(
+                    RuleSection(
+                        id=section_id,
+                        source_id=source_id,
+                        parent_id=(
+                            section_ids[parent_ordinal] if parent_ordinal is not None else None
+                        ),
+                        ordinal=section["ordinal"],
+                        level=section["level"],
+                        title=section["title"],
+                        path=list(section["path"]),
+                        content=section["content"],
+                        start_offset=section["start_offset"],
+                        end_offset=section["end_offset"],
+                    )
+                )
+                section_ids[section["ordinal"]] = section_id
+                session.flush()
+                portable_chunks = sorted(section["chunks"], key=lambda item: item["ordinal"])
+                chunk_texts = [chunk["content"] for chunk in portable_chunks]
+                vectors = embedder.encode(chunk_texts) if embedder else [None] * len(chunk_texts)
+                for chunk, vector in zip(portable_chunks, vectors, strict=True):
+                    chunk_id = str(uuid.uuid4())
+                    chunk_map[chunk["key"]] = chunk_id
+                    session.add(
+                        RuleChunk(
+                            id=chunk_id,
+                            source_id=source_id,
+                            section_id=section_id,
+                            ordinal=chunk["ordinal"],
+                            heading_path=list(chunk["heading_path"]),
+                            content=chunk["content"],
+                            token_count=chunk["token_count"],
+                            embedding_model=(embedder.model_name if embedder else None),
+                            embedding_json=vector,
+                            metadata_json=dict(chunk["metadata"]),
+                        )
+                    )
+                    embedding_count += int(vector is not None)
+                    if vector is not None:
+                        session.add(
+                            VectorIndexJob(
+                                id=str(uuid.uuid4()),
+                                system_id=system_id,
+                                collection="rules",
+                                entity_type="rule_chunk",
+                                entity_id=chunk_id,
+                                payload={
+                                    "document": chunk["content"],
+                                    "metadata": {
+                                        "system_id": system_id,
+                                        "edition": source_value["edition"],
+                                        "locale": source_value["locale"],
+                                        "publication_id": source_value["publication_id"],
+                                        "source_id": source_id,
+                                        "section_id": section_id,
+                                    },
+                                    "embedding_model": embedder.model_name,
+                                },
+                            )
+                        )
+            return {
+                "source_id": source_id,
+                "skipped": False,
+                "sections": len(portable_sections),
+                "chunks": len(chunk_map),
+                "embeddings": embedding_count,
+                "chunk_map": chunk_map,
+            }
 
     def citation(self, chunk_id: str, *, source_id: str | None = None) -> dict[str, Any]:
         """Resolve a caller-supplied chunk id into canonical, source-bound evidence."""

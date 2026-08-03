@@ -624,6 +624,42 @@ def test_pdf_normalization_does_not_anchor_bookmark_to_body_mention() -> None:
     )
 
 
+def test_pdf_normalization_rejects_outline_paragraph_as_a_heading() -> None:
+    paragraph = (
+        "T VJ 7 w such as a city gate and a distant frontier. "
+        "Humans are famous for their adaptability across many diverse lands. "
+        * 8
+    ).strip()
+    assert len(paragraph) > 500
+
+    content, metadata, warnings = build_structured_markdown(
+        [f"HUMANS\n{paragraph}\nHUMAN ETHNICITIES\nBody."],
+        [DocumentBookmark(paragraph, 1, 0)],
+    )
+
+    assert paragraph in content
+    assert f"# {paragraph}" not in content
+    assert metadata["bookmark_count"] == 1
+    assert metadata["matchable_bookmark_count"] == 0
+    assert metadata["matched_bookmarks"] == 0
+    assert not any("bookmark match rate" in warning for warning in warnings)
+
+
+def test_pdf_normalization_escapes_accidental_markdown_heading_in_prose() -> None:
+    paragraph = (
+        "T VJ 7 w such as a city gate and a distant frontier. "
+        "Humans are famous for their adaptability across many diverse lands."
+    )
+
+    content, metadata, _warnings = build_structured_markdown(
+        [f"HUMANS\n#\n{paragraph}\nHUMAN ETHNICITIES\nBody."],
+    )
+
+    assert f"\\# {paragraph}" in content
+    assert f"\n# {paragraph}\n" not in content
+    assert metadata["heading_count"] == 2
+
+
 def test_pdf_normalization_excludes_image_only_outline_pages_from_match_rate() -> None:
     content, metadata, warnings = build_structured_markdown(
         [

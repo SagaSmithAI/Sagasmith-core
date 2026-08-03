@@ -47,6 +47,7 @@ class RulePackVersionInfo:
     manifest: dict[str, Any]
     artifacts: tuple[dict[str, Any], ...]
     mechanics: tuple[dict[str, Any], ...]
+    provenance: dict[str, Any]
     validation_report: dict[str, Any]
 
 
@@ -124,6 +125,7 @@ class RulePackService:
                 manifest=manifest,
                 artifacts=tuple(artifacts),
                 mechanics=tuple(mechanics),
+                provenance=dict(provenance or manifest.get("provenance") or {}),
                 validation_report=report,
             )
         with self.database.transaction() as session:
@@ -153,6 +155,7 @@ class RulePackService:
             row.manifest = manifest
             row.artifacts = artifacts
             row.mechanics = mechanics
+            row.provenance = dict(provenance or manifest.get("provenance") or {})
             row.checksum = checksum
             row.status = (
                 "installed" if was_installed else ("validated" if report["valid"] else "rejected")
@@ -187,6 +190,23 @@ class RulePackService:
             if row is None:
                 raise LookupError(f"{pack_id}@{version}")
             return self._version_info(row)
+
+    def provenance(self, pack_id: str, version: str | None = None) -> dict[str, Any]:
+        """Return exact-version provenance, falling back to legacy pack metadata."""
+
+        with self.database.transaction() as session:
+            row = session.get(RulePack, pack_id)
+            if row is None:
+                raise LookupError(pack_id)
+            if version is not None:
+                version_row = session.get(
+                    RulePackVersion,
+                    {"pack_id": pack_id, "version": version},
+                )
+                if version_row is None:
+                    raise LookupError(f"{pack_id}@{version}")
+                return dict(version_row.provenance or {})
+            return dict(row.provenance or {})
 
     def remove_version(self, pack_id: str, version: str) -> None:
         """Remove an unreferenced version; historical branch locks are never broken."""
@@ -276,6 +296,16 @@ class RulePackService:
                 CampaignRuleActivation,
                 {"campaign_id": campaign_id, "branch_id": branch.id, "pack_id": pack_id},
             )
+            addon_owners = {
+                str(item)
+                for item in dict(row.options or {}).get("_addon_ids", [])
+                if str(item)
+            } if row is not None else set()
+            if addon_owners:
+                raise RulePackError(
+                    "rule-pack activation is owned by active addons; change the "
+                    "addon activation instead: " + ", ".join(sorted(addon_owners))
+                )
             if row is None:
                 row = CampaignRuleActivation(
                     campaign_id=campaign_id, branch_id=branch.id, pack_id=pack_id
@@ -333,6 +363,24 @@ class RulePackService:
             if dict(campaign.state or {}).get("combat", {}).get("active", False):
                 raise RulePackError("rule-pack activation cannot change during active combat")
             branch = resolve_branch(session, campaign, branch_id)
+            owned = session.get(
+                CampaignRuleActivation,
+                {
+                    "campaign_id": campaign_id,
+                    "branch_id": branch.id,
+                    "pack_id": pack_id,
+                },
+            )
+            addon_owners = {
+                str(item)
+                for item in dict(owned.options or {}).get("_addon_ids", [])
+                if str(item)
+            } if owned is not None else set()
+            if addon_owners:
+                raise RulePackError(
+                    "rule-pack activation is owned by active addons; change the "
+                    "addon activation instead: " + ", ".join(sorted(addon_owners))
+                )
             result = session.execute(
                 delete(CampaignRuleActivation).where(
                     CampaignRuleActivation.campaign_id == campaign_id,
@@ -470,6 +518,37 @@ class RulePackService:
         ):
             if field in manifest and not isinstance(manifest[field], list):
                 errors.append(f"manifest.{field} must be a list")
+        dependency_values = manifest.get("dependencies", [])
+        dependency_ids: set[str] = set()
+        for index, dependency in enumerate(
+            dependency_values if isinstance(dependency_values, list) else []
+        ):
+            if isinstance(dependency, str):
+                if not PACK_ID_RE.fullmatch(dependency):
+                    errors.append(f"manifest.dependencies[{index}] has an invalid pack id")
+                elif dependency == pack_id:
+                    errors.append("a rule pack cannot depend on itself")
+                elif dependency in dependency_ids:
+                    errors.append(f"duplicate rule-pack dependency: {dependency}")
+                dependency_ids.add(dependency)
+                continue
+            if not isinstance(dependency, dict):
+                errors.append(f"manifest.dependencies[{index}] must be a pack id or object")
+                continue
+            dependency_id = str(dependency.get("id") or "")
+            dependency_version = str(dependency.get("version") or "")
+            dependency_checksum = str(dependency.get("checksum") or "")
+            if not PACK_ID_RE.fullmatch(dependency_id):
+                errors.append(f"manifest.dependencies[{index}].id is invalid")
+            elif dependency_id == pack_id:
+                errors.append("a rule pack cannot depend on itself")
+            elif dependency_id in dependency_ids:
+                errors.append(f"duplicate rule-pack dependency: {dependency_id}")
+            dependency_ids.add(dependency_id)
+            if dependency_version and not VERSION_RE.fullmatch(dependency_version):
+                errors.append(f"manifest.dependencies[{index}].version is invalid")
+            if dependency_checksum and not re.fullmatch(r"[0-9a-f]{64}", dependency_checksum):
+                errors.append(f"manifest.dependencies[{index}].checksum must be a SHA-256")
         native_mechanic_refs = {
             str(item)
             for item in manifest.get("native_mechanic_refs", [])
@@ -626,6 +705,30 @@ class RulePackService:
                 dependency = versions.get(dependency_id)
                 if dependency is not None and dependency.version != str(item["version"]):
                     raise RulePackError(f"{pack_id} requires {dependency_id}@{item['version']}")
+                expected_checksum = str(item.get("checksum") or "")
+                portable_package = dict(
+                    (dependency.provenance if dependency is not None else {}).get(
+                        "portable_package"
+                    )
+                    or {}
+                )
+                accepted_checksums = {
+                    str(value)
+                    for value in (
+                        dependency.checksum if dependency is not None else "",
+                        portable_package.get("definition_checksum"),
+                    )
+                    if value
+                }
+                if (
+                    dependency is not None
+                    and expected_checksum
+                    and expected_checksum not in accepted_checksums
+                ):
+                    raise RulePackError(
+                        f"{pack_id} requires checksum {expected_checksum} for "
+                        f"{dependency_id}@{dependency.version}"
+                    )
             conflicts = {
                 str(item.get("id") if isinstance(item, dict) else item)
                 for item in version.manifest.get("conflicts", [])
@@ -702,6 +805,7 @@ class RulePackService:
             manifest=dict(row.manifest),
             artifacts=tuple(dict(item) for item in row.artifacts),
             mechanics=tuple(dict(item) for item in row.mechanics),
+            provenance=dict(row.provenance or {}),
             validation_report=dict(row.validation_report),
         )
 

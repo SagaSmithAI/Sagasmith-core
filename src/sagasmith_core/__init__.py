@@ -1,6 +1,7 @@
 """Shared runtime contracts for SagaSmith system packages."""
 
 from sagasmith_core.access import AccessDeniedError, AccessService, default_local_principal
+from sagasmith_core.addons import AddonError, AddonService
 from sagasmith_core.branches import BranchService
 from sagasmith_core.campaigns import CampaignService
 from sagasmith_core.characters import CharacterService
@@ -21,6 +22,7 @@ from sagasmith_core.documents import (
     OcrTextBlock,
     PageLocator,
     PdfDocumentConverter,
+    PdfTextLayoutProvider,
     RapidOcrProvider,
     RenderedDocumentPage,
     extract_pdf_page_text,
@@ -57,23 +59,35 @@ from sagasmith_core.modules import (
 )
 from sagasmith_core.portable import (
     ACTOR_CARD_SCHEMA,
+    ADDON_PACK_SCHEMA,
     MODULE_PACK_SCHEMA,
     PORTABLE_FORMAT,
     PORTABLE_SCHEMA_VERSION,
     PRESET_PACK_SCHEMA,
+    RELEASE_MANIFEST_SCHEMA,
+    RULE_PACK_SCHEMA,
     PortableContentError,
     build_actor_card,
+    build_addon_pack,
     build_module_pack,
     build_portable_envelope,
     build_preset_pack,
+    build_release_manifest,
+    build_rule_pack,
     canonical_json,
     dumps_portable,
     loads_portable,
     portable_checksum,
+    portable_rule_chunk_key,
+    portable_rule_definition_checksum,
     validate_actor_card,
+    validate_addon_pack,
     validate_module_pack,
     validate_portable_envelope,
+    validate_portable_rule_source,
     validate_preset_pack,
+    validate_release_manifest,
+    validate_rule_pack,
 )
 from sagasmith_core.revisions import RevisionService
 from sagasmith_core.rule_packs import RulePackService
@@ -92,6 +106,7 @@ from sagasmith_core.vector import VectorStore
 from sagasmith_core.vector_jobs import VectorFlushResult, VectorIndexJobService
 
 __all__ = [
+    "ADDON_PACK_SCHEMA",
     "DOCUMENT_NORMALIZER_VERSION",
     "DOCUMENT_SOURCE_SUFFIXES",
     "EXACT_MODULE_SOURCE_FIELD_ORDER",
@@ -101,6 +116,8 @@ __all__ = [
     "BgeSmallEnEmbedder",
     "BgeSmallZhEmbedder",
     "ActorKnowledgeService",
+    "AddonError",
+    "AddonService",
     "ACTOR_CARD_SCHEMA",
     "AccessDeniedError",
     "AccessService",
@@ -132,10 +149,13 @@ __all__ = [
     "OcrTextBlock",
     "PageLocator",
     "PdfDocumentConverter",
+    "PdfTextLayoutProvider",
     "RapidOcrProvider",
     "PORTABLE_FORMAT",
     "PORTABLE_SCHEMA_VERSION",
     "PRESET_PACK_SCHEMA",
+    "RELEASE_MANIFEST_SCHEMA",
+    "RULE_PACK_SCHEMA",
     "PortableContentError",
     "RenderedDocumentPage",
     "RevisionService",
@@ -153,9 +173,12 @@ __all__ = [
     "VectorIndexJobService",
     "configured_profiles",
     "build_actor_card",
+    "build_addon_pack",
     "build_module_pack",
     "build_portable_envelope",
     "build_preset_pack",
+    "build_release_manifest",
+    "build_rule_pack",
     "canonical_json",
     "clean_source_evidence_text",
     "create_embedder",
@@ -167,12 +190,18 @@ __all__ = [
     "normalize_source_evidence_text",
     "loads_portable",
     "portable_checksum",
+    "portable_rule_chunk_key",
+    "portable_rule_definition_checksum",
     "request_hash",
     "render_pdf_page",
     "validate_actor_card",
+    "validate_addon_pack",
     "validate_module_pack",
     "validate_portable_envelope",
+    "validate_portable_rule_source",
     "validate_preset_pack",
+    "validate_release_manifest",
+    "validate_rule_pack",
     "validate_subject_context_fact",
 ]
 

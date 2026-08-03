@@ -21,6 +21,10 @@ def test_bundled_migration_builds_schema(tmp_path: Path) -> None:
         assert "redoable" in {column["name"] for column in inspector.get_columns("state_revisions")}
         assert "template_id" in {column["name"] for column in inspector.get_columns("characters")}
         assert "rule_pack_versions" in inspector.get_table_names()
+        assert "provenance" in {
+            column["name"]
+            for column in inspector.get_columns("rule_pack_versions")
+        }
         assert "campaign_rule_activations" in inspector.get_table_names()
         assert "rule_resolution_receipts" in inspector.get_table_names()
         assert "revision" in {
@@ -369,5 +373,47 @@ def test_rule_source_revision_migration_recovers_interrupted_sqlite_batch(
         assert "active" in {
             column["name"] for column in inspector.get_columns("rule_sources")
         }
+    finally:
+        database.dispose()
+
+
+def test_rule_pack_version_provenance_migration_backfills_existing_rows(
+    tmp_path: Path,
+) -> None:
+    database = Database(sqlite_database_url(tmp_path / "rule-pack-provenance.db"))
+    config = alembic_config(database.url)
+    command.upgrade(config, "20260802_25")
+    with database.engine.begin() as connection:
+        columns = {
+            column["name"] for column in inspect(connection).get_columns("rule_pack_versions")
+        }
+        if "provenance" in columns:
+            connection.exec_driver_sql("ALTER TABLE rule_pack_versions DROP COLUMN provenance")
+        connection.exec_driver_sql(
+            "INSERT INTO rule_packs "
+            "(id, system_id, title, namespace, provenance, created_at, updated_at) "
+            "VALUES ('dnd5e.legacy', 'dnd5e', 'Legacy', 'dnd5e.legacy', "
+            '\'{"source":"legacy"}\', '
+            "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO rule_pack_versions "
+            "(pack_id, version, manifest, artifacts, mechanics, checksum, status, "
+            "validation_report, created_at) VALUES "
+            "('dnd5e.legacy', '1.0.0', '{}', '[]', '[]', 'checksum', "
+            "'validated', '{}', CURRENT_TIMESTAMP)"
+        )
+
+    database.upgrade_schema()
+
+    try:
+        with database.engine.connect() as connection:
+            provenance = connection.exec_driver_sql(
+                "SELECT provenance FROM rule_pack_versions "
+                "WHERE pack_id = 'dnd5e.legacy' AND version = '1.0.0'"
+            ).scalar_one()
+        if isinstance(provenance, str):
+            provenance = json.loads(provenance)
+        assert provenance == {"source": "legacy"}
     finally:
         database.dispose()

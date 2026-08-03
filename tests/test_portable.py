@@ -11,10 +11,19 @@ from sagasmith_core.modules import ModuleService
 from sagasmith_core.portable import (
     PortableContentError,
     build_actor_card,
+    build_addon_pack,
+    build_preset_pack,
+    build_release_manifest,
+    build_rule_pack,
     dumps_portable,
     loads_portable,
+    portable_rule_definition_checksum,
     validate_actor_card,
+    validate_addon_pack,
+    validate_release_manifest,
+    validate_rule_pack,
 )
+from sagasmith_core.rules import RuleService
 
 
 def _card() -> dict:
@@ -108,6 +117,240 @@ def test_actor_card_rejects_unstable_database_binding() -> None:
     card["checksum"] = portable_checksum(card)
     with pytest.raises(PortableContentError, match="unsupported fields"):
         validate_actor_card(card)
+
+
+def test_rule_pack_round_trip_rehydrates_sources_and_uses_stable_chunk_keys(
+    database,
+) -> None:
+    rules = RuleService(database)
+    ingested = rules.ingest(
+        system_id="dnd5e",
+        source_key="example.extension",
+        title="Example Extension",
+        content="# Features\nA hero can learn the luminous ward.\n\n## Ward\nMark one foe.",
+        edition="2014",
+        version="1.0.0",
+        publication_id="example.extension",
+        authority="supplement",
+    )
+    source = rules.export_portable_source(ingested.source_id)
+    chunk = source["sections"][0]["chunks"][0]
+    stable_chunks = [item["key"] for section in source["sections"] for item in section["chunks"]]
+    assert len(stable_chunks) == 2
+    assert len(set(stable_chunks)) == 2
+    assert [item["section_ordinal"] for item in rules.source_chunks(ingested.source_id)] == [
+        0,
+        1,
+    ]
+    package = build_rule_pack(
+        portable_id="dnd5e.example-extension",
+        version="1.0.0",
+        system_id="dnd5e",
+        manifest={
+            "id": "dnd5e.example-extension",
+            "version": "1.0.0",
+            "title": "Example Extension",
+            "namespace": "dnd5e.example-extension",
+            "system_id": "dnd5e",
+            "editions": ["2014"],
+            "dependencies": [],
+            "conflicts": [],
+            "capabilities": [],
+        },
+        artifacts=[
+            {
+                "id": "dnd5e.example-extension.feature.ward",
+                "kind": "feature",
+                "card": {"name": "Luminous Ward"},
+                "source_citations": [
+                    {
+                        "source": "rule-source:example.extension",
+                        "source_key": "example.extension",
+                        "chunk_key": chunk["key"],
+                        "source_checksum": source["checksum"],
+                    }
+                ],
+            }
+        ],
+        mechanics=[],
+        provenance={"distribution": "private"},
+        sources=[source],
+        metadata={"license": "user-supplied", "distribution": "private"},
+    )
+
+    assert validate_rule_pack(package)["checksum"] == package["checksum"]
+    assert portable_rule_definition_checksum(package) == package["metadata"][
+        "definition_checksum"
+    ]
+    redistributed = copy.deepcopy(package)
+    redistributed["metadata"]["distribution"] = "shareable"
+    redistributed["metadata"]["license"] = "Apache-2.0"
+    from sagasmith_core.portable import portable_checksum
+
+    redistributed["checksum"] = portable_checksum(redistributed)
+    assert validate_rule_pack(redistributed)["checksum"] != package["checksum"]
+    assert portable_rule_definition_checksum(redistributed) == portable_rule_definition_checksum(
+        package
+    )
+    imported = rules.import_portable_source(source, system_id="dnd5e")
+    assert imported["skipped"] is True
+    assert imported["chunk_map"][chunk["key"]]
+    target = rules.import_portable_source(source, system_id="dnd5e-target")
+    replay = rules.import_portable_source(source, system_id="dnd5e-target")
+    assert target["skipped"] is False
+    assert replay["skipped"] is True
+    assert target["source_id"] != ingested.source_id
+    assert target["chunk_map"] == replay["chunk_map"]
+    assert set(target["chunk_map"]) == set(stable_chunks)
+    assert "source_id" not in dumps_portable(package)
+    assert "chunk_id" not in dumps_portable(package)
+
+    tampered = copy.deepcopy(package)
+    tampered["payload"]["sources"][0]["sections"][0]["chunks"][0]["content"] = "Invented text"
+    tampered["checksum"] = portable_checksum(tampered)
+    with pytest.raises(PortableContentError, match="content_hash mismatch"):
+        validate_rule_pack(tampered)
+
+    wrong_owner = copy.deepcopy(package)
+    wrong_owner["payload"]["artifacts"][0]["source_citations"][0]["source_key"] = "missing.source"
+    wrong_owner["checksum"] = portable_checksum(wrong_owner)
+    with pytest.raises(PortableContentError, match="does not own its chunk_key"):
+        validate_rule_pack(wrong_owner)
+
+    leaked_id = copy.deepcopy(package)
+    leaked_id["payload"]["sources"][0]["metadata"]["source_id"] = "local-id"
+    leaked_id["checksum"] = portable_checksum(leaked_id)
+    with pytest.raises(PortableContentError, match="machine-local fields|runtime locator fields"):
+        validate_rule_pack(leaked_id)
+
+    source_less = copy.deepcopy(package)
+    source_less["payload"]["sources"] = []
+    source_less["checksum"] = portable_checksum(source_less)
+    with pytest.raises(PortableContentError, match="non-empty array"):
+        validate_rule_pack(source_less)
+
+    empty_path = copy.deepcopy(package)
+    empty_path["payload"]["sources"][0]["sections"][0]["path"] = []
+    empty_path["checksum"] = portable_checksum(empty_path)
+    with pytest.raises(PortableContentError, match="non-empty string array"):
+        validate_rule_pack(empty_path)
+
+    wrong_dependency_kind = copy.deepcopy(package)
+    wrong_dependency_kind["dependencies"] = [
+        {
+            "kind": "preset_pack",
+            "id": "dnd5e.example-presets",
+            "version": "1.0.0",
+            "checksum": "a" * 64,
+            "optional": False,
+        }
+    ]
+    wrong_dependency_kind["checksum"] = portable_checksum(wrong_dependency_kind)
+    with pytest.raises(PortableContentError, match="kind='rule_pack'"):
+        validate_rule_pack(wrong_dependency_kind)
+
+
+def test_release_manifest_composes_packages_without_embedding_them() -> None:
+    release = build_release_manifest(
+        portable_id="dnd5e.example-release",
+        version="1.0.0",
+        system_id="dnd5e",
+        components=[
+            {
+                "kind": "rule_pack",
+                "id": "dnd5e.example-rules",
+                "version": "1.0.0",
+                "checksum": "a" * 64,
+                "optional": False,
+            },
+            {
+                "kind": "preset_pack",
+                "id": "dnd5e.example-presets",
+                "version": "1.0.0",
+                "checksum": "b" * 64,
+                "optional": True,
+            },
+        ],
+        metadata={"title": "Example release"},
+    )
+
+    assert validate_release_manifest(release) == release
+    assert release["payload"] == {"release_schema": "sagasmith.release-manifest.v1"}
+
+
+def test_addon_pack_embeds_exact_components_without_granting_authority() -> None:
+    preset = build_preset_pack(
+        portable_id="dnd5e.example-presets",
+        version="1.0.0",
+        system_id="dnd5e",
+        cards=[_card()],
+        metadata={"license": "CC-BY-4.0"},
+    )
+    addon = build_addon_pack(
+        portable_id="dnd5e.example-addon",
+        version="1.0.0",
+        system_id="dnd5e",
+        manifest={
+            "id": "dnd5e.example-addon",
+            "version": "1.0.0",
+            "system_id": "dnd5e",
+            "title": "Example Addon",
+            "editions": ["2014"],
+            "classification": "third_party",
+            "content_summary": {"actor_card": 1},
+            "activation": {
+                "rule_policy": "none",
+                "preset_policy": "library",
+                "module_policy": "none",
+            },
+        },
+        components=[preset],
+        metadata={
+            "distribution": "shareable",
+            "license": "CC-BY-4.0",
+            "attribution": "Example author",
+        },
+    )
+
+    assert validate_addon_pack(addon, expected_system_id="dnd5e") == addon
+    assert addon["payload"]["components"] == [preset]
+    assert addon["dependencies"] == [
+        {
+            "kind": "preset_pack",
+            "id": preset["id"],
+            "version": preset["version"],
+            "checksum": preset["checksum"],
+            "optional": False,
+        }
+    ]
+
+    tampered = copy.deepcopy(addon)
+    tampered["payload"]["components"][0]["payload"]["cards"][0]["payload"][
+        "name"
+    ] = "Changed"
+    from sagasmith_core.portable import portable_checksum
+
+    tampered["checksum"] = portable_checksum(tampered)
+    with pytest.raises(PortableContentError, match="checksum mismatch"):
+        validate_addon_pack(tampered)
+
+    public_without_license = copy.deepcopy(addon)
+    public_without_license["metadata"].pop("license")
+    public_without_license["checksum"] = portable_checksum(public_without_license)
+    with pytest.raises(PortableContentError, match="license and attribution"):
+        validate_addon_pack(public_without_license)
+
+    wrong_policy = copy.deepcopy(addon)
+    wrong_policy["payload"]["manifest"]["activation"]["preset_policy"] = "none"
+    wrong_policy["checksum"] = portable_checksum(wrong_policy)
+    with pytest.raises(PortableContentError, match="preset_policy must be library"):
+        validate_addon_pack(wrong_policy)
+
+    self_conflict = copy.deepcopy(addon)
+    self_conflict["payload"]["manifest"]["conflicts"] = [addon["id"]]
+    self_conflict["checksum"] = portable_checksum(self_conflict)
+    with pytest.raises(PortableContentError, match="cannot conflict with itself"):
+        validate_addon_pack(self_conflict)
 
 
 def test_module_pack_round_trip_remaps_scenes_assets_reviews_and_actor_cards(

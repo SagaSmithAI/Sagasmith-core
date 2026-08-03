@@ -81,6 +81,38 @@ def test_import_job_rejects_invalid_candidate_review(database) -> None:
         jobs.record_result(job.id, {}, state="activated")
 
 
+def test_compiled_import_can_reopen_for_new_evidence_before_install(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Recompile import")
+    jobs = ImportJobService(database)
+    created = jobs.create(campaign_id=campaign.id, kind="rulebook", artifact="rules.pdf")
+    inspected = jobs.record_inspection(created.id, {"parser_profile": "pdf"})
+    extracted = jobs.set_candidates(
+        inspected.id,
+        [{"id": "candidate:old", "review_status": "pending"}],
+    )
+    reviewed = jobs.review_candidates(
+        extracted.id,
+        [{"id": "candidate:old", "review_status": "accepted"}],
+    )
+    compiled = jobs.record_validation(
+        reviewed.id,
+        {"draft": {"status": "validated", "checksum": "old"}},
+        state="compiled",
+    )
+
+    reopened = jobs.set_candidates(
+        compiled.id,
+        [{"id": "candidate:corrected", "review_status": "pending"}],
+        expected_revision=compiled.revision,
+    )
+
+    assert reopened.state == "review_required"
+    assert reopened.validation == {}
+    assert [candidate["id"] for candidate in reopened.candidates] == [
+        "candidate:corrected"
+    ]
+
+
 def test_import_job_update_and_exact_replay_receipt_share_one_transaction(database) -> None:
     campaign = CampaignService(database).create(system_id="dnd5e", name="Atomic import")
     jobs = ImportJobService(database)

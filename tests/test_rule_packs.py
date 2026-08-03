@@ -231,6 +231,27 @@ def test_rule_pack_rejects_unsafe_identity_and_missing_lock(database) -> None:
     with pytest.raises(LookupError):
         packs.install("Bad", "1.0.0")
 
+    self_dependent = packs.save_draft(
+        manifest=_pack(
+            "dnd5e.self-dependent",
+            dependencies=["dnd5e.self-dependent"],
+        )
+    )
+    assert self_dependent.status == "rejected"
+    assert "a rule pack cannot depend on itself" in (self_dependent.validation_report["errors"])
+
+    duplicate_dependency = packs.save_draft(
+        manifest=_pack(
+            "dnd5e.duplicate-dependency",
+            dependencies=["dnd5e.base", {"id": "dnd5e.base"}],
+        )
+    )
+    assert duplicate_dependency.status == "rejected"
+    assert any(
+        "duplicate rule-pack dependency" in error
+        for error in duplicate_dependency.validation_report["errors"]
+    )
+
     campaign = CampaignService(database).create(system_id="dnd5e", name="Unavailable")
     RuleProfileService(database).set(campaign.id, edition="2014")
     manifest = _pack("dnd5e.xgte2")
@@ -266,6 +287,26 @@ def test_rule_pack_draft_identity_and_installed_status_are_safe(database) -> Non
     )
     assert unchanged.validation_report["valid"] is True
     assert packs.get_version("dnd5e.stable", "1.0.0").status == "installed"
+
+
+def test_rule_pack_provenance_is_version_scoped(database) -> None:
+    packs = RulePackService(database)
+    first = packs.save_draft(
+        manifest=_pack("dnd5e.versioned-provenance"),
+        provenance={"source": "first"},
+    )
+    second = packs.save_draft(
+        manifest={
+            **_pack("dnd5e.versioned-provenance"),
+            "version": "2.0.0",
+        },
+        provenance={"source": "second"},
+    )
+
+    assert first.provenance == {"source": "first"}
+    assert second.provenance == {"source": "second"}
+    assert packs.provenance(first.pack_id, first.version) == {"source": "first"}
+    assert packs.provenance(second.pack_id, second.version) == {"source": "second"}
 
 
 def test_rule_pack_rejects_undeclared_events_and_unknown_artifact_refs(database) -> None:
@@ -369,3 +410,84 @@ def test_effective_ruleset_rechecks_edition_after_profile_change(database) -> No
     RuleProfileService(database).set(campaign.id, edition="2024")
     with pytest.raises(RulePackError, match="does not support"):
         packs.effective_ruleset(campaign.id)
+
+
+def test_effective_ruleset_enforces_exact_dependency_checksum(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Dependency checksum")
+    RuleProfileService(database).set(campaign.id, edition="2014")
+    packs = RulePackService(database)
+    dependency = packs.save_draft(manifest=_pack("dnd5e.dependency"))
+    packs.install(dependency.pack_id, dependency.version)
+    consumer_manifest = _pack(
+        "dnd5e.consumer",
+        dependencies=[
+            {
+                "id": dependency.pack_id,
+                "version": dependency.version,
+                "checksum": "f" * 64,
+            }
+        ],
+    )
+    consumer = packs.save_draft(manifest=consumer_manifest)
+    packs.install(consumer.pack_id, consumer.version)
+    packs.set_activation(
+        campaign.id,
+        pack_id=dependency.pack_id,
+        version=dependency.version,
+    )
+
+    with pytest.raises(RulePackError, match="requires checksum"):
+        packs.set_activation(
+            campaign.id,
+            pack_id=consumer.pack_id,
+            version=consumer.version,
+        )
+
+    assert [item["pack_id"] for item in packs.effective_ruleset(campaign.id).lock] == [
+        dependency.pack_id
+    ]
+
+
+def test_effective_ruleset_accepts_portable_dependency_definition_checksum(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Portable dependency")
+    RuleProfileService(database).set(campaign.id, edition="2014")
+    packs = RulePackService(database)
+    portable_checksum = "a" * 64
+    dependency = packs.save_draft(
+        manifest=_pack("dnd5e.portable.dependency"),
+        provenance={
+            "portable_package": {
+                "checksum": "b" * 64,
+                "definition_checksum": portable_checksum,
+            }
+        },
+    )
+    packs.install(dependency.pack_id, dependency.version)
+    consumer = packs.save_draft(
+        manifest=_pack(
+            "dnd5e.portable.consumer",
+            dependencies=[
+                {
+                    "id": dependency.pack_id,
+                    "version": dependency.version,
+                    "checksum": portable_checksum,
+                }
+            ],
+        )
+    )
+    packs.install(consumer.pack_id, consumer.version)
+    packs.set_activation(
+        campaign.id,
+        pack_id=dependency.pack_id,
+        version=dependency.version,
+    )
+    packs.set_activation(
+        campaign.id,
+        pack_id=consumer.pack_id,
+        version=consumer.version,
+    )
+
+    assert {item["pack_id"] for item in packs.effective_ruleset(campaign.id).lock} == {
+        dependency.pack_id,
+        consumer.pack_id,
+    }

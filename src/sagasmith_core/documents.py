@@ -16,7 +16,8 @@ from statistics import median
 from typing import Any, Protocol
 from uuid import uuid4
 
-DOCUMENT_NORMALIZER_VERSION = "20"
+DOCUMENT_NORMALIZER_VERSION = "22"
+_MAX_STRUCTURAL_HEADING_CHARS = 200
 DOCUMENT_SOURCE_SUFFIXES = frozenset({".md", ".markdown", ".pdf", ".txt"})
 _DOCUMENT_CACHE_SCHEMA = 1
 _PDF_EXTRACTION_CACHE_SCHEMA = 1
@@ -445,6 +446,8 @@ def _match_bookmarks(
     for bookmark in bookmarks:
         if not 1 <= bookmark.page <= len(pages):
             continue
+        if len(_bookmark_title(bookmark.title)) > _MAX_STRUCTURAL_HEADING_CHARS:
+            continue
         target = _normalize(bookmark.title)
         structural_bookmark = bool(_CHAPTER_RE.match(bookmark.title.strip()))
         best_index = -1
@@ -663,6 +666,12 @@ def _reflow_page(
                 merged = merged[:-1] + line
             else:
                 merged += _joiner(merged, line) + line
+        if re.match(r"^#{1,6}\s", merged):
+            # Extracted prose can begin with a literal hash glyph (for example,
+            # a damaged alphabet table immediately before body text). Only this
+            # renderer may create Markdown structure, so quote source glyphs
+            # that would otherwise inject an unbounded section heading.
+            merged = f"\\{merged}"
         output.extend((merged, ""))
         paragraph.clear()
         body_since_heading = True
@@ -724,6 +733,11 @@ def _reflow_page(
             and not trusted_top_level
             and _looks_like_corrupt_visual_heading(display_line)
         ):
+            level = None
+        if level is not None and len(display_line) > _MAX_STRUCTURAL_HEADING_CHARS:
+            # Broken PDF outlines sometimes contain an entire body paragraph and
+            # point it back at that same paragraph. Such a match is not document
+            # structure and must remain searchable prose.
             level = None
         if (
             not trusted_top_level
@@ -804,6 +818,7 @@ def build_structured_markdown(
         bookmark
         for bookmark in bookmarks
         if 1 <= bookmark.page <= len(pages)
+        and len(_bookmark_title(bookmark.title)) <= _MAX_STRUCTURAL_HEADING_CHARS
         and any(_normalize(line) for line in pages[bookmark.page - 1])
     ]
     repeated = _repeated_margin_lines(pages)
@@ -968,7 +983,9 @@ class RapidOcrProvider:
         source = Path(path).expanduser().resolve()
         document = pdfium.PdfDocument(str(source))
         try:
-            selected = list(page_numbers or range(1, len(document) + 1))
+            selected = list(
+                range(1, len(document) + 1) if page_numbers is None else page_numbers
+            )
             if any(not 1 <= page_number <= len(document) for page_number in selected):
                 raise ValueError("OCR page number is outside the PDF")
             result: list[str] = []
@@ -1008,7 +1025,9 @@ class RapidOcrProvider:
         source = Path(path).expanduser().resolve()
         document = pdfium.PdfDocument(str(source))
         try:
-            selected = list(page_numbers or range(1, len(document) + 1))
+            selected = list(
+                range(1, len(document) + 1) if page_numbers is None else page_numbers
+            )
             if any(not 1 <= page_number <= len(document) for page_number in selected):
                 raise ValueError("OCR page number is outside the PDF")
             pages: list[OcrPageLayout] = []
@@ -1029,6 +1048,157 @@ class RapidOcrProvider:
             return pages
         finally:
             document.close()
+
+
+class PdfTextLayoutProvider:
+    """Recover page geometry from an existing PDF text layer without OCR.
+
+    Character coordinates keep independent columns separate even when the PDF's
+    logical text order interleaves them.  Callers can fall back to image OCR when
+    a page has no usable text layer or its critical fields are corrupt.
+    """
+
+    name = "pdf-text-layout"
+    cache_profile = "pdf-text-layout:v1"
+
+    def extract_layout(
+        self,
+        path: str | Path,
+        *,
+        page_numbers: Sequence[int] | None = None,
+    ) -> list[OcrPageLayout]:
+        try:
+            import pypdfium2 as pdfium
+        except ImportError as exc:
+            raise RuntimeError(
+                "PDF text layout requires `pip install sagasmith-core[documents]`"
+            ) from exc
+        source = Path(path).expanduser().resolve()
+        document = pdfium.PdfDocument(str(source))
+        try:
+            selected = list(
+                range(1, len(document) + 1) if page_numbers is None else page_numbers
+            )
+            if any(not 1 <= page_number <= len(document) for page_number in selected):
+                raise ValueError("PDF text-layout page number is outside the PDF")
+            pages: list[OcrPageLayout] = []
+            for page_number in selected:
+                page = document[page_number - 1]
+                try:
+                    width, height = page.get_size()
+                    text_page = page.get_textpage()
+                    try:
+                        blocks = _pdf_text_layout_blocks(
+                            text_page,
+                            page_height=float(height),
+                        )
+                    finally:
+                        text_page.close()
+                finally:
+                    page.close()
+                pages.append(
+                    OcrPageLayout(
+                        page_number=page_number,
+                        width=max(1, round(width)),
+                        height=max(1, round(height)),
+                        blocks=tuple(blocks),
+                    )
+                )
+            return pages
+        finally:
+            document.close()
+
+
+def _pdf_text_layout_blocks(text_page: Any, *, page_height: float) -> list[OcrTextBlock]:
+    """Group positioned PDF characters into column-preserving line blocks."""
+
+    characters: list[dict[str, Any]] = []
+    for index in range(text_page.count_chars()):
+        character = text_page.get_text_range(index, 1)
+        if not character or character in {"\r", "\n"}:
+            continue
+        try:
+            left, bottom, right, top = text_page.get_charbox(index, loose=True)
+        except Exception:
+            continue
+        if right <= left or top <= bottom:
+            continue
+        y0 = page_height - float(top)
+        y1 = page_height - float(bottom)
+        characters.append(
+            {
+                "text": character,
+                "x0": float(left),
+                "y0": y0,
+                "x1": float(right),
+                "y1": y1,
+                "cy": (y0 + y1) / 2,
+                "height": y1 - y0,
+            }
+        )
+    if not characters:
+        return []
+
+    lines: list[dict[str, Any]] = []
+    for character in sorted(characters, key=lambda item: (item["cy"], item["x0"])):
+        candidate = None
+        for line in reversed(lines[-24:]):
+            tolerance = max(
+                1.5,
+                min(float(line["height"]), float(character["height"])) * 0.4,
+            )
+            if abs(float(line["cy"]) - float(character["cy"])) <= tolerance:
+                candidate = line
+                break
+            if float(line["cy"]) < float(character["cy"]) - 24:
+                break
+        if candidate is None:
+            candidate = {
+                "cy": character["cy"],
+                "height": character["height"],
+                "characters": [],
+            }
+            lines.append(candidate)
+        candidate["characters"].append(character)
+        candidate["cy"] = median(
+            item["cy"] for item in candidate["characters"]
+        )
+        candidate["height"] = median(
+            item["height"] for item in candidate["characters"]
+        )
+
+    blocks: list[OcrTextBlock] = []
+    for line in sorted(lines, key=lambda item: (item["cy"], item["characters"][0]["x0"])):
+        ordered = sorted(line["characters"], key=lambda item: item["x0"])
+        segments: list[list[dict[str, Any]]] = [[]]
+        for character in ordered:
+            previous = segments[-1][-1] if segments[-1] else None
+            gap = float(character["x0"]) - float(previous["x1"]) if previous else 0.0
+            if previous is not None and gap > max(8.0, float(line["height"]) * 1.8):
+                segments.append([])
+            segments[-1].append(character)
+        for segment in segments:
+            raw_text = "".join(str(item["text"]) for item in segment)
+            text = " ".join(raw_text.split())
+            if not text:
+                continue
+            bad = sum(
+                1
+                for character in text
+                if unicodedata.category(character) in {"Co", "Cc"}
+            )
+            confidence = max(0.4, 1.0 - bad / max(len(text), 1))
+            blocks.append(
+                OcrTextBlock(
+                    text=text,
+                    confidence=confidence,
+                    x0=min(float(item["x0"]) for item in segment),
+                    y0=min(float(item["y0"]) for item in segment),
+                    x1=max(float(item["x1"]) for item in segment),
+                    y1=max(float(item["y1"]) for item in segment),
+                )
+            )
+    return blocks
 
 
 def _ocr_page_layout(

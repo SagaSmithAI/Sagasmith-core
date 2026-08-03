@@ -11,10 +11,12 @@ from sqlalchemy.orm import Session
 from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.database import Database
 from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
+from sagasmith_core.integrity import canonical_json
 from sagasmith_core.models import (
     BranchActorKnowledgeHead,
     BranchFactHead,
     Campaign,
+    CampaignAddonActivation,
     CampaignBranch,
     CampaignRuleActivation,
     CampaignSnapshot,
@@ -145,7 +147,14 @@ class BranchService:
                 )
             }
             left_rules = {
-                row.pack_id: f"{row.version}:{row.checksum}:{int(row.enabled)}"
+                row.pack_id: canonical_json(
+                    {
+                        "version": row.version,
+                        "checksum": row.checksum,
+                        "enabled": row.enabled,
+                        "options": dict(row.options or {}),
+                    }
+                )
                 for row in session.scalars(
                     select(CampaignRuleActivation).where(
                         CampaignRuleActivation.branch_id == left.id
@@ -153,10 +162,49 @@ class BranchService:
                 )
             }
             right_rules = {
-                row.pack_id: f"{row.version}:{row.checksum}:{int(row.enabled)}"
+                row.pack_id: canonical_json(
+                    {
+                        "version": row.version,
+                        "checksum": row.checksum,
+                        "enabled": row.enabled,
+                        "options": dict(row.options or {}),
+                    }
+                )
                 for row in session.scalars(
                     select(CampaignRuleActivation).where(
                         CampaignRuleActivation.branch_id == right.id
+                    )
+                )
+            }
+            left_addons = {
+                row.addon_id: canonical_json(
+                    {
+                        "version": row.version,
+                        "checksum": row.checksum,
+                        "enabled": row.enabled,
+                        "component_locks": list(row.component_locks or []),
+                        "options": dict(row.options or {}),
+                    }
+                )
+                for row in session.scalars(
+                    select(CampaignAddonActivation).where(
+                        CampaignAddonActivation.branch_id == left.id
+                    )
+                )
+            }
+            right_addons = {
+                row.addon_id: canonical_json(
+                    {
+                        "version": row.version,
+                        "checksum": row.checksum,
+                        "enabled": row.enabled,
+                        "component_locks": list(row.component_locks or []),
+                        "options": dict(row.options or {}),
+                    }
+                )
+                for row in session.scalars(
+                    select(CampaignAddonActivation).where(
+                        CampaignAddonActivation.branch_id == right.id
                     )
                 )
             }
@@ -167,7 +215,10 @@ class BranchService:
                 "facts": self._diff_ids(left_facts, right_facts),
                 "actor_knowledge": self._diff_ids(left_knowledge, right_knowledge),
                 "rule_lock": self._diff_ids(left_rules, right_rules),
-                "merge_policy": "explicit-per-fact-actor-knowledge-and-rule-lock",
+                "addon_lock": self._diff_ids(left_addons, right_addons),
+                "merge_policy": (
+                    "explicit-per-fact-actor-knowledge-rule-lock-and-addon-lock"
+                ),
             }
 
     @staticmethod
@@ -494,6 +545,19 @@ class BranchService:
                     options=dict(item.get("options") or {}),
                 )
             )
+        for item in dict(snapshot.payload).get("addon_lock", []):
+            session.add(
+                CampaignAddonActivation(
+                    campaign_id=snapshot.campaign_id,
+                    branch_id=branch_id,
+                    addon_id=item["addon_id"],
+                    version=item["version"],
+                    checksum=item["checksum"],
+                    enabled=bool(item.get("enabled", True)),
+                    component_locks=list(item.get("component_locks") or []),
+                    options=dict(item.get("options") or {}),
+                )
+            )
 
     @staticmethod
     def _copy_branch_heads(session: Session, source_id: str, branch_id: str) -> None:
@@ -530,6 +594,23 @@ class BranchService:
                     checksum=item.checksum,
                     enabled=item.enabled,
                     options=dict(item.options),
+                )
+            )
+        for item in session.scalars(
+            select(CampaignAddonActivation).where(
+                CampaignAddonActivation.branch_id == source_id
+            )
+        ):
+            session.add(
+                CampaignAddonActivation(
+                    campaign_id=item.campaign_id,
+                    branch_id=branch_id,
+                    addon_id=item.addon_id,
+                    version=item.version,
+                    checksum=item.checksum,
+                    enabled=item.enabled,
+                    component_locks=list(item.component_locks or []),
+                    options=dict(item.options or {}),
                 )
             )
 

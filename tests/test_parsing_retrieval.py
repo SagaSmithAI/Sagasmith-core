@@ -1,5 +1,7 @@
 import math
 
+import pytest
+
 from sagasmith_core.modules import MarkdownModuleParser
 from sagasmith_core.parsing import MarkdownHierarchyParser
 from sagasmith_core.retrieval import (
@@ -33,6 +35,11 @@ def test_markdown_parser_does_not_turn_same_level_after_a_jump_into_children() -
         ("Chapter", "Second"),
         ("Chapter", "Second", "Detail"),
     ]
+
+
+def test_markdown_parser_rejects_a_heading_longer_than_storage_contract() -> None:
+    with pytest.raises(ValueError, match="exceeds 500 characters at line 1"):
+        MarkdownHierarchyParser().parse(f"# {'x' * 501}\nBody.")
 
 
 def test_markdown_parser_offsets_match_trimmed_source_and_exclude_next_page_marker() -> None:

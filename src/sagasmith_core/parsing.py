@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 
 _HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
 _PAGE_MARKER = re.compile(r"<!-- page: \d+ -->")
+MAX_RULE_SECTION_TITLE_CHARS = 500
 
 
 def _structural_start(content: str, heading: re.Match[str]) -> int:
@@ -66,6 +67,20 @@ class MarkdownHierarchyParser:
 
     def parse(self, content: str) -> list[ParsedSection]:
         matches = list(_HEADING.finditer(content))
+        overlong = next(
+            (
+                match
+                for match in matches
+                if len(match.group(2).strip()) > MAX_RULE_SECTION_TITLE_CHARS
+            ),
+            None,
+        )
+        if overlong is not None:
+            line = content.count("\n", 0, overlong.start()) + 1
+            raise ValueError(
+                "Markdown heading exceeds "
+                f"{MAX_RULE_SECTION_TITLE_CHARS} characters at line {line}"
+            )
         if not matches:
             body, start, end = _trimmed_body(content, 0, len(content))
             return [self._section(0, 1, "Document", ("Document",), body, start, end)]
