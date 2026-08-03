@@ -19,11 +19,11 @@ from statistics import median
 from typing import Any, Protocol
 from uuid import uuid4
 
-DOCUMENT_NORMALIZER_VERSION = "27"
+DOCUMENT_NORMALIZER_VERSION = "28"
 _MAX_STRUCTURAL_HEADING_CHARS = 200
 DOCUMENT_SOURCE_SUFFIXES = frozenset({".md", ".markdown", ".pdf", ".txt"})
 _DOCUMENT_CACHE_SCHEMA = 1
-_PDF_EXTRACTION_CACHE_SCHEMA = 2
+_PDF_EXTRACTION_CACHE_SCHEMA = 3
 _PDF_TEXT_EXTRACTOR_VERSION = "6"
 _OCR_PAGE_CACHE_SCHEMA = 1
 
@@ -2107,6 +2107,25 @@ def _ocr_suspect_pages(
     return replaced, layout_pages
 
 
+def _unmatched_text_bookmark_pages(
+    page_texts: list[str],
+    bookmarks: Sequence[DocumentBookmark],
+) -> list[int]:
+    """Find text-bearing outline targets whose extracted heading is unusable."""
+    pages = [[_clean_line(line) for line in text.splitlines()] for text in page_texts]
+    unmatched: set[int] = set()
+    for bookmark in bookmarks:
+        if (
+            not 1 <= bookmark.page <= len(pages)
+            or len(_bookmark_title(bookmark.title)) > _MAX_STRUCTURAL_HEADING_CHARS
+            or not any(_normalize(line) for line in pages[bookmark.page - 1])
+        ):
+            continue
+        if _match_bookmarks(pages, [bookmark])[1] == 0:
+            unmatched.add(bookmark.page)
+    return sorted(unmatched)
+
+
 def _pdf_extraction_profile(
     ocr_provider: OcrProvider | None,
     layout_profile: DocumentLayoutProfile,
@@ -2221,6 +2240,9 @@ class PdfDocumentConverter:
                 "PDF conversion requires `pip install sagasmith-core[documents]`"
             ) from exc
         checksum = source_checksum or file_sha256(source)
+        reader = PdfReader(str(source))
+        bookmarks = self._bookmarks(reader)
+        form_metadata = _pdf_form_metadata(reader)
         extraction_profile = _pdf_extraction_profile(
             self.ocr_provider,
             self.layout_profile,
@@ -2258,6 +2280,10 @@ class PdfDocumentConverter:
                             int(item)
                             for item in cached.get("layout_ordered_pages", [])
                         ],
+                        [
+                            int(item)
+                            for item in cached.get("bookmark_ocr_pages", [])
+                        ],
                     )
             except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                 pass
@@ -2271,9 +2297,11 @@ class PdfDocumentConverter:
             corrupt_pages = list(initial_quality["corrupt_text_pages"])
             fused_pages = list(initial_quality["fused_text_pages"])
             sparse_pages = list(initial_quality["sparse_pages"])
+            bookmark_ocr_pages = _unmatched_text_bookmark_pages(pages, bookmarks)
             suspect_pages = sorted(
                 set(corrupt_pages)
                 | set(fused_pages)
+                | set(bookmark_ocr_pages)
                 | (
                     set(sparse_pages)
                     if pages and len(sparse_pages) / len(pages) >= 0.8
@@ -2306,6 +2334,7 @@ class PdfDocumentConverter:
                         },
                         "initial_quality": initial_quality,
                         "ocr_pages": ocr_pages,
+                        "bookmark_ocr_pages": bookmark_ocr_pages,
                         "layout_ordered_pages": layout_ordered_pages,
                     },
                 )
@@ -2316,6 +2345,7 @@ class PdfDocumentConverter:
                 initial_quality,
                 ocr_pages,
                 layout_ordered_pages,
+                bookmark_ocr_pages,
             ) = extracted
         quality = _document_quality(pages)
         if pages and quality["suspect_page_count"] / len(pages) >= 0.8:
@@ -2329,9 +2359,6 @@ class PdfDocumentConverter:
                 "OCR did not recover usable text from at least 80% of PDF pages",
             )
 
-        reader = PdfReader(str(source))
-        bookmarks = self._bookmarks(reader)
-        form_metadata = _pdf_form_metadata(reader)
         content, stats, structure_warnings = build_structured_markdown(
             pages,
             bookmarks,
@@ -2376,6 +2403,7 @@ class PdfDocumentConverter:
                     else None
                 ),
                 "ocr_pages": ocr_pages,
+                "bookmark_ocr_pages": bookmark_ocr_pages,
                 "layout_ordered_pages": layout_ordered_pages,
                 "extraction_cache_hit": extraction_cache_hit,
                 "initial_quality": initial_quality,

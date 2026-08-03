@@ -557,6 +557,46 @@ def test_pdf_converter_ocr_replaces_only_suspect_pages(tmp_path) -> None:
     assert document.metadata["quality"]["suspect_page_count"] == 0
 
 
+def test_pdf_converter_ocr_repairs_unmatched_text_bearing_bookmark(
+    tmp_path, monkeypatch
+) -> None:
+    pypdf = pytest.importorskip("pypdf")
+    pytest.importorskip("pypdfium2")
+    source = tmp_path / "damaged-heading.pdf"
+    writer = pypdf.PdfWriter()
+    writer.add_blank_page(width=200, height=100)
+    writer.add_outline_item("Ch. 5: Treasures", 0)
+    with source.open("wb") as stream:
+        writer.write(stream)
+    monkeypatch.setattr(
+        "sagasmith_core.documents._extract_pdfium_pages",
+        lambda _source, _profile: (
+            ["AGIC PLAYS A VITAL ROLE IN DAILY LIFE.\nOrdinary body text."],
+            {},
+            [],
+        ),
+    )
+
+    class FakeOcr:
+        name = "fake"
+
+        def __init__(self) -> None:
+            self.pages = []
+
+        def extract(self, path, *, page_numbers=None):
+            self.pages = list(page_numbers or [])
+            return ["CHAPTER 5: TREASURES\nRecovered body text."]
+
+    provider = FakeOcr()
+    document = PdfDocumentConverter(ocr_provider=provider).convert(source)
+
+    assert provider.pages == [1]
+    assert document.metadata["bookmark_ocr_pages"] == [1]
+    assert document.metadata["ocr_pages"] == [1]
+    assert document.metadata["matched_bookmarks"] == 1
+    assert not any("bookmark match rate" in item for item in document.warnings)
+
+
 def test_page_quality_detects_fused_pdf_word_streams() -> None:
     fused = (
         "Beginningatsecondlevelageometerisabletounderstandtheirarcanepower"
