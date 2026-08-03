@@ -54,6 +54,7 @@ from sagasmith_core.documents import (
     build_structured_markdown,
     extract_pdf_page_text,
     normalize_document,
+    ocr_layout_text,
 )
 from sagasmith_core.idempotency import request_hash
 from sagasmith_core.models import (
@@ -269,6 +270,7 @@ def test_layout_reading_order_keeps_columns_contiguous() -> None:
         "right three",
         "right four",
     ]
+    assert ocr_layout_text(layout) == (text, used_columns)
 
 
 def test_rule_document_path_ingest_preserves_source_and_page_provenance(database, tmp_path) -> None:

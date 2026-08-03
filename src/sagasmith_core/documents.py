@@ -1566,6 +1566,12 @@ def _layout_reading_order_text(layout: OcrPageLayout) -> tuple[str, bool]:
     return "\n".join(block.text.strip() for block in ordered_blocks), True
 
 
+def ocr_layout_text(layout: OcrPageLayout) -> tuple[str, bool]:
+    """Return stable reading-order text and whether column recovery was used."""
+
+    return _layout_reading_order_text(layout)
+
+
 def _ocr_page_layout(
     output: Any,
     *,

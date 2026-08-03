@@ -29,6 +29,7 @@ from sagasmith_core.documents import (
     extract_pdf_page_text,
     file_sha256,
     normalize_document,
+    ocr_layout_text,
     render_pdf_page,
 )
 from sagasmith_core.embeddings import (
@@ -192,6 +193,7 @@ __all__ = [
     "extract_pdf_page_text",
     "file_sha256",
     "normalize_document",
+    "ocr_layout_text",
     "normalize_source_evidence_text",
     "loads_portable",
     "portable_checksum",
