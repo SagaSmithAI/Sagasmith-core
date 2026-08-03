@@ -38,6 +38,7 @@ from sagasmith_core.documents import (
     GENERIC_DOCUMENT_LAYOUT_PROFILE,
     CascadingOcrProvider,
     DocumentBookmark,
+    DocumentLayoutProfile,
     NormalizedDocument,
     OcrPageLayout,
     OcrTextBlock,
@@ -359,6 +360,24 @@ def test_normalized_pdf_cache_profile_binds_page_extractor_version() -> None:
 
     assert f"pypdfium2:{_PDF_TEXT_EXTRACTOR_VERSION}" in profile
     assert f"layout={GENERIC_DOCUMENT_LAYOUT_PROFILE.cache_identity}" in profile
+
+
+def test_layout_profile_preserves_repeated_mechanical_margin_fields() -> None:
+    profile = DocumentLayoutProfile(
+        name="mechanical",
+        repeated_margin_exclusion_patterns=(r"(?i)^casting time\s*:",),
+    )
+    pages = [
+        "Spell One\n1st-level evocation\nCasting Time: 1 action\nFirst effect.",
+        "Spell Two\n2nd-level evocation\nCasting Time: 1 action\nSecond effect.",
+    ]
+
+    content, _metadata, _warnings = build_structured_markdown(
+        pages,
+        layout_profile=profile,
+    )
+
+    assert content.count("Casting Time: 1 action") == 2
 
 
 def test_page_locator_reuses_one_marker_index() -> None:

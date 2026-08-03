@@ -18,7 +18,7 @@ from statistics import median
 from typing import Any, Protocol
 from uuid import uuid4
 
-DOCUMENT_NORMALIZER_VERSION = "26"
+DOCUMENT_NORMALIZER_VERSION = "27"
 _MAX_STRUCTURAL_HEADING_CHARS = 200
 DOCUMENT_SOURCE_SUFFIXES = frozenset({".md", ".markdown", ".pdf", ".txt"})
 _DOCUMENT_CACHE_SCHEMA = 1
@@ -40,6 +40,7 @@ class DocumentLayoutProfile:
 
     name: str = "generic"
     visual_heading_exclusion_patterns: tuple[str, ...] = ()
+    repeated_margin_exclusion_patterns: tuple[str, ...] = ()
 
     def excludes_visual_heading(self, value: str) -> bool:
         return any(
@@ -47,10 +48,21 @@ class DocumentLayoutProfile:
             for pattern in self.visual_heading_exclusion_patterns
         )
 
+    def excludes_repeated_margin(self, value: str) -> bool:
+        return any(
+            re.search(pattern, value) is not None
+            for pattern in self.repeated_margin_exclusion_patterns
+        )
+
     @property
     def cache_identity(self) -> str:
         digest = hashlib.sha256(
-            "\x1e".join(self.visual_heading_exclusion_patterns).encode("utf-8")
+            "\x1d".join(
+                (
+                    "\x1e".join(self.visual_heading_exclusion_patterns),
+                    "\x1e".join(self.repeated_margin_exclusion_patterns),
+                )
+            ).encode("utf-8")
         ).hexdigest()[:12]
         return f"{self.name}:{digest}"
 
@@ -406,13 +418,16 @@ def _looks_like_automatic_chapter_heading(value: str) -> bool:
     )
 
 
-def _repeated_margin_lines(pages: list[list[str]]) -> set[str]:
+def _repeated_margin_lines(
+    pages: list[list[str]],
+    layout_profile: DocumentLayoutProfile,
+) -> set[str]:
     candidates: Counter[str] = Counter()
     for lines in pages:
         nonempty = [line for line in lines if line]
         seen_on_page: set[str] = set()
         for line in [*nonempty[:3], *nonempty[-3:]]:
-            if _CHAPTER_RE.match(line):
+            if _CHAPTER_RE.match(line) or layout_profile.excludes_repeated_margin(line):
                 continue
             normalized = _normalize(line)
             if (
@@ -812,6 +827,7 @@ def build_structured_markdown(
     page_texts: list[str],
     bookmarks: list[DocumentBookmark] | None = None,
     visual_headings: dict[int, list[tuple[str, int]]] | None = None,
+    layout_profile: DocumentLayoutProfile = GENERIC_DOCUMENT_LAYOUT_PROFILE,
 ) -> tuple[str, dict[str, Any], tuple[str, ...]]:
     """Normalize extracted PDF pages into provenance-preserving Markdown."""
     bookmarks = bookmarks or []
@@ -823,7 +839,7 @@ def build_structured_markdown(
         and len(_bookmark_title(bookmark.title)) <= _MAX_STRUCTURAL_HEADING_CHARS
         and any(_normalize(line) for line in pages[bookmark.page - 1])
     ]
-    repeated = _repeated_margin_lines(pages)
+    repeated = _repeated_margin_lines(pages, layout_profile)
     (
         heading_levels,
         matched,
@@ -2068,6 +2084,7 @@ class PdfDocumentConverter:
             pages,
             bookmarks,
             visual_headings,
+            self.layout_profile,
         )
         warnings = list(structure_warnings)
         unresolved_corrupt = list(quality["corrupt_text_pages"])
