@@ -60,6 +60,7 @@ from sagasmith_core.modules import (
 from sagasmith_core.portable import (
     ACTOR_CARD_SCHEMA,
     ADDON_PACK_SCHEMA,
+    ADDON_READINESS_SCHEMA_VERSION,
     MODULE_PACK_SCHEMA,
     PORTABLE_FORMAT,
     PORTABLE_SCHEMA_VERSION,
@@ -82,6 +83,7 @@ from sagasmith_core.portable import (
     portable_rule_definition_checksum,
     validate_actor_card,
     validate_addon_pack,
+    validate_addon_readiness,
     validate_module_pack,
     validate_portable_envelope,
     validate_portable_rule_source,
@@ -107,6 +109,7 @@ from sagasmith_core.vector_jobs import VectorFlushResult, VectorIndexJobService
 
 __all__ = [
     "ADDON_PACK_SCHEMA",
+    "ADDON_READINESS_SCHEMA_VERSION",
     "DOCUMENT_NORMALIZER_VERSION",
     "DOCUMENT_SOURCE_SUFFIXES",
     "EXACT_MODULE_SOURCE_FIELD_ORDER",
@@ -196,6 +199,7 @@ __all__ = [
     "render_pdf_page",
     "validate_actor_card",
     "validate_addon_pack",
+    "validate_addon_readiness",
     "validate_module_pack",
     "validate_portable_envelope",
     "validate_portable_rule_source",
