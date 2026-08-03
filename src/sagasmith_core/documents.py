@@ -18,7 +18,7 @@ from statistics import median
 from typing import Any, Protocol
 from uuid import uuid4
 
-DOCUMENT_NORMALIZER_VERSION = "23"
+DOCUMENT_NORMALIZER_VERSION = "24"
 _MAX_STRUCTURAL_HEADING_CHARS = 200
 DOCUMENT_SOURCE_SUFFIXES = frozenset({".md", ".markdown", ".pdf", ".txt"})
 _DOCUMENT_CACHE_SCHEMA = 1
@@ -894,6 +894,22 @@ def build_structured_markdown(
 def _page_quality(text: str) -> dict[str, Any]:
     characters = len(text)
     non_whitespace = sum(not char.isspace() for char in text)
+    alphabetic = sum(char.isalpha() for char in text)
+    whitespace = sum(char.isspace() for char in text)
+    alphabetic_runs = re.findall(r"[^\W\d_]+", text, flags=re.UNICODE)
+    long_alphabetic_runs = sum(len(run) >= 30 for run in alphabetic_runs)
+    # Some PDFs expose a superficially complete text layer while omitting nearly
+    # every inter-word space.  Character/control ratios cannot distinguish that
+    # output from prose, but it is unusable for retrieval and heading parsing.
+    # Require several implausibly long word runs as well as a very low separator
+    # rate so URLs, identifiers, tables, and ordinary German compounds do not
+    # force OCR by themselves.
+    whitespace_per_alpha = whitespace / max(alphabetic, 1)
+    fused_text = (
+        alphabetic >= 200
+        and whitespace_per_alpha < 0.08
+        and long_alphabetic_runs >= 3
+    )
     private_use = sum(unicodedata.category(char) == "Co" for char in text)
     control = sum(
         unicodedata.category(char) == "Cc" and char not in "\t\r\n"
@@ -904,6 +920,9 @@ def _page_quality(text: str) -> dict[str, Any]:
     return {
         "characters": characters,
         "non_whitespace_characters": non_whitespace,
+        "alphabetic_characters": alphabetic,
+        "whitespace_per_alphabetic_character": whitespace_per_alpha,
+        "long_alphabetic_run_count": long_alphabetic_runs,
         "private_use_characters": private_use,
         "control_characters": control,
         "replacement_characters": replacement,
@@ -911,6 +930,7 @@ def _page_quality(text: str) -> dict[str, Any]:
         "control_ratio": control / denominator,
         "replacement_ratio": replacement / denominator,
         "sparse": non_whitespace < 20,
+        "fused_text": fused_text,
         "corrupt": (
             private_use / denominator >= 0.02
             or control / denominator >= 0.01
@@ -929,7 +949,10 @@ def _document_quality(page_texts: Sequence[str]) -> dict[str, Any]:
     denominator = max(characters, 1)
     sparse_pages = [index for index, item in enumerate(page_stats, start=1) if item["sparse"]]
     corrupt_pages = [index for index, item in enumerate(page_stats, start=1) if item["corrupt"]]
-    suspect_pages = sorted(set(sparse_pages) | set(corrupt_pages))
+    fused_pages = [
+        index for index, item in enumerate(page_stats, start=1) if item["fused_text"]
+    ]
+    suspect_pages = sorted(set(sparse_pages) | set(corrupt_pages) | set(fused_pages))
     return {
         "character_count": characters,
         "non_whitespace_character_count": non_whitespace,
@@ -938,6 +961,8 @@ def _document_quality(page_texts: Sequence[str]) -> dict[str, Any]:
         "sparse_pages": sparse_pages,
         "corrupt_text_page_count": len(corrupt_pages),
         "corrupt_text_pages": corrupt_pages,
+        "fused_text_page_count": len(fused_pages),
+        "fused_text_pages": fused_pages,
         "suspect_page_count": len(suspect_pages),
         "suspect_pages": suspect_pages,
         "private_use_character_count": private_use,
@@ -1933,9 +1958,11 @@ class PdfDocumentConverter:
             )
             initial_quality = _document_quality(pages)
             corrupt_pages = list(initial_quality["corrupt_text_pages"])
+            fused_pages = list(initial_quality["fused_text_pages"])
             sparse_pages = list(initial_quality["sparse_pages"])
             suspect_pages = sorted(
                 set(corrupt_pages)
+                | set(fused_pages)
                 | (
                     set(sparse_pages)
                     if pages and len(sparse_pages) / len(pages) >= 0.8

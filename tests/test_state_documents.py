@@ -44,6 +44,7 @@ from sagasmith_core.documents import (
     _layout_reading_order_text,
     _looks_like_corrupt_visual_heading,
     _ocr_page_layout,
+    _page_quality,
     _pdf_form_metadata,
     build_structured_markdown,
     extract_pdf_page_text,
@@ -351,6 +352,20 @@ def test_pdf_converter_ocr_replaces_only_suspect_pages(tmp_path) -> None:
     assert "RECOVERED HEADING" in document.content
     assert document.metadata["ocr_pages"] == [1]
     assert document.metadata["quality"]["suspect_page_count"] == 0
+
+
+def test_page_quality_detects_fused_pdf_word_streams() -> None:
+    fused = (
+        "Beginningatsecondlevelageometerisabletounderstandtheirarcanepower"
+        "asatopographicalmapanddrawstraightlineconnectionsbetweenspells "
+    ) * 6
+    ordinary = (
+        "Beginning at second level, a geometer can understand arcane power "
+        "as a topographical map and draw connections between spells. "
+    ) * 6
+
+    assert _page_quality(fused)["fused_text"] is True
+    assert _page_quality(ordinary)["fused_text"] is False
 
 
 def test_extract_pdf_page_text_validates_the_physical_page(tmp_path) -> None:
