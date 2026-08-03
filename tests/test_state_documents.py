@@ -33,6 +33,7 @@ from sagasmith_core.access import (
     LOCAL_SYSTEM_PRINCIPAL_ID,
 )
 from sagasmith_core.documents import (
+    CascadingOcrProvider,
     DocumentBookmark,
     NormalizedDocument,
     OcrPageLayout,
@@ -152,6 +153,49 @@ def test_rapidocr_profile_binds_model_version_and_scale() -> None:
 
     with pytest.raises(ValueError, match="model_type"):
         RapidOcrProvider(model_type="server")
+
+
+def test_ocr_cascade_uses_stronger_model_only_for_unusable_pages() -> None:
+    class FakeLayoutOcr:
+        def __init__(self, name: str, text: str) -> None:
+            self.name = name
+            self.cache_profile = f"{name}:v1"
+            self.text = text
+            self.calls: list[list[int]] = []
+
+        def extract_layout(self, path, *, page_numbers=None):
+            del path
+            pages = list(page_numbers or [])
+            self.calls.append(pages)
+            return [
+                OcrPageLayout(
+                    page_number=page,
+                    width=600,
+                    height=800,
+                    blocks=(
+                        OcrTextBlock(self.text, 0.99, 20, 20, 580, 60),
+                    )
+                    if self.text
+                    else (),
+                )
+                for page in pages
+            ]
+
+    small = FakeLayoutOcr("small", "")
+    medium = FakeLayoutOcr(
+        "medium",
+        "RECOVERED HEADING\nRecovered body text for indexing.",
+    )
+    cascade = CascadingOcrProvider(small, medium)
+
+    layouts = cascade.extract_layout("unused.pdf", page_numbers=[3])
+
+    assert small.calls == [[3]]
+    assert medium.calls == [[3]]
+    assert layouts[0].blocks[0].text.startswith("RECOVERED HEADING")
+    assert cascade.cache_profile == (
+        "rapidocr-cascade:small:v1=>medium:v1"
+    )
 
 
 def test_layout_reading_order_keeps_columns_contiguous() -> None:

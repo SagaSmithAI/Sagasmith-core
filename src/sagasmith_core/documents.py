@@ -1090,6 +1090,158 @@ class RapidOcrProvider:
             document.close()
 
 
+class CascadingOcrProvider:
+    """Use stronger local OCR only for pages the preferred model cannot recover."""
+
+    name = "rapidocr-cascade"
+
+    def __init__(self, *providers: OcrProvider) -> None:
+        if len(providers) < 2:
+            raise ValueError("OCR cascade requires at least two providers")
+        self.providers = tuple(providers)
+
+    @property
+    def cache_profile(self) -> str:
+        profiles = [
+            str(
+                getattr(provider, "cache_profile", None)
+                or getattr(provider, "name", type(provider).__name__)
+            )
+            for provider in self.providers
+        ]
+        return f"{self.name}:" + "=>".join(profiles)
+
+    def extract(
+        self,
+        path: str | Path,
+        *,
+        page_numbers: Sequence[int] | None = None,
+    ) -> list[str]:
+        requested = list(page_numbers) if page_numbers is not None else None
+        selected: list[str] | None = None
+        selected_pages: list[int] | None = requested
+        pending_indexes: list[int] = []
+        errors: list[Exception] = []
+        for provider in self.providers:
+            provider_pages = (
+                None
+                if selected is None and requested is None
+                else [
+                    (selected_pages or [])[index]
+                    for index in pending_indexes
+                ]
+                if selected is not None
+                else requested
+            )
+            try:
+                output = list(provider.extract(path, page_numbers=provider_pages))
+            except Exception as error:  # pragma: no cover - provider-specific failures
+                errors.append(error)
+                continue
+            if selected is None:
+                selected = [str(item) for item in output]
+                selected_pages = requested or list(range(1, len(selected) + 1))
+            else:
+                if len(output) != len(pending_indexes):
+                    raise DocumentQualityError(
+                        "pdf_ocr_page_mismatch",
+                        "fallback OCR returned a different number of pages than requested",
+                    )
+                for index, candidate in zip(pending_indexes, output, strict=True):
+                    if _ocr_text_score(str(candidate)) > _ocr_text_score(selected[index]):
+                        selected[index] = str(candidate)
+            pending_indexes = [
+                index
+                for index, text in enumerate(selected)
+                if _ocr_text_needs_fallback(text)
+            ]
+            if not pending_indexes:
+                break
+        if selected is None:
+            if errors:
+                raise errors[-1]
+            return []
+        return selected
+
+    def extract_layout(
+        self,
+        path: str | Path,
+        *,
+        page_numbers: Sequence[int] | None = None,
+    ) -> list[OcrPageLayout]:
+        requested = list(page_numbers) if page_numbers is not None else None
+        selected: list[OcrPageLayout] | None = None
+        selected_pages: list[int] | None = requested
+        pending_indexes: list[int] = []
+        errors: list[Exception] = []
+        for provider in self.providers:
+            extract_layout = getattr(provider, "extract_layout", None)
+            if not callable(extract_layout):
+                continue
+            provider_pages = (
+                None
+                if selected is None and requested is None
+                else [
+                    (selected_pages or [])[index]
+                    for index in pending_indexes
+                ]
+                if selected is not None
+                else requested
+            )
+            try:
+                output = list(extract_layout(path, page_numbers=provider_pages))
+            except Exception as error:  # pragma: no cover - provider-specific failures
+                errors.append(error)
+                continue
+            if selected is None:
+                selected = output
+                selected_pages = requested or [page.page_number for page in selected]
+            else:
+                if len(output) != len(pending_indexes):
+                    raise DocumentQualityError(
+                        "pdf_ocr_page_mismatch",
+                        "fallback OCR returned a different number of pages than requested",
+                    )
+                for index, candidate in zip(pending_indexes, output, strict=True):
+                    if _ocr_layout_score(candidate) > _ocr_layout_score(selected[index]):
+                        selected[index] = candidate
+            pending_indexes = [
+                index
+                for index, layout in enumerate(selected)
+                if _ocr_text_needs_fallback(_layout_reading_order_text(layout)[0])
+            ]
+            if not pending_indexes:
+                break
+        if selected is None:
+            if errors:
+                raise errors[-1]
+            return []
+        return selected
+
+
+def _ocr_text_score(text: str) -> tuple[int, int]:
+    quality = _document_quality([str(text)])
+    return (
+        0 if quality["corrupt_text_page_count"] else 1,
+        int(quality["non_whitespace_character_count"]),
+    )
+
+
+def _ocr_text_needs_fallback(text: str) -> bool:
+    quality = _document_quality([str(text)])
+    return bool(
+        quality["corrupt_text_page_count"]
+        or quality["non_whitespace_character_count"] < 24
+    )
+
+
+def _ocr_layout_score(layout: OcrPageLayout) -> tuple[int, int, float]:
+    text, _used_columns = _layout_reading_order_text(layout)
+    base = _ocr_text_score(text)
+    confidences = [float(block.confidence) for block in layout.blocks]
+    return (*base, sum(confidences) / len(confidences) if confidences else 0.0)
+
+
 class PdfTextLayoutProvider:
     """Recover page geometry from an existing PDF text layer without OCR.
 
@@ -1875,6 +2027,14 @@ class PdfDocumentConverter:
                 "outline_extractor": "pypdf",
                 **form_metadata,
                 "ocr_provider": self.ocr_provider.name if ocr_pages else None,
+                "ocr_profile": (
+                    str(
+                        getattr(self.ocr_provider, "cache_profile", None)
+                        or self.ocr_provider.name
+                    )
+                    if ocr_pages and self.ocr_provider is not None
+                    else None
+                ),
                 "ocr_pages": ocr_pages,
                 "layout_ordered_pages": layout_ordered_pages,
                 "extraction_cache_hit": extraction_cache_hit,
