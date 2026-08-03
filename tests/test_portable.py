@@ -20,6 +20,7 @@ from sagasmith_core.portable import (
     portable_rule_definition_checksum,
     validate_actor_card,
     validate_addon_pack,
+    validate_addon_readiness,
     validate_release_manifest,
     validate_rule_pack,
 )
@@ -351,6 +352,60 @@ def test_addon_pack_embeds_exact_components_without_granting_authority() -> None
     self_conflict["checksum"] = portable_checksum(self_conflict)
     with pytest.raises(PortableContentError, match="cannot conflict with itself"):
         validate_addon_pack(self_conflict)
+
+
+def test_addon_readiness_is_strict_consistent_and_optional_for_legacy_packs() -> None:
+    readiness = {
+        "schema_version": 1,
+        "source": {
+            "item_count": 2,
+            "verified_count": 2,
+            "complete": True,
+            "blockers": [],
+        },
+        "catalog": {
+            "item_count": 2,
+            "reviewed_count": 2,
+            "complete": True,
+            "blockers": [],
+        },
+        "selection": {
+            "applicable_count": 1,
+            "ready_count": 1,
+            "not_applicable_count": 1,
+            "complete": True,
+            "blockers": [],
+        },
+        "runtime": {
+            "item_count": 2,
+            "resolved_count": 2,
+            "modes": {"kernel_mechanic": 1, "agent_ruling": 1},
+            "complete": True,
+            "blockers": [],
+        },
+        "complete": True,
+    }
+    assert validate_addon_readiness(readiness) == readiness
+
+    bad_total = copy.deepcopy(readiness)
+    bad_total["complete"] = False
+    with pytest.raises(PortableContentError, match="must equal all dimension"):
+        validate_addon_readiness(bad_total)
+
+    bad_selection = copy.deepcopy(readiness)
+    bad_selection["selection"]["ready_count"] = 2
+    with pytest.raises(PortableContentError, match="cannot exceed applicable_count"):
+        validate_addon_readiness(bad_selection)
+
+    bad_modes = copy.deepcopy(readiness)
+    bad_modes["runtime"]["modes"]["agent_ruling"] = 2
+    with pytest.raises(PortableContentError, match="sum to resolved_count"):
+        validate_addon_readiness(bad_modes)
+
+    unsupported = copy.deepcopy(readiness)
+    unsupported["catalog"]["confidence"] = 1.0
+    with pytest.raises(PortableContentError, match="unsupported fields"):
+        validate_addon_readiness(unsupported)
 
 
 def test_module_pack_round_trip_remaps_scenes_assets_reviews_and_actor_cards(

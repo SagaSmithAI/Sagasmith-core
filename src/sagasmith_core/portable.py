@@ -30,6 +30,7 @@ PORTABLE_KINDS = frozenset(
     }
 )
 ADDON_PACK_SCHEMA = "sagasmith.addon-pack.v1"
+ADDON_READINESS_SCHEMA_VERSION = 1
 ACTOR_CARD_SCHEMA = "sagasmith.actor-card.v1"
 MODULE_PACK_SCHEMA = "sagasmith.module-pack.v1"
 PRESET_PACK_SCHEMA = "sagasmith.preset-pack.v1"
@@ -1042,6 +1043,140 @@ def build_addon_pack(
     return validate_addon_pack(envelope)
 
 
+def validate_addon_readiness(readiness: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate the system-neutral addon readiness summary.
+
+    Readiness is evidence, not authority.  System plugins must recompute the
+    report from embedded content before they rely on it for import or
+    activation.  Core only guarantees that a published report is complete,
+    internally consistent, and portable across runtimes.
+    """
+
+    if not isinstance(readiness, Mapping):
+        raise PortableContentError("addon readiness must be an object")
+    value = copy.deepcopy(dict(readiness))
+    _exact_fields(
+        value,
+        {"schema_version", "source", "catalog", "selection", "runtime", "complete"},
+        "addon readiness",
+    )
+    if value["schema_version"] != ADDON_READINESS_SCHEMA_VERSION:
+        raise PortableContentError(
+            "addon readiness.schema_version must be "
+            f"{ADDON_READINESS_SCHEMA_VERSION}"
+        )
+
+    dimensions = {
+        "source": ("item_count", "verified_count"),
+        "catalog": ("item_count", "reviewed_count"),
+        "selection": ("applicable_count", "ready_count", "not_applicable_count"),
+        "runtime": ("item_count", "resolved_count", "modes"),
+    }
+    normalized: dict[str, dict[str, Any]] = {}
+    for dimension, count_fields in dimensions.items():
+        raw = value[dimension]
+        if not isinstance(raw, Mapping):
+            raise PortableContentError(f"addon readiness.{dimension} must be an object")
+        item = copy.deepcopy(dict(raw))
+        _exact_fields(
+            item,
+            {"complete", "blockers", *count_fields},
+            f"addon readiness.{dimension}",
+        )
+        if not isinstance(item["complete"], bool):
+            raise PortableContentError(
+                f"addon readiness.{dimension}.complete must be a boolean"
+            )
+        for count_field in count_fields:
+            if count_field == "modes":
+                continue
+            count = item[count_field]
+            if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                raise PortableContentError(
+                    f"addon readiness.{dimension}.{count_field} "
+                    "must be a non-negative integer"
+                )
+        blockers = item["blockers"]
+        if not isinstance(blockers, list):
+            raise PortableContentError(
+                f"addon readiness.{dimension}.blockers must be an array"
+            )
+        for index, blocker in enumerate(blockers):
+            field = f"addon readiness.{dimension}.blockers[{index}]"
+            if not isinstance(blocker, Mapping):
+                raise PortableContentError(f"{field} must be an object")
+            _exact_fields(
+                blocker,
+                {"component_id", "item_id", "reason"},
+                field,
+            )
+            _required_text(blocker["component_id"], f"{field}.component_id", maximum=200)
+            item_id = blocker["item_id"]
+            if item_id is not None:
+                _required_text(item_id, f"{field}.item_id", maximum=500)
+            _required_text(blocker["reason"], f"{field}.reason", maximum=1000)
+
+        if dimension == "source":
+            if item["verified_count"] > item["item_count"]:
+                raise PortableContentError(
+                    "addon readiness.source.verified_count cannot exceed item_count"
+                )
+            dimension_complete = item["verified_count"] == item["item_count"]
+        elif dimension == "catalog":
+            if item["reviewed_count"] > item["item_count"]:
+                raise PortableContentError(
+                    "addon readiness.catalog.reviewed_count cannot exceed item_count"
+                )
+            dimension_complete = item["reviewed_count"] == item["item_count"]
+        elif dimension == "selection":
+            if item["ready_count"] > item["applicable_count"]:
+                raise PortableContentError(
+                    "addon readiness.selection.ready_count cannot exceed applicable_count"
+                )
+            dimension_complete = item["ready_count"] == item["applicable_count"]
+        else:
+            modes = item["modes"]
+            if not isinstance(modes, dict) or any(
+                not isinstance(mode, str)
+                or not mode.strip()
+                or isinstance(count, bool)
+                or not isinstance(count, int)
+                or count < 0
+                for mode, count in modes.items()
+            ):
+                raise PortableContentError(
+                    "addon readiness.runtime.modes must map non-empty mode names "
+                    "to non-negative integers"
+                )
+            if sum(modes.values()) != item["resolved_count"]:
+                raise PortableContentError(
+                    "addon readiness.runtime.modes must sum to resolved_count"
+                )
+            if item["resolved_count"] > item["item_count"]:
+                raise PortableContentError(
+                    "addon readiness.runtime.resolved_count cannot exceed item_count"
+                )
+            dimension_complete = item["resolved_count"] == item["item_count"]
+
+        dimension_complete = dimension_complete and not blockers
+        if item["complete"] != dimension_complete:
+            raise PortableContentError(
+                f"addon readiness.{dimension}.complete does not match its counts "
+                "and blockers"
+            )
+        normalized[dimension] = item
+
+    if not isinstance(value["complete"], bool):
+        raise PortableContentError("addon readiness.complete must be a boolean")
+    expected_complete = all(item["complete"] for item in normalized.values())
+    if value["complete"] != expected_complete:
+        raise PortableContentError(
+            "addon readiness.complete must equal all dimension completion states"
+        )
+    value.update(normalized)
+    return value
+
+
 def validate_addon_pack(
     envelope: Mapping[str, Any], *, expected_system_id: str | None = None
 ) -> dict[str, Any]:
@@ -1106,6 +1241,9 @@ def validate_addon_pack(
         raise PortableContentError(
             "addon_pack.manifest.content_summary must map content kinds to non-negative counts"
         )
+    readiness = manifest.get("readiness")
+    if readiness is not None:
+        manifest["readiness"] = validate_addon_readiness(readiness)
     activation = manifest.get("activation")
     if not isinstance(activation, dict):
         raise PortableContentError("addon_pack.manifest.activation must be an object")
