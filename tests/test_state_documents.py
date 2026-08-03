@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -33,6 +34,8 @@ from sagasmith_core.access import (
     LOCAL_SYSTEM_PRINCIPAL_ID,
 )
 from sagasmith_core.documents import (
+    _PDF_TEXT_EXTRACTOR_VERSION,
+    GENERIC_DOCUMENT_LAYOUT_PROFILE,
     CascadingOcrProvider,
     DocumentBookmark,
     NormalizedDocument,
@@ -41,6 +44,7 @@ from sagasmith_core.documents import (
     PageLocator,
     PdfDocumentConverter,
     RapidOcrProvider,
+    _cache_profile,
     _layout_reading_order_text,
     _looks_like_corrupt_visual_heading,
     _ocr_page_layout,
@@ -344,6 +348,17 @@ def test_normalized_document_cache_is_content_addressed(tmp_path) -> None:
     assert second.metadata["normalization_cache_hit"] is True
     assert second.content == first.content
     assert len(list(cache.rglob("*.json"))) == 1
+
+
+def test_normalized_pdf_cache_profile_binds_page_extractor_version() -> None:
+    profile = _cache_profile(
+        Path("rules.pdf"),
+        None,
+        GENERIC_DOCUMENT_LAYOUT_PROFILE,
+    )
+
+    assert f"pypdfium2:{_PDF_TEXT_EXTRACTOR_VERSION}" in profile
+    assert f"layout={GENERIC_DOCUMENT_LAYOUT_PROFILE.cache_identity}" in profile
 
 
 def test_page_locator_reuses_one_marker_index() -> None:

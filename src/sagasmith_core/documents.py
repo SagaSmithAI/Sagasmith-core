@@ -18,12 +18,12 @@ from statistics import median
 from typing import Any, Protocol
 from uuid import uuid4
 
-DOCUMENT_NORMALIZER_VERSION = "25"
+DOCUMENT_NORMALIZER_VERSION = "26"
 _MAX_STRUCTURAL_HEADING_CHARS = 200
 DOCUMENT_SOURCE_SUFFIXES = frozenset({".md", ".markdown", ".pdf", ".txt"})
 _DOCUMENT_CACHE_SCHEMA = 1
 _PDF_EXTRACTION_CACHE_SCHEMA = 2
-_PDF_TEXT_EXTRACTOR_VERSION = "5"
+_PDF_TEXT_EXTRACTOR_VERSION = "6"
 
 
 class DocumentQualityError(RuntimeError):
@@ -2094,6 +2094,7 @@ class PdfDocumentConverter:
                 "normalizer_profile": "pdf-layout",
                 "normalizer_version": DOCUMENT_NORMALIZER_VERSION,
                 "text_extractor": "pypdfium2",
+                "text_extractor_version": _PDF_TEXT_EXTRACTOR_VERSION,
                 "outline_extractor": "pypdf",
                 **form_metadata,
                 "ocr_provider": self.ocr_provider.name if ocr_pages else None,
@@ -2142,12 +2143,9 @@ def _cache_profile(
     layout_profile: DocumentLayoutProfile,
 ) -> str:
     if path.suffix.casefold() == ".pdf":
-        ocr = getattr(ocr_provider, "cache_profile", None) or getattr(
-            ocr_provider, "name", "none"
-        )
         return (
-            f"pdf-layout:{DOCUMENT_NORMALIZER_VERSION}:ocr={ocr}:"
-            f"layout={layout_profile.cache_identity}"
+            f"pdf-layout:{DOCUMENT_NORMALIZER_VERSION}:"
+            f"extraction={_pdf_extraction_profile(ocr_provider, layout_profile)}"
         )
     return f"markdown:{DOCUMENT_NORMALIZER_VERSION}"
 
