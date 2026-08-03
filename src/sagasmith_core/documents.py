@@ -1373,15 +1373,19 @@ def _pdf_text_layout_blocks(text_page: Any, *, page_height: float) -> list[OcrTe
             candidate = {
                 "cy": character["cy"],
                 "height": character["height"],
+                "cy_sum": 0.0,
+                "height_sum": 0.0,
+                "character_count": 0,
                 "characters": [],
             }
             lines.append(candidate)
         candidate["characters"].append(character)
-        candidate["cy"] = median(
-            item["cy"] for item in candidate["characters"]
-        )
-        candidate["height"] = median(
-            item["height"] for item in candidate["characters"]
+        candidate["cy_sum"] += float(character["cy"])
+        candidate["height_sum"] += float(character["height"])
+        candidate["character_count"] += 1
+        candidate["cy"] = candidate["cy_sum"] / candidate["character_count"]
+        candidate["height"] = (
+            candidate["height_sum"] / candidate["character_count"]
         )
 
     blocks: list[OcrTextBlock] = []

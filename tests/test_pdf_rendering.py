@@ -126,6 +126,21 @@ def test_pdf_text_layout_restores_word_spaces_from_character_gaps() -> None:
     ) is False
 
 
+def test_pdf_text_layout_groups_a_long_flattened_line_without_quadratic_stats() -> None:
+    text = "A" * 4000
+    values = [
+        (character, 10.0 + index * 5.0, 70.0)
+        for index, character in enumerate(text)
+    ]
+
+    blocks = _pdf_text_layout_blocks(
+        _PositionedTextPage(values),
+        page_height=100.0,
+    )
+
+    assert [block.text for block in blocks] == [text]
+
+
 def test_pdf_text_layout_respects_an_explicit_empty_page_selection(
     tmp_path: Path,
 ) -> None:
