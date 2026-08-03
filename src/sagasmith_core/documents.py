@@ -18,12 +18,12 @@ from statistics import median
 from typing import Any, Protocol
 from uuid import uuid4
 
-DOCUMENT_NORMALIZER_VERSION = "22"
+DOCUMENT_NORMALIZER_VERSION = "23"
 _MAX_STRUCTURAL_HEADING_CHARS = 200
 DOCUMENT_SOURCE_SUFFIXES = frozenset({".md", ".markdown", ".pdf", ".txt"})
 _DOCUMENT_CACHE_SCHEMA = 1
-_PDF_EXTRACTION_CACHE_SCHEMA = 1
-_PDF_TEXT_EXTRACTOR_VERSION = "3"
+_PDF_EXTRACTION_CACHE_SCHEMA = 2
+_PDF_TEXT_EXTRACTOR_VERSION = "4"
 
 
 class DocumentQualityError(RuntimeError):
@@ -1241,6 +1241,99 @@ def _pdf_text_layout_blocks(text_page: Any, *, page_height: float) -> list[OcrTe
     return blocks
 
 
+def _layout_reading_order_text(layout: OcrPageLayout) -> tuple[str, bool]:
+    """Render positioned blocks in bounded one- or two-column reading order.
+
+    PDF text APIs frequently interleave the left and right columns line by line.
+    The text is syntactically valid, so glyph-quality checks cannot detect the
+    semantic corruption.  This routine recognizes only a well-supported central
+    gutter and otherwise keeps ordinary top-to-bottom order.  Full-width blocks
+    divide the page into independent vertical bands so titles and cross-column
+    tables are not moved behind a whole column.
+    """
+
+    blocks = [
+        block
+        for block in layout.blocks
+        if block.text.strip()
+        and block.x1 > block.x0
+        and block.y1 > block.y0
+    ]
+    if not blocks:
+        return "", False
+    width = float(layout.width)
+    height = float(layout.height)
+    midpoint = width / 2
+    gutter = max(8.0, width * 0.018)
+
+    left: list[OcrTextBlock] = []
+    right: list[OcrTextBlock] = []
+    spanning: list[OcrTextBlock] = []
+    for block in blocks:
+        center = (block.x0 + block.x1) / 2
+        block_width = block.x1 - block.x0
+        crosses_gutter = block.x0 < midpoint - gutter and block.x1 > midpoint + gutter
+        if crosses_gutter and block_width >= width * 0.28:
+            spanning.append(block)
+        elif center < midpoint:
+            left.append(block)
+        else:
+            right.append(block)
+
+    def vertical_extent(values: list[OcrTextBlock]) -> tuple[float, float]:
+        return (
+            min(block.y0 for block in values),
+            max(block.y1 for block in values),
+        )
+
+    two_columns = len(left) >= 4 and len(right) >= 4
+    if two_columns:
+        left_y0, left_y1 = vertical_extent(left)
+        right_y0, right_y1 = vertical_extent(right)
+        overlap = min(left_y1, right_y1) - max(left_y0, right_y0)
+        two_columns = overlap >= max(36.0, height * 0.1)
+    if not two_columns:
+        ordered = sorted(blocks, key=lambda block: (block.y0, block.x0))
+        return "\n".join(block.text.strip() for block in ordered), False
+
+    ordered_blocks: list[OcrTextBlock] = []
+    remaining = [*left, *right]
+    for divider in sorted(spanning, key=lambda block: (block.y0, block.x0)):
+        divider_center = (divider.y0 + divider.y1) / 2
+        band = [
+            block
+            for block in remaining
+            if (block.y0 + block.y1) / 2 < divider_center
+        ]
+        remaining = [block for block in remaining if block not in band]
+        ordered_blocks.extend(
+            sorted(
+                (block for block in band if (block.x0 + block.x1) / 2 < midpoint),
+                key=lambda block: (block.y0, block.x0),
+            )
+        )
+        ordered_blocks.extend(
+            sorted(
+                (block for block in band if (block.x0 + block.x1) / 2 >= midpoint),
+                key=lambda block: (block.y0, block.x0),
+            )
+        )
+        ordered_blocks.append(divider)
+    ordered_blocks.extend(
+        sorted(
+            (block for block in remaining if (block.x0 + block.x1) / 2 < midpoint),
+            key=lambda block: (block.y0, block.x0),
+        )
+    )
+    ordered_blocks.extend(
+        sorted(
+            (block for block in remaining if (block.x0 + block.x1) / 2 >= midpoint),
+            key=lambda block: (block.y0, block.x0),
+        )
+    )
+    return "\n".join(block.text.strip() for block in ordered_blocks), True
+
+
 def _ocr_page_layout(
     output: Any,
     *,
@@ -1408,7 +1501,7 @@ def _looks_like_corrupt_visual_heading(value: str) -> bool:
 def _extract_pdfium_pages(
     path: Path,
     layout_profile: DocumentLayoutProfile = GENERIC_DOCUMENT_LAYOUT_PROFILE,
-) -> tuple[list[str], dict[int, list[tuple[str, int]]]]:
+) -> tuple[list[str], dict[int, list[tuple[str, int]]], list[int]]:
     try:
         import pypdfium2 as pdfium
     except ImportError as exc:
@@ -1419,12 +1512,30 @@ def _extract_pdfium_pages(
     try:
         result: list[str] = []
         headings: dict[int, list[tuple[str, int]]] = {}
+        layout_ordered_pages: list[int] = []
         for index in range(len(document)):
             page = document[index]
             try:
+                width, height = page.get_size()
                 text_page = page.get_textpage()
                 try:
-                    result.append(text_page.get_text_bounded() or "")
+                    embedded_text = text_page.get_text_bounded() or ""
+                    layout_text, used_columns = _layout_reading_order_text(
+                        OcrPageLayout(
+                            page_number=index + 1,
+                            width=max(1, round(width)),
+                            height=max(1, round(height)),
+                            blocks=tuple(
+                                _pdf_text_layout_blocks(
+                                    text_page,
+                                    page_height=float(height),
+                                )
+                            ),
+                        )
+                    )
+                    result.append(layout_text if used_columns else embedded_text)
+                    if used_columns:
+                        layout_ordered_pages.append(index + 1)
                     page_headings = _visual_headings(text_page, layout_profile)
                     if page_headings:
                         headings[index + 1] = page_headings
@@ -1432,7 +1543,7 @@ def _extract_pdfium_pages(
                     text_page.close()
             finally:
                 page.close()
-        return result, headings
+        return result, headings, layout_ordered_pages
     finally:
         document.close()
 
@@ -1471,13 +1582,30 @@ def _ocr_suspect_pages(
     source: Path,
     pages: list[str],
     page_numbers: Sequence[int],
-) -> list[int]:
-    try:
-        extracted = provider.extract(source, page_numbers=page_numbers)
-    except TypeError:
-        # Compatibility with providers implementing the original all-pages contract.
-        all_pages = provider.extract(source)
-        extracted = [all_pages[page_number - 1] for page_number in page_numbers]
+) -> tuple[list[int], list[int]]:
+    layout_pages: list[int] = []
+    extract_layout = getattr(provider, "extract_layout", None)
+    extracted: list[str]
+    if callable(extract_layout):
+        layouts = list(extract_layout(source, page_numbers=page_numbers))
+        if len(layouts) != len(page_numbers):
+            raise DocumentQualityError(
+                "pdf_ocr_page_mismatch",
+                "OCR provider returned a different number of pages than requested",
+            )
+        extracted = []
+        for layout in layouts:
+            text, used_columns = _layout_reading_order_text(layout)
+            extracted.append(text)
+            if used_columns:
+                layout_pages.append(int(layout.page_number))
+    else:
+        try:
+            extracted = provider.extract(source, page_numbers=page_numbers)
+        except TypeError:
+            # Compatibility with providers implementing the original all-pages contract.
+            all_pages = provider.extract(source)
+            extracted = [all_pages[page_number - 1] for page_number in page_numbers]
     if len(extracted) != len(page_numbers):
         raise DocumentQualityError(
             "pdf_ocr_page_mismatch",
@@ -1488,7 +1616,7 @@ def _ocr_suspect_pages(
         if str(text).strip():
             pages[page_number - 1] = str(text)
             replaced.append(page_number)
-    return replaced
+    return replaced, layout_pages
 
 
 def _pdf_extraction_profile(
@@ -1638,12 +1766,16 @@ class PdfDocumentConverter:
                         },
                         dict(cached["initial_quality"]),
                         [int(item) for item in cached.get("ocr_pages", [])],
+                        [
+                            int(item)
+                            for item in cached.get("layout_ordered_pages", [])
+                        ],
                     )
             except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                 pass
         extraction_cache_hit = extracted is not None
         if extracted is None:
-            pages, visual_headings = _extract_pdfium_pages(
+            pages, visual_headings, layout_ordered_pages = _extract_pdfium_pages(
                 source,
                 self.layout_profile,
             )
@@ -1660,8 +1792,11 @@ class PdfDocumentConverter:
             )
             ocr_pages: list[int] = []
             if suspect_pages and self.ocr_provider is not None:
-                ocr_pages = _ocr_suspect_pages(
+                ocr_pages, ocr_layout_pages = _ocr_suspect_pages(
                     self.ocr_provider, source, pages, suspect_pages
+                )
+                layout_ordered_pages = sorted(
+                    set(layout_ordered_pages) | set(ocr_layout_pages)
                 )
                 for page_number in ocr_pages:
                     visual_headings.pop(page_number, None)
@@ -1681,10 +1816,17 @@ class PdfDocumentConverter:
                         },
                         "initial_quality": initial_quality,
                         "ocr_pages": ocr_pages,
+                        "layout_ordered_pages": layout_ordered_pages,
                     },
                 )
         else:
-            pages, visual_headings, initial_quality, ocr_pages = extracted
+            (
+                pages,
+                visual_headings,
+                initial_quality,
+                ocr_pages,
+                layout_ordered_pages,
+            ) = extracted
         quality = _document_quality(pages)
         if pages and quality["suspect_page_count"] / len(pages) >= 0.8:
             if self.ocr_provider is None:
@@ -1734,6 +1876,7 @@ class PdfDocumentConverter:
                 **form_metadata,
                 "ocr_provider": self.ocr_provider.name if ocr_pages else None,
                 "ocr_pages": ocr_pages,
+                "layout_ordered_pages": layout_ordered_pages,
                 "extraction_cache_hit": extraction_cache_hit,
                 "initial_quality": initial_quality,
                 "quality": quality,

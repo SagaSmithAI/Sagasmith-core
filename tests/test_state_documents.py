@@ -35,9 +35,12 @@ from sagasmith_core.access import (
 from sagasmith_core.documents import (
     DocumentBookmark,
     NormalizedDocument,
+    OcrPageLayout,
+    OcrTextBlock,
     PageLocator,
     PdfDocumentConverter,
     RapidOcrProvider,
+    _layout_reading_order_text,
     _looks_like_corrupt_visual_heading,
     _ocr_page_layout,
     _pdf_form_metadata,
@@ -149,6 +152,40 @@ def test_rapidocr_profile_binds_model_version_and_scale() -> None:
 
     with pytest.raises(ValueError, match="model_type"):
         RapidOcrProvider(model_type="server")
+
+
+def test_layout_reading_order_keeps_columns_contiguous() -> None:
+    layout = OcrPageLayout(
+        page_number=12,
+        width=600,
+        height=800,
+        blocks=(
+            OcrTextBlock("Chapter title", 1.0, 80, 20, 520, 50),
+            OcrTextBlock("left one", 1.0, 40, 90, 250, 110),
+            OcrTextBlock("right one", 1.0, 340, 90, 550, 110),
+            OcrTextBlock("left two", 1.0, 40, 120, 250, 140),
+            OcrTextBlock("right two", 1.0, 340, 120, 550, 140),
+            OcrTextBlock("left three", 1.0, 40, 150, 250, 170),
+            OcrTextBlock("right three", 1.0, 340, 150, 550, 170),
+            OcrTextBlock("left four", 1.0, 40, 180, 250, 200),
+            OcrTextBlock("right four", 1.0, 340, 180, 550, 200),
+        ),
+    )
+
+    text, used_columns = _layout_reading_order_text(layout)
+
+    assert used_columns is True
+    assert text.splitlines() == [
+        "Chapter title",
+        "left one",
+        "left two",
+        "left three",
+        "left four",
+        "right one",
+        "right two",
+        "right three",
+        "right four",
+    ]
 
 
 def test_rule_document_path_ingest_preserves_source_and_page_provenance(database, tmp_path) -> None:
