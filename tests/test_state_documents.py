@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -162,6 +163,79 @@ def test_rapidocr_profile_binds_model_version_and_scale() -> None:
 
     with pytest.raises(ValueError, match="model_type"):
         RapidOcrProvider(model_type="server")
+
+
+def test_rapidocr_page_cache_survives_provider_restart_and_rejects_tampering(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "source.pdf"
+    source.write_bytes(b"immutable source bytes")
+    cache = tmp_path / "cache"
+    calls: list[list[int]] = []
+
+    def recovered_layouts(path, *, page_numbers=None):
+        assert path == source.resolve()
+        pages = list(page_numbers or [])
+        calls.append(pages)
+        return [
+            OcrPageLayout(
+                page_number=page_number,
+                width=600,
+                height=800,
+                blocks=(
+                    OcrTextBlock(
+                        f"Recovered page {page_number}",
+                        0.99,
+                        20,
+                        20,
+                        580,
+                        60,
+                    ),
+                ),
+            )
+            for page_number in pages
+        ]
+
+    first = RapidOcrProvider(model_type="medium", cache_dir=cache)
+    monkeypatch.setattr(first, "_extract_layout_uncached", recovered_layouts)
+    layouts = first.extract_layout(source, page_numbers=[2, 1, 2])
+
+    assert calls == [[2, 1]]
+    assert [layout.page_number for layout in layouts] == [2, 1, 2]
+    assert first.cache_hits == 0
+    assert first.cache_misses == 2
+
+    restarted = RapidOcrProvider(model_type="medium", cache_dir=cache)
+    monkeypatch.setattr(
+        restarted,
+        "_extract_layout_uncached",
+        lambda path, *, page_numbers=None: pytest.fail("page should be cached"),
+    )
+    cached = restarted.extract_layout(source, page_numbers=[1, 2])
+
+    assert [layout.blocks[0].text for layout in cached] == [
+        "Recovered page 1",
+        "Recovered page 2",
+    ]
+    assert restarted.cache_hits == 2
+    assert restarted.cache_misses == 0
+
+    page_one = next(cache.rglob("page-00001.json"))
+    damaged = json.loads(page_one.read_text(encoding="utf-8"))
+    damaged["layout"]["blocks"][0]["text"] = "tampered"
+    page_one.write_text(json.dumps(damaged), encoding="utf-8")
+    repaired = RapidOcrProvider(model_type="medium", cache_dir=cache)
+    monkeypatch.setattr(repaired, "_extract_layout_uncached", recovered_layouts)
+    result = repaired.extract_layout(source, page_numbers=[1, 2])
+
+    assert calls == [[2, 1], [1]]
+    assert [layout.blocks[0].text for layout in result] == [
+        "Recovered page 1",
+        "Recovered page 2",
+    ]
+    assert repaired.cache_hits == 1
+    assert repaired.cache_misses == 1
 
 
 def test_ocr_cascade_uses_stronger_model_only_for_unusable_pages() -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import unicodedata
 from bisect import bisect_right
@@ -24,6 +25,7 @@ DOCUMENT_SOURCE_SUFFIXES = frozenset({".md", ".markdown", ".pdf", ".txt"})
 _DOCUMENT_CACHE_SCHEMA = 1
 _PDF_EXTRACTION_CACHE_SCHEMA = 2
 _PDF_TEXT_EXTRACTOR_VERSION = "6"
+_OCR_PAGE_CACHE_SCHEMA = 1
 
 
 class DocumentQualityError(RuntimeError):
@@ -993,18 +995,188 @@ def _document_quality(page_texts: Sequence[str]) -> dict[str, Any]:
     }
 
 
+def _ocr_page_cache_path(
+    cache_dir: Path,
+    *,
+    source_checksum: str,
+    profile: str,
+    page_number: int,
+) -> Path:
+    profile_hash = hashlib.sha256(profile.encode("utf-8")).hexdigest()[:16]
+    return (
+        cache_dir
+        / "ocr-pages"
+        / source_checksum[:2]
+        / source_checksum
+        / profile_hash
+        / f"page-{page_number:05d}.json"
+    )
+
+
+def _ocr_layout_checksum(layout: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        layout,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _write_ocr_page_cache(
+    cache_dir: Path,
+    *,
+    source_checksum: str,
+    profile: str,
+    layout: OcrPageLayout,
+) -> None:
+    layout_value = layout.as_dict()
+    _write_json_atomic(
+        _ocr_page_cache_path(
+            cache_dir,
+            source_checksum=source_checksum,
+            profile=profile,
+            page_number=layout.page_number,
+        ),
+        {
+            "schema": _OCR_PAGE_CACHE_SCHEMA,
+            "source_checksum": source_checksum,
+            "profile": profile,
+            "page_number": layout.page_number,
+            "layout_checksum": _ocr_layout_checksum(layout_value),
+            "layout": layout_value,
+        },
+    )
+
+
+def _read_ocr_page_cache(
+    cache_dir: Path,
+    *,
+    source_checksum: str,
+    profile: str,
+    page_number: int,
+) -> OcrPageLayout | None:
+    target = _ocr_page_cache_path(
+        cache_dir,
+        source_checksum=source_checksum,
+        profile=profile,
+        page_number=page_number,
+    )
+    if not target.is_file():
+        return None
+    try:
+        value = json.loads(target.read_text(encoding="utf-8"))
+        if (
+            set(value) != {
+                "schema",
+                "source_checksum",
+                "profile",
+                "page_number",
+                "layout_checksum",
+                "layout",
+            }
+            or value.get("schema") != _OCR_PAGE_CACHE_SCHEMA
+            or value.get("source_checksum") != source_checksum
+            or value.get("profile") != profile
+            or value.get("page_number") != page_number
+        ):
+            return None
+        layout = value.get("layout")
+        if not isinstance(layout, dict) or set(layout) != {
+            "page_number",
+            "width",
+            "height",
+            "blocks",
+        }:
+            return None
+        if value.get("layout_checksum") != _ocr_layout_checksum(layout):
+            return None
+        width = layout.get("width")
+        height = layout.get("height")
+        blocks = layout.get("blocks")
+        if (
+            layout.get("page_number") != page_number
+            or isinstance(width, bool)
+            or not isinstance(width, int)
+            or width < 1
+            or isinstance(height, bool)
+            or not isinstance(height, int)
+            or height < 1
+            or not isinstance(blocks, list)
+        ):
+            return None
+        parsed_blocks: list[OcrTextBlock] = []
+        for block in blocks:
+            if not isinstance(block, dict) or set(block) != {
+                "text",
+                "confidence",
+                "bbox",
+            }:
+                return None
+            text = block.get("text")
+            confidence = block.get("confidence")
+            bbox = block.get("bbox")
+            if (
+                not isinstance(text, str)
+                or isinstance(confidence, bool)
+                or not isinstance(confidence, (int, float))
+                or not math.isfinite(float(confidence))
+                or not 0 <= float(confidence) <= 1
+                or not isinstance(bbox, list)
+                or len(bbox) != 4
+                or any(
+                    isinstance(coordinate, bool)
+                    or not isinstance(coordinate, (int, float))
+                    or not math.isfinite(float(coordinate))
+                    for coordinate in bbox
+                )
+            ):
+                return None
+            parsed_blocks.append(
+                OcrTextBlock(
+                    text=text,
+                    confidence=float(confidence),
+                    x0=float(bbox[0]),
+                    y0=float(bbox[1]),
+                    x1=float(bbox[2]),
+                    y1=float(bbox[3]),
+                )
+            )
+        return OcrPageLayout(
+            page_number=page_number,
+            width=width,
+            height=height,
+            blocks=tuple(parsed_blocks),
+        )
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
 class RapidOcrProvider:
     """Lazy local OCR for pages whose PDF text layer is empty or corrupt."""
 
     name = "rapidocr"
 
-    def __init__(self, *, scale: float = 2.0, model_type: str = "medium") -> None:
+    def __init__(
+        self,
+        *,
+        scale: float = 2.0,
+        model_type: str = "medium",
+        cache_dir: str | Path | None = None,
+    ) -> None:
         if not 1.0 <= scale <= 4.0:
             raise ValueError("OCR scale must be between 1.0 and 4.0")
         if model_type not in {"small", "medium"}:
             raise ValueError("OCR model_type must be small or medium")
         self.scale = float(scale)
         self.model_type = model_type
+        self.cache_dir = (
+            Path(cache_dir).expanduser().resolve()
+            if cache_dir is not None
+            else None
+        )
+        self.cache_hits = 0
+        self.cache_misses = 0
         self._engine: Any | None = None
 
     @property
@@ -1056,37 +1228,10 @@ class RapidOcrProvider:
         *,
         page_numbers: Sequence[int] | None = None,
     ) -> list[str]:
-        try:
-            import pypdfium2 as pdfium
-        except ImportError as exc:
-            raise RuntimeError(
-                "OCR requires `pip install sagasmith-core[documents,ocr]`"
-            ) from exc
-        engine = self._load_engine()
-        source = Path(path).expanduser().resolve()
-        document = pdfium.PdfDocument(str(source))
-        try:
-            selected = list(
-                range(1, len(document) + 1) if page_numbers is None else page_numbers
-            )
-            if any(not 1 <= page_number <= len(document) for page_number in selected):
-                raise ValueError("OCR page number is outside the PDF")
-            result: list[str] = []
-            for page_number in selected:
-                page = document[page_number - 1]
-                try:
-                    bitmap = page.render(scale=self.scale)
-                    try:
-                        output = engine(bitmap.to_numpy())
-                    finally:
-                        bitmap.close()
-                finally:
-                    page.close()
-                texts = tuple(getattr(output, "txts", ()) or ())
-                result.append("\n".join(str(item).strip() for item in texts if str(item).strip()))
-            return result
-        finally:
-            document.close()
+        return [
+            ocr_layout_text(layout)[0]
+            for layout in self.extract_layout(path, page_numbers=page_numbers)
+        ]
 
     def extract_layout(
         self,
@@ -1094,7 +1239,89 @@ class RapidOcrProvider:
         *,
         page_numbers: Sequence[int] | None = None,
     ) -> list[OcrPageLayout]:
-        """OCR selected pages while retaining block coordinates for text-only recovery."""
+        """OCR selected pages while retaining block coordinates for text-only recovery.
+
+        When a cache directory is configured, every page layout is stored under
+        the immutable source checksum and exact OCR model profile.  This cache is
+        intentionally independent from Markdown normalization versions: changing
+        heading or chunking logic must not force an expensive image model to run
+        again for the same source bytes.
+        """
+
+        source = Path(path).expanduser().resolve()
+        selected = list(page_numbers) if page_numbers is not None else None
+        if selected is None:
+            layouts = self._extract_layout_uncached(source, page_numbers=None)
+            if self.cache_dir is not None:
+                source_checksum = file_sha256(source)
+                for layout in layouts:
+                    _write_ocr_page_cache(
+                        self.cache_dir,
+                        source_checksum=source_checksum,
+                        profile=self.cache_profile,
+                        layout=layout,
+                    )
+                    self.cache_misses += 1
+            return layouts
+
+        if not selected:
+            return []
+        if any(
+            isinstance(page_number, bool)
+            or not isinstance(page_number, int)
+            or page_number < 1
+            for page_number in selected
+        ):
+            raise ValueError("OCR page numbers must be positive integers")
+        if self.cache_dir is None:
+            return self._extract_layout_uncached(source, page_numbers=selected)
+
+        source_checksum = file_sha256(source)
+        profile = self.cache_profile
+        layouts_by_page: dict[int, OcrPageLayout] = {}
+        missing: list[int] = []
+        for page_number in dict.fromkeys(selected):
+            cached = _read_ocr_page_cache(
+                self.cache_dir,
+                source_checksum=source_checksum,
+                profile=profile,
+                page_number=page_number,
+            )
+            if cached is None:
+                missing.append(page_number)
+                self.cache_misses += 1
+            else:
+                layouts_by_page[page_number] = cached
+                self.cache_hits += 1
+        if missing:
+            recovered = self._extract_layout_uncached(source, page_numbers=missing)
+            if len(recovered) != len(missing):
+                raise DocumentQualityError(
+                    "pdf_ocr_page_mismatch",
+                    "OCR provider returned a different number of pages than requested",
+                )
+            for expected_page, layout in zip(missing, recovered, strict=True):
+                if layout.page_number != expected_page:
+                    raise DocumentQualityError(
+                        "pdf_ocr_page_mismatch",
+                        "OCR provider returned a layout for the wrong page",
+                    )
+                layouts_by_page[expected_page] = layout
+                _write_ocr_page_cache(
+                    self.cache_dir,
+                    source_checksum=source_checksum,
+                    profile=profile,
+                    layout=layout,
+                )
+        return [layouts_by_page[page_number] for page_number in selected]
+
+    def _extract_layout_uncached(
+        self,
+        source: Path,
+        *,
+        page_numbers: Sequence[int] | None,
+    ) -> list[OcrPageLayout]:
+        """Run the configured image model without consulting the page cache."""
 
         try:
             import pypdfium2 as pdfium
@@ -1103,7 +1330,6 @@ class RapidOcrProvider:
                 "OCR requires `pip install sagasmith-core[documents,ocr]`"
             ) from exc
         engine = self._load_engine()
-        source = Path(path).expanduser().resolve()
         document = pdfium.PdfDocument(str(source))
         try:
             selected = list(
