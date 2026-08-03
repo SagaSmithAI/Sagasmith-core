@@ -37,7 +37,9 @@ _TRANSITIONS = {
     # when candidates are found; an empty extraction remains ``extracted``.
     "inspected": {"extracted", "review_required", "validated", "failed"},
     "extracted": {"review_required", "failed"},
-    "review_required": {"reviewed", "failed"},
+    # A source-bound Agent may add missed semantic entities before any approval.
+    # Replacing the candidate set keeps the job in review and invalidates drafts.
+    "review_required": {"review_required", "reviewed", "failed"},
     "reviewed": {"compiled", "failed"},
     # A validated but not-yet-installed draft may be reopened when improved
     # extraction or review evidence becomes available. Installed versions stay

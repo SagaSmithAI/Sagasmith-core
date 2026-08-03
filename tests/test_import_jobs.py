@@ -113,6 +113,29 @@ def test_compiled_import_can_reopen_for_new_evidence_before_install(database) ->
     ]
 
 
+def test_review_required_import_can_add_source_bound_candidates(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Catalog augmentation")
+    jobs = ImportJobService(database)
+    created = jobs.create(campaign_id=campaign.id, kind="rulebook", artifact="rules.pdf")
+    inspected = jobs.record_inspection(created.id, {"parser_profile": "pdf"})
+    extracted = jobs.set_candidates(inspected.id, [{"id": "candidate:parsed"}])
+
+    augmented = jobs.set_candidates(
+        extracted.id,
+        [
+            {"id": "candidate:parsed"},
+            {"id": "candidate:agent-source-bound"},
+        ],
+        expected_revision=extracted.revision,
+    )
+
+    assert augmented.state == "review_required"
+    assert [item["id"] for item in augmented.candidates] == [
+        "candidate:parsed",
+        "candidate:agent-source-bound",
+    ]
+
+
 def test_import_job_update_and_exact_replay_receipt_share_one_transaction(database) -> None:
     campaign = CampaignService(database).create(system_id="dnd5e", name="Atomic import")
     jobs = ImportJobService(database)
