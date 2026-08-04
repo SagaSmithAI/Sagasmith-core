@@ -19,12 +19,12 @@ from statistics import median
 from typing import Any, Protocol
 from uuid import uuid4
 
-DOCUMENT_NORMALIZER_VERSION = "28"
+DOCUMENT_NORMALIZER_VERSION = "29"
 _MAX_STRUCTURAL_HEADING_CHARS = 200
 DOCUMENT_SOURCE_SUFFIXES = frozenset({".md", ".markdown", ".pdf", ".txt"})
 _DOCUMENT_CACHE_SCHEMA = 1
-_PDF_EXTRACTION_CACHE_SCHEMA = 3
-_PDF_TEXT_EXTRACTOR_VERSION = "6"
+_PDF_EXTRACTION_CACHE_SCHEMA = 4
+_PDF_TEXT_EXTRACTOR_VERSION = "7"
 _OCR_PAGE_CACHE_SCHEMA = 1
 
 
@@ -1720,7 +1720,7 @@ def _layout_repairs_missing_word_spaces(embedded: str, layout: str) -> bool:
 
 
 def _layout_reading_order_text(layout: OcrPageLayout) -> tuple[str, bool]:
-    """Render positioned blocks in bounded one- or two-column reading order.
+    """Render positioned blocks in bounded one-, two-, or three-column order.
 
     PDF text APIs frequently interleave the left and right columns line by line.
     The text is syntactically valid, so glyph-quality checks cannot detect the
@@ -1741,22 +1741,7 @@ def _layout_reading_order_text(layout: OcrPageLayout) -> tuple[str, bool]:
         return "", False
     width = float(layout.width)
     height = float(layout.height)
-    midpoint = width / 2
     gutter = max(8.0, width * 0.018)
-
-    left: list[OcrTextBlock] = []
-    right: list[OcrTextBlock] = []
-    spanning: list[OcrTextBlock] = []
-    for block in blocks:
-        center = (block.x0 + block.x1) / 2
-        block_width = block.x1 - block.x0
-        crosses_gutter = block.x0 < midpoint - gutter and block.x1 > midpoint + gutter
-        if crosses_gutter and block_width >= width * 0.28:
-            spanning.append(block)
-        elif center < midpoint:
-            left.append(block)
-        else:
-            right.append(block)
 
     def vertical_extent(values: list[OcrTextBlock]) -> tuple[float, float]:
         return (
@@ -1764,52 +1749,123 @@ def _layout_reading_order_text(layout: OcrPageLayout) -> tuple[str, bool]:
             max(block.y1 for block in values),
         )
 
-    two_columns = len(left) >= 4 and len(right) >= 4
-    if two_columns:
-        left_y0, left_y1 = vertical_extent(left)
-        right_y0, right_y1 = vertical_extent(right)
-        overlap = min(left_y1, right_y1) - max(left_y0, right_y0)
-        two_columns = overlap >= max(36.0, height * 0.1)
-    if not two_columns:
-        ordered = sorted(blocks, key=lambda block: (block.y0, block.x0))
-        return "\n".join(block.text.strip() for block in ordered), False
+    def vertical_bands(values: list[OcrTextBlock]) -> list[list[OcrTextBlock]]:
+        ordered = sorted(values, key=lambda block: (block.y0, block.x0))
+        bands: list[list[OcrTextBlock]] = []
+        current: list[OcrTextBlock] = []
+        current_bottom = 0.0
+        gap_threshold = max(24.0, height * 0.035)
+        for block in ordered:
+            if current and block.y0 - current_bottom > gap_threshold:
+                bands.append(current)
+                current = []
+            current.append(block)
+            current_bottom = max(current_bottom, block.y1)
+        if current:
+            bands.append(current)
+        return bands
+
+    def column_partition(
+        values: list[OcrTextBlock],
+    ) -> tuple[list[list[OcrTextBlock]], list[OcrTextBlock]] | None:
+        band_top = min(block.y0 for block in values)
+        for column_count in (3, 2):
+            column_width = width / column_count
+            boundaries = [column_width * index for index in range(1, column_count)]
+            columns: list[list[OcrTextBlock]] = [[] for _ in range(column_count)]
+            spanning: list[OcrTextBlock] = []
+            for block in values:
+                center = (block.x0 + block.x1) / 2
+                block_width = block.x1 - block.x0
+                crosses_gutter = any(
+                    block.x0 < boundary - gutter and block.x1 > boundary + gutter
+                    for boundary in boundaries
+                )
+                has_row_peer = any(
+                    other is not block
+                    and min(block.y1, other.y1) - max(block.y0, other.y0) > 0
+                    for other in values
+                )
+                top_centered_display = (
+                    block.y0 <= band_top + max(24.0, height * 0.04)
+                    and abs(center - width / 2) <= width * 0.12
+                    and block_width >= width * 0.08
+                    and not has_row_peer
+                )
+                if (
+                    block_width >= column_width * 1.45
+                    or (crosses_gutter and block_width >= width * 0.15)
+                    or top_centered_display
+                ):
+                    spanning.append(block)
+                    continue
+                column_index = min(column_count - 1, int(center / column_width))
+                columns[column_index].append(block)
+            if len(spanning) > max(3, len(values) // 5):
+                # A two-column page projected onto three equal bands makes most
+                # ordinary lines look like cross-column dividers. Treat that as
+                # evidence against the finer partition.
+                continue
+            if any(len(column) < 4 for column in columns):
+                continue
+            extents = [vertical_extent(column) for column in columns]
+            overlap = min(end for _start, end in extents) - max(
+                start for start, _end in extents
+            )
+            if overlap < max(36.0, height * 0.1):
+                continue
+            separated = all(
+                median(block.x1 for block in columns[index]) + gutter
+                < median(block.x0 for block in columns[index + 1])
+                for index in range(column_count - 1)
+            )
+            if separated:
+                return columns, spanning
+        return None
+
+    def order_partition(
+        columns: list[list[OcrTextBlock]],
+        spanning: list[OcrTextBlock],
+    ) -> list[OcrTextBlock]:
+        result: list[OcrTextBlock] = []
+        remaining = [block for column in columns for block in column]
+        for divider in sorted(spanning, key=lambda block: (block.y0, block.x0)):
+            divider_center = (divider.y0 + divider.y1) / 2
+            prior = [
+                block
+                for block in remaining
+                if (block.y0 + block.y1) / 2 < divider_center
+            ]
+            remaining = [block for block in remaining if block not in prior]
+            for column in columns:
+                column_ids = {id(block) for block in column}
+                result.extend(
+                    sorted(
+                        (block for block in prior if id(block) in column_ids),
+                        key=lambda block: (block.y0, block.x0),
+                    )
+                )
+            result.append(divider)
+        for column in columns:
+            column_ids = {id(block) for block in column}
+            result.extend(
+                sorted(
+                    (block for block in remaining if id(block) in column_ids),
+                    key=lambda block: (block.y0, block.x0),
+                )
+            )
+        return result
 
     ordered_blocks: list[OcrTextBlock] = []
-    remaining = [*left, *right]
-    for divider in sorted(spanning, key=lambda block: (block.y0, block.x0)):
-        divider_center = (divider.y0 + divider.y1) / 2
-        band = [
-            block
-            for block in remaining
-            if (block.y0 + block.y1) / 2 < divider_center
-        ]
-        remaining = [block for block in remaining if block not in band]
-        ordered_blocks.extend(
-            sorted(
-                (block for block in band if (block.x0 + block.x1) / 2 < midpoint),
-                key=lambda block: (block.y0, block.x0),
-            )
-        )
-        ordered_blocks.extend(
-            sorted(
-                (block for block in band if (block.x0 + block.x1) / 2 >= midpoint),
-                key=lambda block: (block.y0, block.x0),
-            )
-        )
-        ordered_blocks.append(divider)
-    ordered_blocks.extend(
-        sorted(
-            (block for block in remaining if (block.x0 + block.x1) / 2 < midpoint),
-            key=lambda block: (block.y0, block.x0),
-        )
-    )
-    ordered_blocks.extend(
-        sorted(
-            (block for block in remaining if (block.x0 + block.x1) / 2 >= midpoint),
-            key=lambda block: (block.y0, block.x0),
-        )
-    )
-    return "\n".join(block.text.strip() for block in ordered_blocks), True
+    used_columns = False
+    for band in vertical_bands(blocks):
+        partition = column_partition(band)
+        if partition is None:
+            ordered_blocks.extend(sorted(band, key=lambda block: (block.y0, block.x0)))
+            continue
+        used_columns = True
+        ordered_blocks.extend(order_partition(*partition))
+    return "\n".join(block.text.strip() for block in ordered_blocks), used_columns
 
 
 def ocr_layout_text(layout: OcrPageLayout) -> tuple[str, bool]:
@@ -2284,6 +2340,10 @@ class PdfDocumentConverter:
                             int(item)
                             for item in cached.get("bookmark_ocr_pages", [])
                         ],
+                        [
+                            int(item)
+                            for item in cached.get("ocr_rejected_pages", [])
+                        ],
                     )
             except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                 pass
@@ -2309,12 +2369,45 @@ class PdfDocumentConverter:
                 )
             )
             ocr_pages: list[int] = []
+            ocr_rejected_pages: list[int] = []
             if suspect_pages and self.ocr_provider is not None:
-                ocr_pages, ocr_layout_pages = _ocr_suspect_pages(
-                    self.ocr_provider, source, pages, suspect_pages
+                candidate_pages = list(pages)
+                attempted_ocr_pages, ocr_layout_pages = _ocr_suspect_pages(
+                    self.ocr_provider, source, candidate_pages, suspect_pages
                 )
+                mandatory_ocr_pages = set(corrupt_pages) | set(fused_pages) | (
+                    set(sparse_pages)
+                    if pages and len(sparse_pages) / len(pages) >= 0.8
+                    else set()
+                )
+                for page_number in attempted_ocr_pages:
+                    accept = page_number in mandatory_ocr_pages
+                    if not accept and page_number in bookmark_ocr_pages:
+                        page_bookmarks = [
+                            bookmark
+                            for bookmark in bookmarks
+                            if bookmark.page == page_number
+                        ]
+                        before = _match_bookmarks(
+                            [[_clean_line(line) for line in text.splitlines()] for text in pages],
+                            page_bookmarks,
+                        )[1]
+                        after = _match_bookmarks(
+                            [
+                                [_clean_line(line) for line in text.splitlines()]
+                                for text in candidate_pages
+                            ],
+                            page_bookmarks,
+                        )[1]
+                        accept = after > before
+                    if accept:
+                        pages[page_number - 1] = candidate_pages[page_number - 1]
+                        ocr_pages.append(page_number)
+                    else:
+                        ocr_rejected_pages.append(page_number)
                 layout_ordered_pages = sorted(
-                    set(layout_ordered_pages) | set(ocr_layout_pages)
+                    set(layout_ordered_pages)
+                    | (set(ocr_layout_pages) & set(ocr_pages))
                 )
                 for page_number in ocr_pages:
                     visual_headings.pop(page_number, None)
@@ -2335,6 +2428,7 @@ class PdfDocumentConverter:
                         "initial_quality": initial_quality,
                         "ocr_pages": ocr_pages,
                         "bookmark_ocr_pages": bookmark_ocr_pages,
+                        "ocr_rejected_pages": ocr_rejected_pages,
                         "layout_ordered_pages": layout_ordered_pages,
                     },
                 )
@@ -2346,6 +2440,7 @@ class PdfDocumentConverter:
                 ocr_pages,
                 layout_ordered_pages,
                 bookmark_ocr_pages,
+                ocr_rejected_pages,
             ) = extracted
         quality = _document_quality(pages)
         if pages and quality["suspect_page_count"] / len(pages) >= 0.8:
@@ -2404,6 +2499,7 @@ class PdfDocumentConverter:
                 ),
                 "ocr_pages": ocr_pages,
                 "bookmark_ocr_pages": bookmark_ocr_pages,
+                "ocr_rejected_pages": ocr_rejected_pages,
                 "layout_ordered_pages": layout_ordered_pages,
                 "extraction_cache_hit": extraction_cache_hit,
                 "initial_quality": initial_quality,

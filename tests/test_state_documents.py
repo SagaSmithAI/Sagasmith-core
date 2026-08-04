@@ -407,6 +407,43 @@ def test_layout_reading_order_keeps_columns_contiguous() -> None:
     assert ocr_layout_text(layout) == (text, used_columns)
 
 
+def test_layout_reading_order_keeps_three_columns_contiguous() -> None:
+    blocks = [OcrTextBlock("Chapter title", 1.0, 80, 20, 520, 50)]
+    for row, y in enumerate((90, 120, 150, 180), 1):
+        blocks.extend(
+            (
+                OcrTextBlock(f"left {row}", 1.0, 30, y, 170, y + 20),
+                OcrTextBlock(f"middle {row}", 1.0, 230, y, 370, y + 20),
+                OcrTextBlock(f"right {row}", 1.0, 430, y, 570, y + 20),
+            )
+        )
+    layout = OcrPageLayout(
+        page_number=13,
+        width=600,
+        height=800,
+        blocks=tuple(blocks),
+    )
+
+    text, used_columns = _layout_reading_order_text(layout)
+
+    assert used_columns is True
+    assert text.splitlines() == [
+        "Chapter title",
+        "left 1",
+        "left 2",
+        "left 3",
+        "left 4",
+        "middle 1",
+        "middle 2",
+        "middle 3",
+        "middle 4",
+        "right 1",
+        "right 2",
+        "right 3",
+        "right 4",
+    ]
+
+
 def test_rule_document_path_ingest_preserves_source_and_page_provenance(database, tmp_path) -> None:
     path = tmp_path / "optional-rules.md"
     path.write_text("# Options\n## Tool Synergy\nUse both proficiencies.\n", encoding="utf-8")
@@ -595,6 +632,40 @@ def test_pdf_converter_ocr_repairs_unmatched_text_bearing_bookmark(
     assert document.metadata["ocr_pages"] == [1]
     assert document.metadata["matched_bookmarks"] == 1
     assert not any("bookmark match rate" in item for item in document.warnings)
+
+
+def test_pdf_converter_rejects_bookmark_ocr_that_does_not_improve_heading(
+    tmp_path, monkeypatch
+) -> None:
+    pypdf = pytest.importorskip("pypdf")
+    pytest.importorskip("pypdfium2")
+    source = tmp_path / "good-layout.pdf"
+    writer = pypdf.PdfWriter()
+    writer.add_blank_page(width=200, height=100)
+    writer.add_outline_item("Ch. 5: Treasures", 0)
+    with source.open("wb") as stream:
+        writer.write(stream)
+    embedded = "LEFT COLUMN\nComplete embedded body text.\nRIGHT COLUMN\nMore source text."
+    monkeypatch.setattr(
+        "sagasmith_core.documents._extract_pdfium_pages",
+        lambda _source, _profile: ([embedded], {}, [1]),
+    )
+
+    class WorseOcr:
+        name = "worse"
+
+        def extract(self, path, *, page_numbers=None):
+            del path
+            assert page_numbers == [1]
+            return ["BROKEN COLUMN ORDER\nIncomplete OCR text."]
+
+    document = PdfDocumentConverter(ocr_provider=WorseOcr()).convert(source)
+
+    assert "Complete embedded body text" in document.content
+    assert "Incomplete OCR text" not in document.content
+    assert document.metadata["bookmark_ocr_pages"] == [1]
+    assert document.metadata["ocr_pages"] == []
+    assert document.metadata["ocr_rejected_pages"] == [1]
 
 
 def test_page_quality_detects_fused_pdf_word_streams() -> None:
