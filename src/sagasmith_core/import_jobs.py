@@ -35,7 +35,9 @@ _TRANSITIONS = {
     "staged": {"inspected", "failed"},
     # Candidate extraction and entering review are one atomic public operation
     # when candidates are found; an empty extraction remains ``extracted``.
-    "inspected": {"extracted", "review_required", "validated", "failed"},
+    # Evidence-bound text revisions rerun inspection without indexing or
+    # mutating the staged artifact.
+    "inspected": {"inspected", "extracted", "review_required", "validated", "failed"},
     "extracted": {"review_required", "failed"},
     # A source-bound Agent may add missed semantic entities before any approval.
     # Replacing the candidate set keeps the job in review and invalidates drafts.

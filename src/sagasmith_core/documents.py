@@ -9,7 +9,7 @@ import re
 import unicodedata
 from bisect import bisect_right
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from importlib.metadata import PackageNotFoundError
@@ -19,12 +19,12 @@ from statistics import median
 from typing import Any, Protocol
 from uuid import uuid4
 
-DOCUMENT_NORMALIZER_VERSION = "34"
+DOCUMENT_NORMALIZER_VERSION = "35"
 _MAX_STRUCTURAL_HEADING_CHARS = 200
 DOCUMENT_SOURCE_SUFFIXES = frozenset({".md", ".markdown", ".pdf", ".txt"})
 _DOCUMENT_CACHE_SCHEMA = 1
 _PDF_EXTRACTION_CACHE_SCHEMA = 6
-_PDF_TEXT_EXTRACTOR_VERSION = "10"
+_PDF_TEXT_EXTRACTOR_VERSION = "11"
 _OCR_PAGE_CACHE_SCHEMA = 1
 _BOOKMARK_OCR_MAX_NON_WHITESPACE = 800
 
@@ -90,6 +90,191 @@ class NormalizedDocument:
     bookmarks: tuple[DocumentBookmark, ...] = ()
     warnings: tuple[str, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+def _normalized_document_page_span(content: str, page_number: int) -> tuple[int, int]:
+    if isinstance(page_number, bool) or not isinstance(page_number, int) or page_number < 1:
+        raise ValueError("page_number must be a positive integer")
+    matches = list(_PAGE_MARKER_SCAN_RE.finditer(content))
+    for index, match in enumerate(matches):
+        if int(match.group(1)) != page_number:
+            continue
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(content)
+        return match.end(), end
+    raise ValueError(f"normalized document has no physical page {page_number}")
+
+
+def normalized_document_page_text(
+    document: NormalizedDocument,
+    page_number: int,
+) -> str:
+    """Return the exact normalized text segment owned by one physical PDF page."""
+
+    start, end = _normalized_document_page_span(document.content, page_number)
+    return document.content[start:end]
+
+
+def apply_document_page_revisions(
+    document: NormalizedDocument,
+    revisions: Sequence[Mapping[str, Any]] | None,
+) -> NormalizedDocument:
+    """Apply checksum-bound, exact-match Agent or human transcription repairs.
+
+    The source document and cached OCR remain immutable.  A revision can only
+    replace unique text inside one physical page segment, and the reviewed page
+    must retain at least half of the original normalized text.
+    """
+
+    if not revisions:
+        return document
+    content = document.content
+    audit: list[dict[str, Any]] = []
+    reviewed_pages: set[int] = set()
+    page_revision_counts: Counter[int] = Counter()
+    for index, raw_revision in enumerate(revisions):
+        if not isinstance(raw_revision, Mapping):
+            raise ValueError(f"page revisions[{index}] must be an object")
+        revision = dict(raw_revision)
+        allowed = {
+            "source_checksum",
+            "page_number",
+            "base_text_sha256",
+            "replacements",
+            "reviewer",
+            "review_method",
+            "rationale",
+            "evidence",
+        }
+        unsupported = set(revision) - allowed
+        if unsupported:
+            raise ValueError(
+                f"page revisions[{index}] has unsupported fields: {sorted(unsupported)}"
+            )
+        if str(revision.get("source_checksum") or "") != document.checksum:
+            raise ValueError(f"page revisions[{index}] source checksum does not match")
+        page_number = revision.get("page_number")
+        if (
+            isinstance(page_number, bool)
+            or not isinstance(page_number, int)
+            or not 1 <= page_number <= document.page_count
+        ):
+            raise ValueError(f"page revisions[{index}].page_number is invalid")
+        page_revision_counts[page_number] += 1
+        if page_revision_counts[page_number] > 8:
+            raise ValueError("at most eight transcription revisions are allowed per page")
+        reviewed_pages.add(page_number)
+        reviewer = str(revision.get("reviewer") or "").strip()
+        if not 1 <= len(reviewer) <= 200:
+            raise ValueError(f"page revisions[{index}].reviewer is required")
+        review_method = str(revision.get("review_method") or "").strip()
+        if review_method not in {"agent", "human"}:
+            raise ValueError(
+                f"page revisions[{index}].review_method must be agent or human"
+            )
+        rationale = str(revision.get("rationale") or "").strip()
+        if not 1 <= len(rationale) <= 2000:
+            raise ValueError(f"page revisions[{index}].rationale is required")
+        evidence = revision.get("evidence")
+        if not isinstance(evidence, Mapping) or not evidence:
+            raise ValueError(f"page revisions[{index}].evidence is required")
+
+        current_document = NormalizedDocument(
+            content=content,
+            media_type=document.media_type,
+            source_path=document.source_path,
+            checksum=document.checksum,
+            page_count=document.page_count,
+            bookmarks=document.bookmarks,
+            warnings=document.warnings,
+            metadata=document.metadata,
+        )
+        page_start, page_end = _normalized_document_page_span(content, page_number)
+        page_text = current_document.content[page_start:page_end]
+        base_checksum = hashlib.sha256(page_text.encode("utf-8")).hexdigest()
+        if str(revision.get("base_text_sha256") or "") != base_checksum:
+            raise ValueError(f"page revisions[{index}] base text checksum does not match")
+        raw_replacements = revision.get("replacements")
+        if not isinstance(raw_replacements, list) or not 1 <= len(raw_replacements) <= 128:
+            raise ValueError(
+                f"page revisions[{index}].replacements must contain 1 to 128 entries"
+            )
+        revised_page = page_text
+        replacements: list[dict[str, str]] = []
+        for replacement_index, raw_replacement in enumerate(raw_replacements):
+            if not isinstance(raw_replacement, Mapping):
+                raise ValueError(
+                    f"page revisions[{index}].replacements[{replacement_index}] "
+                    "must be an object"
+                )
+            replacement = dict(raw_replacement)
+            if set(replacement) != {"old", "new"}:
+                raise ValueError(
+                    f"page revisions[{index}].replacements[{replacement_index}] "
+                    "must contain only old and new"
+                )
+            old = str(replacement["old"])
+            new = str(replacement["new"])
+            if not old or old == new or len(old) > 500 or len(new) > 500:
+                raise ValueError(
+                    f"page revisions[{index}].replacements[{replacement_index}] is invalid"
+                )
+            if re.search(r"<!--\s*page\s*:\s*\d+\s*-->", new, re.IGNORECASE):
+                raise ValueError(
+                    f"page revisions[{index}].replacements[{replacement_index}].new "
+                    "cannot create a physical page marker"
+                )
+            if revised_page.count(old) != 1:
+                raise ValueError(
+                    f"page revisions[{index}].replacements[{replacement_index}].old "
+                    "must match exactly once on the reviewed page"
+                )
+            revised_page = revised_page.replace(old, new, 1)
+            replacements.append({"old": old, "new": new})
+        original_size = len(re.sub(r"\s+", "", page_text))
+        revised_size = len(re.sub(r"\s+", "", revised_page))
+        if original_size >= 24 and not (
+            revised_size >= max(24, int(original_size * 0.5))
+            and revised_size <= max(24, int(original_size * 1.5))
+        ):
+            raise ValueError(
+                f"page revisions[{index}] must preserve between 50% and 150% of page text"
+            )
+        content = content[:page_start] + revised_page + content[page_end:]
+        audit.append(
+            {
+                "page_number": page_number,
+                "base_text_sha256": base_checksum,
+                "revised_text_sha256": hashlib.sha256(
+                    revised_page.encode("utf-8")
+                ).hexdigest(),
+                "reviewer": reviewer,
+                "review_method": review_method,
+                "rationale": rationale,
+                "evidence": dict(evidence),
+                "replacements": replacements,
+            }
+        )
+    revision_checksum = hashlib.sha256(
+        json.dumps(audit, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    return NormalizedDocument(
+        content=content,
+        media_type=document.media_type,
+        source_path=document.source_path,
+        checksum=document.checksum,
+        page_count=document.page_count,
+        bookmarks=document.bookmarks,
+        warnings=document.warnings,
+        metadata={
+            **document.metadata,
+            "text_revision_count": len(audit),
+            "text_revision_pages": sorted(reviewed_pages),
+            "text_revision_checksum": revision_checksum,
+            "text_revisions": audit,
+        },
+    )
 
 
 @dataclass(frozen=True)
@@ -937,6 +1122,27 @@ def _page_quality(text: str) -> dict[str, Any]:
         for char in text
     )
     replacement = text.count("\ufffd")
+    ascii_words = re.findall(r"[A-Za-z]+", text)
+    isolated_fragments = re.findall(
+        r"(?<![A-Za-z])([B-HJ-Zb-hj-z])(?![A-Za-z])",
+        text,
+    )
+    damaged_line_starts = sum(
+        bool(re.match(r"^\s*(?:[-~\\:;_.?]|[0-9](?=[A-Za-z]))", line))
+        for line in text.splitlines()
+        if line.strip()
+    )
+    # Broken PDF font maps often yield entirely valid ASCII while dropping the
+    # first glyph of words (``-he``, ``~od``) and emitting the missing glyph as
+    # an isolated token. Neither Unicode corruption nor character-count gates
+    # see that damage. Require both independent symptoms at prose scale so
+    # bullets, stat rows, dice notation, abbreviations, and tables stay valid.
+    lexical_damage = (
+        len(ascii_words) >= 200
+        and damaged_line_starts >= 4
+        and len(isolated_fragments) >= 8
+        and len(isolated_fragments) / len(ascii_words) >= 0.015
+    )
     denominator = max(characters, 1)
     return {
         "characters": characters,
@@ -947,11 +1153,14 @@ def _page_quality(text: str) -> dict[str, Any]:
         "private_use_characters": private_use,
         "control_characters": control,
         "replacement_characters": replacement,
+        "isolated_ascii_fragment_count": len(isolated_fragments),
+        "damaged_ascii_line_start_count": damaged_line_starts,
         "private_use_ratio": private_use / denominator,
         "control_ratio": control / denominator,
         "replacement_ratio": replacement / denominator,
         "sparse": non_whitespace < 20,
         "fused_text": fused_text,
+        "lexically_damaged": lexical_damage,
         "corrupt": (
             private_use / denominator >= 0.02
             or control / denominator >= 0.01
@@ -973,7 +1182,17 @@ def _document_quality(page_texts: Sequence[str]) -> dict[str, Any]:
     fused_pages = [
         index for index, item in enumerate(page_stats, start=1) if item["fused_text"]
     ]
-    suspect_pages = sorted(set(sparse_pages) | set(corrupt_pages) | set(fused_pages))
+    lexical_damage_pages = [
+        index
+        for index, item in enumerate(page_stats, start=1)
+        if item["lexically_damaged"]
+    ]
+    suspect_pages = sorted(
+        set(sparse_pages)
+        | set(corrupt_pages)
+        | set(fused_pages)
+        | set(lexical_damage_pages)
+    )
     return {
         "character_count": characters,
         "non_whitespace_character_count": non_whitespace,
@@ -984,6 +1203,8 @@ def _document_quality(page_texts: Sequence[str]) -> dict[str, Any]:
         "corrupt_text_pages": corrupt_pages,
         "fused_text_page_count": len(fused_pages),
         "fused_text_pages": fused_pages,
+        "lexical_damage_page_count": len(lexical_damage_pages),
+        "lexical_damage_pages": lexical_damage_pages,
         "suspect_page_count": len(suspect_pages),
         "suspect_pages": suspect_pages,
         "private_use_character_count": private_use,
@@ -1385,10 +1606,17 @@ class CascadingOcrProvider:
 
     name = "rapidocr-cascade"
 
-    def __init__(self, *providers: OcrProvider) -> None:
+    def __init__(
+        self,
+        *providers: OcrProvider,
+        minimum_layout_confidence: float = 0.86,
+    ) -> None:
         if len(providers) < 2:
             raise ValueError("OCR cascade requires at least two providers")
+        if not 0 <= minimum_layout_confidence <= 1:
+            raise ValueError("minimum_layout_confidence must be between 0 and 1")
         self.providers = tuple(providers)
+        self.minimum_layout_confidence = float(minimum_layout_confidence)
 
     @property
     def cache_profile(self) -> str:
@@ -1399,7 +1627,10 @@ class CascadingOcrProvider:
             )
             for provider in self.providers
         ]
-        return f"{self.name}:" + "=>".join(profiles)
+        return (
+            f"{self.name}:min-confidence={self.minimum_layout_confidence:.3f}:"
+            + "=>".join(profiles)
+        )
 
     def extract(
         self,
@@ -1493,12 +1724,15 @@ class CascadingOcrProvider:
                         "fallback OCR returned a different number of pages than requested",
                     )
                 for index, candidate in zip(pending_indexes, output, strict=True):
-                    if _ocr_layout_score(candidate) > _ocr_layout_score(selected[index]):
+                    if _ocr_layout_candidate_improves(selected[index], candidate):
                         selected[index] = candidate
             pending_indexes = [
                 index
                 for index, layout in enumerate(selected)
-                if _ocr_text_needs_fallback(_layout_reading_order_text(layout)[0])
+                if _ocr_layout_needs_fallback(
+                    layout,
+                    minimum_confidence=self.minimum_layout_confidence,
+                )
             ]
             if not pending_indexes:
                 break
@@ -1512,7 +1746,13 @@ class CascadingOcrProvider:
 def _ocr_text_score(text: str) -> tuple[int, int]:
     quality = _document_quality([str(text)])
     return (
-        0 if quality["corrupt_text_page_count"] else 1,
+        0
+        if (
+            quality["corrupt_text_page_count"]
+            or quality["fused_text_page_count"]
+            or quality["lexical_damage_page_count"]
+        )
+        else 1,
         int(quality["non_whitespace_character_count"]),
     )
 
@@ -1521,8 +1761,22 @@ def _ocr_text_needs_fallback(text: str) -> bool:
     quality = _document_quality([str(text)])
     return bool(
         quality["corrupt_text_page_count"]
+        or quality["fused_text_page_count"]
+        or quality["lexical_damage_page_count"]
         or quality["non_whitespace_character_count"] < 24
     )
+
+
+def _ocr_replacement_improves(original: str, candidate: str) -> bool:
+    """Accept OCR only when it repairs quality without discarding most source text."""
+
+    if _ocr_text_score(candidate) <= _ocr_text_score(original):
+        return False
+    original_size = len(re.sub(r"\s+", "", str(original)))
+    candidate_size = len(re.sub(r"\s+", "", str(candidate)))
+    if original_size < 24:
+        return candidate_size >= 24
+    return candidate_size >= max(24, int(original_size * 0.5))
 
 
 def _ocr_layout_score(layout: OcrPageLayout) -> tuple[int, float, int]:
@@ -1531,6 +1785,33 @@ def _ocr_layout_score(layout: OcrPageLayout) -> tuple[int, float, int]:
     confidences = [float(block.confidence) for block in layout.blocks]
     average_confidence = sum(confidences) / len(confidences) if confidences else 0.0
     return (base[0], average_confidence, base[1])
+
+
+def _ocr_layout_candidate_improves(
+    original: OcrPageLayout,
+    candidate: OcrPageLayout,
+) -> bool:
+    original_text, _original_columns = _layout_reading_order_text(original)
+    candidate_text, _candidate_columns = _layout_reading_order_text(candidate)
+    original_size = len(re.sub(r"\s+", "", original_text))
+    candidate_size = len(re.sub(r"\s+", "", candidate_text))
+    if original_size >= 24 and candidate_size < max(24, int(original_size * 0.5)):
+        return False
+    return _ocr_layout_score(candidate) > _ocr_layout_score(original)
+
+
+def _ocr_layout_needs_fallback(
+    layout: OcrPageLayout,
+    *,
+    minimum_confidence: float,
+) -> bool:
+    text, _used_columns = _layout_reading_order_text(layout)
+    if _ocr_text_needs_fallback(text):
+        return True
+    confidences = [float(block.confidence) for block in layout.blocks]
+    if not confidences:
+        return True
+    return sum(confidences) / len(confidences) < minimum_confidence
 
 
 class PdfTextLayoutProvider:
@@ -2406,6 +2687,7 @@ class PdfDocumentConverter:
             initial_quality = _document_quality(pages)
             corrupt_pages = list(initial_quality["corrupt_text_pages"])
             fused_pages = list(initial_quality["fused_text_pages"])
+            lexical_damage_pages = list(initial_quality["lexical_damage_pages"])
             sparse_pages = list(initial_quality["sparse_pages"])
             bookmark_ocr_pages = _bookmark_ocr_candidate_pages(
                 pages,
@@ -2415,6 +2697,7 @@ class PdfDocumentConverter:
             suspect_pages = sorted(
                 set(corrupt_pages)
                 | set(fused_pages)
+                | set(lexical_damage_pages)
                 | set(bookmark_ocr_pages)
                 | (
                     set(sparse_pages)
@@ -2429,13 +2712,23 @@ class PdfDocumentConverter:
                 attempted_ocr_pages, ocr_layout_pages = _ocr_suspect_pages(
                     self.ocr_provider, source, candidate_pages, suspect_pages
                 )
-                mandatory_ocr_pages = set(corrupt_pages) | set(fused_pages) | (
-                    set(sparse_pages)
-                    if pages and len(sparse_pages) / len(pages) >= 0.8
-                    else set()
+                mandatory_ocr_pages = (
+                    set(corrupt_pages)
+                    | set(fused_pages)
+                    | set(lexical_damage_pages)
+                    | (
+                        set(sparse_pages)
+                        if pages and len(sparse_pages) / len(pages) >= 0.8
+                        else set()
+                    )
                 )
                 for page_number in attempted_ocr_pages:
-                    accept = page_number in mandatory_ocr_pages
+                    accept = page_number in mandatory_ocr_pages and (
+                        _ocr_replacement_improves(
+                            pages[page_number - 1],
+                            candidate_pages[page_number - 1],
+                        )
+                    )
                     if (
                         not accept
                         and page_number in bookmark_ocr_pages
@@ -2529,6 +2822,12 @@ class PdfDocumentConverter:
             warnings.append(
                 "text layer remains corrupt on "
                 f"{len(unresolved_corrupt)}/{len(pages)} pages"
+            )
+        unresolved_lexical_damage = list(quality["lexical_damage_pages"])
+        if unresolved_lexical_damage:
+            warnings.append(
+                "text layer remains lexically damaged on "
+                f"{len(unresolved_lexical_damage)}/{len(pages)} pages"
             )
         if quality["text_page_coverage"] < 0.9:
             warnings.append(

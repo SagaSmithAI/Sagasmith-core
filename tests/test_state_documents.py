@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -53,9 +54,11 @@ from sagasmith_core.documents import (
     _ocr_page_layout,
     _page_quality,
     _pdf_form_metadata,
+    apply_document_page_revisions,
     build_structured_markdown,
     extract_pdf_page_text,
     normalize_document,
+    normalized_document_page_text,
     ocr_layout_text,
 )
 from sagasmith_core.idempotency import request_hash
@@ -338,7 +341,7 @@ def test_ocr_cascade_uses_stronger_model_only_for_unusable_pages() -> None:
     assert medium.calls == [[3]]
     assert layouts[0].blocks[0].text.startswith("RECOVERED HEADING")
     assert cascade.cache_profile == (
-        "rapidocr-cascade:small:v1=>medium:v1"
+        "rapidocr-cascade:min-confidence=0.860:small:v1=>medium:v1"
     )
 
 
@@ -371,6 +374,86 @@ def test_ocr_cascade_prefers_confidence_over_extra_garbage_characters() -> None:
     )
 
     assert layouts[0].blocks[0].text == "CORRECT TEXT EVIDENCE"
+
+
+def test_ocr_cascade_audits_long_low_confidence_pages() -> None:
+    class FakeLayoutOcr:
+        def __init__(self, name: str, text: str, confidence: float) -> None:
+            self.name = name
+            self.text = text
+            self.confidence = confidence
+            self.calls: list[list[int]] = []
+
+        def extract_layout(self, path, *, page_numbers=None):
+            del path
+            pages = list(page_numbers or [])
+            self.calls.append(pages)
+            return [
+                OcrPageLayout(
+                    page_number=page,
+                    width=600,
+                    height=800,
+                    blocks=(
+                        OcrTextBlock(self.text, self.confidence, 20, 20, 580, 60),
+                    ),
+                )
+                for page in pages
+            ]
+
+    plausible_but_uncertain = FakeLayoutOcr(
+        "rapid",
+        "A full paragraph whose glyph errors are not visible to length checks alone.",
+        0.72,
+    )
+    reviewed_structure = FakeLayoutOcr(
+        "structure",
+        "A full paragraph whose glyph errors are corrected by stronger OCR.",
+        0.98,
+    )
+
+    layouts = CascadingOcrProvider(
+        plausible_but_uncertain,
+        reviewed_structure,
+    ).extract_layout("unused.pdf", page_numbers=[12])
+
+    assert plausible_but_uncertain.calls == [[12]]
+    assert reviewed_structure.calls == [[12]]
+    assert layouts[0].blocks[0].text.endswith("stronger OCR.")
+
+
+def test_ocr_cascade_rejects_high_confidence_truncated_fallback() -> None:
+    class FakeLayoutOcr:
+        def __init__(self, name: str, text: str, confidence: float) -> None:
+            self.name = name
+            self.text = text
+            self.confidence = confidence
+
+        def extract_layout(self, path, *, page_numbers=None):
+            del path
+            return [
+                OcrPageLayout(
+                    page_number=page,
+                    width=600,
+                    height=800,
+                    blocks=(
+                        OcrTextBlock(self.text, self.confidence, 20, 20, 580, 60),
+                    ),
+                )
+                for page in list(page_numbers or [])
+            ]
+
+    complete = FakeLayoutOcr(
+        "primary",
+        "The complete page remains available even though its confidence is low. " * 20,
+        0.72,
+    )
+    truncated = FakeLayoutOcr("fallback", "A short clean heading.", 0.99)
+
+    layouts = CascadingOcrProvider(complete, truncated).extract_layout(
+        "unused.pdf", page_numbers=[7]
+    )
+
+    assert layouts[0].blocks[0].text.startswith("The complete page remains")
 
 
 def test_layout_reading_order_keeps_columns_contiguous() -> None:
@@ -802,6 +885,228 @@ def test_page_quality_detects_fused_pdf_word_streams() -> None:
 
     assert _page_quality(fused)["fused_text"] is True
     assert _page_quality(ordinary)["fused_text"] is False
+
+
+def test_page_quality_detects_ascii_font_map_lexical_damage() -> None:
+    damaged = "\n".join(
+        (
+            "-he r od loses a leading glyph while otherwise ordinary source prose "
+            "continues with enough words to look superficially complete. " * 3
+        )
+        for _index in range(10)
+    )
+    ordinary = (
+        "The rod retains every leading glyph while ordinary source prose "
+        "continues with enough words to be complete. "
+    ) * 30
+
+    damaged_quality = _page_quality(damaged)
+    assert damaged_quality["lexically_damaged"] is True
+    assert damaged_quality["damaged_ascii_line_start_count"] == 10
+    assert damaged_quality["isolated_ascii_fragment_count"] >= 20
+    assert _page_quality(ordinary)["lexically_damaged"] is False
+
+
+def test_agent_page_revision_is_bounded_audited_and_non_destructive() -> None:
+    original = NormalizedDocument(
+        content=(
+            "<!-- page: 1 -->\n\n# Rod Of Rulership\n\nRod, rare.\n"
+            "<!-- page: 2 -->\n\n# Untouched\n\nSecond page.\n"
+        ),
+        media_type="application/pdf",
+        source_path="rules.pdf",
+        checksum="a" * 64,
+        page_count=2,
+    )
+    page_text = normalized_document_page_text(original, 1)
+    revision = {
+        "source_checksum": original.checksum,
+        "page_number": 1,
+        "base_text_sha256": hashlib.sha256(page_text.encode("utf-8")).hexdigest(),
+        "replacements": [{"old": "Rod Of Rulership", "new": "ROD OF RULERSHIP"}],
+        "reviewer": "agent:ocr-editor",
+        "review_method": "agent",
+        "rationale": "The alternate OCR and adjacent item headings agree on the title.",
+        "evidence": {
+            "primary_ocr_sha256": "b" * 64,
+            "alternate_ocr_sha256": "c" * 64,
+        },
+    }
+
+    revised = apply_document_page_revisions(original, [revision])
+
+    assert "# Rod Of Rulership" in original.content
+    assert "# ROD OF RULERSHIP" in revised.content
+    assert normalized_document_page_text(revised, 2) == normalized_document_page_text(
+        original, 2
+    )
+    assert revised.metadata["text_revision_pages"] == [1]
+    assert revised.metadata["text_revisions"][0]["replacements"] == revision["replacements"]
+
+
+def test_agent_page_revision_rejects_ambiguous_or_stale_source_text() -> None:
+    document = NormalizedDocument(
+        content="<!-- page: 1 -->\n\nrod and rod\n",
+        media_type="application/pdf",
+        source_path="rules.pdf",
+        checksum="a" * 64,
+        page_count=1,
+    )
+    page_text = normalized_document_page_text(document, 1)
+    revision = {
+        "source_checksum": document.checksum,
+        "page_number": 1,
+        "base_text_sha256": hashlib.sha256(page_text.encode("utf-8")).hexdigest(),
+        "replacements": [{"old": "rod", "new": "ROD"}],
+        "reviewer": "agent:ocr-editor",
+        "review_method": "agent",
+        "rationale": "Attempted ambiguous repair.",
+        "evidence": {"primary_ocr_sha256": "b" * 64},
+    }
+
+    with pytest.raises(ValueError, match="match exactly once"):
+        apply_document_page_revisions(document, [revision])
+    with pytest.raises(ValueError, match="base text checksum"):
+        apply_document_page_revisions(
+            document,
+            [{**revision, "base_text_sha256": "0" * 64}],
+        )
+    with pytest.raises(ValueError, match="cannot create a physical page marker"):
+        apply_document_page_revisions(
+            document,
+            [
+                {
+                    **revision,
+                    "replacements": [
+                        {"old": "rod and rod", "new": "<!-- page: 2 -->"}
+                    ],
+                }
+            ],
+        )
+
+
+def test_agent_page_revision_can_refine_the_same_unpublished_page() -> None:
+    document = NormalizedDocument(
+        content="<!-- page: 1 -->\n\n## Rod Of Rulership\n\nRod, rare.\n",
+        media_type="application/pdf",
+        source_path="rules.pdf",
+        checksum="a" * 64,
+        page_count=1,
+    )
+    first_page = normalized_document_page_text(document, 1)
+    first = {
+        "source_checksum": document.checksum,
+        "page_number": 1,
+        "base_text_sha256": hashlib.sha256(first_page.encode("utf-8")).hexdigest(),
+        "replacements": [{"old": "## Rod Of Rulership", "new": "## ROD OF RULERSHIP"}],
+        "reviewer": "agent:ocr-editor",
+        "review_method": "agent",
+        "rationale": "Restore title capitalization.",
+        "evidence": {"basis": "agent_context"},
+    }
+    after_first = apply_document_page_revisions(document, [first])
+    second_page = normalized_document_page_text(after_first, 1)
+    second = {
+        **first,
+        "base_text_sha256": hashlib.sha256(second_page.encode("utf-8")).hexdigest(),
+        "replacements": [
+            {"old": "## ROD OF RULERSHIP", "new": "##### ROD OF RULERSHIP"}
+        ],
+        "rationale": "Match the adjacent item-heading level.",
+    }
+
+    revised = apply_document_page_revisions(document, [first, second])
+
+    assert "##### ROD OF RULERSHIP" in revised.content
+    assert revised.metadata["text_revision_pages"] == [1]
+    assert revised.metadata["text_revision_count"] == 2
+
+
+def test_pdf_converter_routes_ascii_lexical_damage_through_ocr(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    pypdf = pytest.importorskip("pypdf")
+    source = tmp_path / "damaged-text.pdf"
+    writer = pypdf.PdfWriter()
+    writer.add_blank_page(width=200, height=100)
+    writer.add_blank_page(width=200, height=100)
+    with source.open("wb") as stream:
+        writer.write(stream)
+    damaged = "\n".join(
+        (
+            "-he r od loses a leading glyph while otherwise ordinary source prose "
+            "continues with enough words to look superficially complete. " * 3
+        )
+        for _index in range(10)
+    )
+    ordinary = (
+        "The second page retains every glyph and supplies ordinary source text. "
+    ) * 30
+    monkeypatch.setattr(
+        "sagasmith_core.documents._extract_pdfium_pages",
+        lambda _source, _profile: ([damaged, ordinary], {}, [1, 2]),
+    )
+
+    class CorrectingOcr:
+        name = "correcting-ocr"
+
+        def extract(self, path, *, page_numbers=None):
+            del path
+            assert page_numbers == [1]
+            return [
+                "ROD OF RULERSHIP\nRod, rare\n"
+                + "The rod retains every leading glyph in the recovered text. " * 50
+            ]
+
+    document = PdfDocumentConverter(ocr_provider=CorrectingOcr()).convert(source)
+
+    assert document.metadata["initial_quality"]["lexical_damage_pages"] == [1]
+    assert document.metadata["ocr_pages"] == [1]
+    assert document.metadata["quality"]["lexical_damage_pages"] == []
+    assert "ROD OF RULERSHIP" in document.content
+
+
+def test_pdf_converter_rejects_truncated_lexical_damage_ocr(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    pypdf = pytest.importorskip("pypdf")
+    source = tmp_path / "damaged-text.pdf"
+    writer = pypdf.PdfWriter()
+    writer.add_blank_page(width=200, height=100)
+    writer.add_blank_page(width=200, height=100)
+    with source.open("wb") as stream:
+        writer.write(stream)
+    damaged = "\n".join(
+        (
+            "-he r od loses a leading glyph while otherwise ordinary source prose "
+            "continues with enough words to look superficially complete. " * 3
+        )
+        for _index in range(10)
+    )
+    ordinary = (
+        "The second page retains every glyph and supplies ordinary source text. "
+    ) * 30
+    monkeypatch.setattr(
+        "sagasmith_core.documents._extract_pdfium_pages",
+        lambda _source, _profile: ([damaged, ordinary], {}, [1, 2]),
+    )
+
+    class TruncatingOcr:
+        name = "truncating-ocr"
+
+        def extract(self, path, *, page_numbers=None):
+            del path
+            assert page_numbers == [1]
+            return ["ROD OF RULERSHIP\nRod, rare"]
+
+    document = PdfDocumentConverter(ocr_provider=TruncatingOcr()).convert(source)
+
+    assert document.metadata["ocr_pages"] == []
+    assert document.metadata["ocr_rejected_pages"] == [1]
+    assert "-he r od loses a leading glyph" in document.content
+    assert document.metadata["quality"]["lexical_damage_pages"] == [1]
 
 
 def test_extract_pdf_page_text_validates_the_physical_page(tmp_path) -> None:

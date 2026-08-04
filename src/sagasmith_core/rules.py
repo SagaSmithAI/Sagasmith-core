@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -18,6 +18,7 @@ from sagasmith_core.documents import (
     NormalizedDocument,
     OcrProvider,
     PageLocator,
+    apply_document_page_revisions,
     normalize_document,
     strip_page_markers,
 )
@@ -296,6 +297,7 @@ class RuleService:
         idempotency_key: str | None = None,
         idempotency_write: IdempotencyWrite | None = None,
         layout_profile: DocumentLayoutProfile = GENERIC_DOCUMENT_LAYOUT_PROFILE,
+        page_revisions: Sequence[Mapping[str, Any]] | None = None,
     ) -> RuleIngestResult:
         """Normalize and ingest a rule document through the shared document pipeline."""
         source_path = Path(path).expanduser().resolve()
@@ -306,6 +308,7 @@ class RuleService:
             expected_checksum=expected_checksum,
             layout_profile=layout_profile,
         )
+        document = apply_document_page_revisions(document, page_revisions)
         return self.ingest(
             system_id=system_id,
             source_key=source_key or source_path.name,
@@ -336,6 +339,7 @@ class RuleService:
         document_cache_dir: str | Path | None = None,
         expected_checksum: str | None = None,
         layout_profile: DocumentLayoutProfile = GENERIC_DOCUMENT_LAYOUT_PROFILE,
+        page_revisions: Sequence[Mapping[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Normalize a rule document without writing it to the rule index."""
         document = normalize_document(
@@ -345,6 +349,7 @@ class RuleService:
             expected_checksum=expected_checksum,
             layout_profile=layout_profile,
         )
+        document = apply_document_page_revisions(document, page_revisions)
         parsed = (parser or MarkdownHierarchyParser()).parse(document.content)
         page_locator = PageLocator(document.content)
         return {

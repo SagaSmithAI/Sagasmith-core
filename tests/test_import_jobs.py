@@ -69,6 +69,26 @@ def test_import_job_persists_inspection_candidate_review_and_result(database) ->
     assert jobs.list(campaign.id)[0].result["pack_id"] == "dnd5e.xgte"
 
 
+def test_inspected_import_can_rerun_inspection_after_text_review(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="OCR review")
+    jobs = ImportJobService(database)
+    created = jobs.create(campaign_id=campaign.id, kind="rulebook", artifact="rules.pdf")
+    inspected = jobs.record_inspection(created.id, {"parser_profile": "pdf"})
+
+    reviewed = jobs.record_inspection(
+        inspected.id,
+        {
+            "parser_profile": "pdf",
+            "page_revisions": [{"page_number": 12}],
+        },
+        expected_revision=inspected.revision,
+    )
+
+    assert reviewed.state == "inspected"
+    assert reviewed.revision == inspected.revision + 1
+    assert reviewed.inspection["page_revisions"] == [{"page_number": 12}]
+
+
 def test_import_job_rejects_invalid_candidate_review(database) -> None:
     campaign = CampaignService(database).create(system_id="dnd5e", name="Import validation")
     jobs = ImportJobService(database)
