@@ -19,13 +19,14 @@ from statistics import median
 from typing import Any, Protocol
 from uuid import uuid4
 
-DOCUMENT_NORMALIZER_VERSION = "29"
+DOCUMENT_NORMALIZER_VERSION = "32"
 _MAX_STRUCTURAL_HEADING_CHARS = 200
 DOCUMENT_SOURCE_SUFFIXES = frozenset({".md", ".markdown", ".pdf", ".txt"})
 _DOCUMENT_CACHE_SCHEMA = 1
-_PDF_EXTRACTION_CACHE_SCHEMA = 4
-_PDF_TEXT_EXTRACTOR_VERSION = "7"
+_PDF_EXTRACTION_CACHE_SCHEMA = 6
+_PDF_TEXT_EXTRACTOR_VERSION = "9"
 _OCR_PAGE_CACHE_SCHEMA = 1
+_BOOKMARK_OCR_MAX_NON_WHITESPACE = 800
 
 
 class DocumentQualityError(RuntimeError):
@@ -472,14 +473,15 @@ def _match_bookmarks(
         best_index = -1
         best_score = 0.0
         for index, line in enumerate(pages[bookmark.page - 1]):
+            candidate = _normalize(line)
+            if not target or not candidate:
+                continue
             if (
                 structural_bookmark
                 and not _CHAPTER_RE.match(line)
                 and not _looks_letter_spaced(line)
+                and SequenceMatcher(None, target, candidate).ratio() < 0.68
             ):
-                continue
-            candidate = _normalize(line)
-            if not target or not candidate:
                 continue
             if target in candidate or candidate in target:
                 score = min(len(target), len(candidate)) / max(
@@ -1720,7 +1722,7 @@ def _layout_repairs_missing_word_spaces(embedded: str, layout: str) -> bool:
 
 
 def _layout_reading_order_text(layout: OcrPageLayout) -> tuple[str, bool]:
-    """Render positioned blocks in bounded one-, two-, or three-column order.
+    """Render positioned blocks in bounded one- through four-column order.
 
     PDF text APIs frequently interleave the left and right columns line by line.
     The text is syntactically valid, so glyph-quality checks cannot detect the
@@ -1769,7 +1771,7 @@ def _layout_reading_order_text(layout: OcrPageLayout) -> tuple[str, bool]:
         values: list[OcrTextBlock],
     ) -> tuple[list[list[OcrTextBlock]], list[OcrTextBlock]] | None:
         band_top = min(block.y0 for block in values)
-        for column_count in (3, 2):
+        for column_count in (4, 3, 2):
             column_width = width / column_count
             boundaries = [column_width * index for index in range(1, column_count)]
             columns: list[list[OcrTextBlock]] = [[] for _ in range(column_count)]
@@ -2182,6 +2184,29 @@ def _unmatched_text_bookmark_pages(
     return sorted(unmatched)
 
 
+def _bookmark_ocr_candidate_pages(
+    page_texts: list[str],
+    bookmarks: Sequence[DocumentBookmark],
+    layout_ordered_pages: Sequence[int],
+) -> list[int]:
+    """Bound outline-only OCR to short pages without stronger layout evidence.
+
+    An outline mismatch on an otherwise dense text page is normally a missing
+    display heading, not missing body content. Full-page OCR is both expensive
+    and liable to destroy a recovered multi-column reading order. Sparse,
+    corrupt, and fused pages remain independent mandatory OCR candidates.
+    """
+
+    layout_pages = set(layout_ordered_pages)
+    return [
+        page_number
+        for page_number in _unmatched_text_bookmark_pages(page_texts, bookmarks)
+        if page_number not in layout_pages
+        and int(_page_quality(page_texts[page_number - 1])["non_whitespace_characters"])
+        <= _BOOKMARK_OCR_MAX_NON_WHITESPACE
+    ]
+
+
 def _pdf_extraction_profile(
     ocr_provider: OcrProvider | None,
     layout_profile: DocumentLayoutProfile,
@@ -2357,7 +2382,11 @@ class PdfDocumentConverter:
             corrupt_pages = list(initial_quality["corrupt_text_pages"])
             fused_pages = list(initial_quality["fused_text_pages"])
             sparse_pages = list(initial_quality["sparse_pages"])
-            bookmark_ocr_pages = _unmatched_text_bookmark_pages(pages, bookmarks)
+            bookmark_ocr_pages = _bookmark_ocr_candidate_pages(
+                pages,
+                bookmarks,
+                layout_ordered_pages,
+            )
             suspect_pages = sorted(
                 set(corrupt_pages)
                 | set(fused_pages)
@@ -2382,7 +2411,16 @@ class PdfDocumentConverter:
                 )
                 for page_number in attempted_ocr_pages:
                     accept = page_number in mandatory_ocr_pages
-                    if not accept and page_number in bookmark_ocr_pages:
+                    if (
+                        not accept
+                        and page_number in bookmark_ocr_pages
+                        and page_number not in layout_ordered_pages
+                    ):
+                        # Positioned extraction has already recovered a supported
+                        # multi-column reading order.  A full-page OCR candidate
+                        # can match a damaged outline title while silently
+                        # interleaving those columns, so an outline-only gain is
+                        # not sufficient evidence to replace the stronger text.
                         page_bookmarks = [
                             bookmark
                             for bookmark in bookmarks

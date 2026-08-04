@@ -46,6 +46,7 @@ from sagasmith_core.documents import (
     PageLocator,
     PdfDocumentConverter,
     RapidOcrProvider,
+    _bookmark_ocr_candidate_pages,
     _cache_profile,
     _layout_reading_order_text,
     _looks_like_corrupt_visual_heading,
@@ -444,6 +445,35 @@ def test_layout_reading_order_keeps_three_columns_contiguous() -> None:
     ]
 
 
+def test_layout_reading_order_keeps_four_column_catalogs_contiguous() -> None:
+    blocks = []
+    for column, x0 in enumerate((20.0, 120.0, 220.0, 320.0), start=1):
+        for row in range(5):
+            blocks.append(
+                OcrTextBlock(
+                    f"column {column} row {row + 1}",
+                    1.0,
+                    x0,
+                    20.0 + row * 15.0,
+                    x0 + 65.0,
+                    30.0 + row * 15.0,
+                )
+            )
+    layout = OcrPageLayout(
+        page_number=14,
+        width=400.0,
+        height=120.0,
+        blocks=tuple(reversed(blocks)),
+    )
+
+    text, used_columns = _layout_reading_order_text(layout)
+
+    assert used_columns is True
+    assert text.index("column 1 row 5") < text.index("column 2 row 1")
+    assert text.index("column 2 row 5") < text.index("column 3 row 1")
+    assert text.index("column 3 row 5") < text.index("column 4 row 1")
+
+
 def test_rule_document_path_ingest_preserves_source_and_page_provenance(database, tmp_path) -> None:
     path = tmp_path / "optional-rules.md"
     path.write_text("# Options\n## Tool Synergy\nUse both proficiencies.\n", encoding="utf-8")
@@ -663,9 +693,66 @@ def test_pdf_converter_rejects_bookmark_ocr_that_does_not_improve_heading(
 
     assert "Complete embedded body text" in document.content
     assert "Incomplete OCR text" not in document.content
-    assert document.metadata["bookmark_ocr_pages"] == [1]
+    assert document.metadata["bookmark_ocr_pages"] == []
     assert document.metadata["ocr_pages"] == []
-    assert document.metadata["ocr_rejected_pages"] == [1]
+    assert document.metadata["ocr_rejected_pages"] == []
+
+
+def test_pdf_converter_preserves_layout_order_over_bookmark_only_ocr_gain(
+    tmp_path, monkeypatch
+) -> None:
+    pypdf = pytest.importorskip("pypdf")
+    pytest.importorskip("pypdfium2")
+    source = tmp_path / "three-column-spell-list.pdf"
+    writer = pypdf.PdfWriter()
+    writer.add_blank_page(width=300, height=100)
+    writer.add_outline_item("Spells", 0)
+    with source.open("wb") as stream:
+        writer.write(stream)
+    embedded = (
+        "BARD SPELLS\nFirst bard spell.\n"
+        "CLERIC SPELLS\nFirst cleric spell.\n"
+        "DRUID SPELLS\nFirst druid spell."
+    )
+    monkeypatch.setattr(
+        "sagasmith_core.documents._extract_pdfium_pages",
+        lambda _source, _profile: ([embedded], {}, [1]),
+    )
+
+    class BookmarkOnlyGainOcr:
+        name = "bookmark-only-gain"
+
+        def extract(self, path, *, page_numbers=None):
+            del path
+            assert page_numbers == [1]
+            return [
+                "SPELLS\nBARD SPELLS\nCLERIC SPELLS\nDRUID SPELLS\n"
+                "First bard spell.\nFirst cleric spell.\nFirst druid spell."
+            ]
+
+    document = PdfDocumentConverter(ocr_provider=BookmarkOnlyGainOcr()).convert(source)
+
+    assert document.content.index("First bard spell") < document.content.index(
+        "CLERIC SPELLS"
+    )
+    assert document.metadata["bookmark_ocr_pages"] == []
+    assert document.metadata["ocr_pages"] == []
+    assert document.metadata["ocr_rejected_pages"] == []
+
+
+def test_bookmark_ocr_candidates_skip_dense_and_layout_ordered_pages() -> None:
+    bookmarks = [
+        DocumentBookmark("Monk", 1, 1),
+        DocumentBookmark("Spell Lists", 2, 1),
+        DocumentBookmark("Treasures", 3, 1),
+    ]
+    pages = [
+        "Dense source prose without the display title. " * 80,
+        "BARD SPELLS\nCLERIC SPELLS\nDRUID SPELLS",
+        "Damaged title\nShort body.",
+    ]
+
+    assert _bookmark_ocr_candidate_pages(pages, bookmarks, [2]) == [3]
 
 
 def test_page_quality_detects_fused_pdf_word_streams() -> None:
