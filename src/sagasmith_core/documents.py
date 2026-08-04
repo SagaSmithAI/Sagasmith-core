@@ -19,12 +19,12 @@ from statistics import median
 from typing import Any, Protocol
 from uuid import uuid4
 
-DOCUMENT_NORMALIZER_VERSION = "32"
+DOCUMENT_NORMALIZER_VERSION = "34"
 _MAX_STRUCTURAL_HEADING_CHARS = 200
 DOCUMENT_SOURCE_SUFFIXES = frozenset({".md", ".markdown", ".pdf", ".txt"})
 _DOCUMENT_CACHE_SCHEMA = 1
 _PDF_EXTRACTION_CACHE_SCHEMA = 6
-_PDF_TEXT_EXTRACTOR_VERSION = "9"
+_PDF_TEXT_EXTRACTOR_VERSION = "10"
 _OCR_PAGE_CACHE_SCHEMA = 1
 _BOOKMARK_OCR_MAX_NON_WHITESPACE = 800
 
@@ -584,13 +584,14 @@ def _looks_like_all_caps_heading(value: str) -> bool:
     # or another explicit structural signal.
     letters = [char for char in text if char.isascii() and char.isalpha()]
     uncased_letters = [char for char in text if char.isalpha() and not char.isascii()]
+    uppercase_ratio = sum(char.isupper() for char in letters) / max(len(letters), 1)
     return bool(
         3 <= len(text) <= 80
         and 1 <= len(text.split()) <= 12
         and letters
         and not uncased_letters
         and (
-            all(char == char.upper() for char in letters)
+            uppercase_ratio >= 0.85
             or _looks_like_letter_spaced_heading(text)
         )
         and not _TERMINAL_RE.search(text)
@@ -1743,7 +1744,24 @@ def _layout_reading_order_text(layout: OcrPageLayout) -> tuple[str, bool]:
         return "", False
     width = float(layout.width)
     height = float(layout.height)
-    gutter = max(8.0, width * 0.018)
+    # Character boxes can be expressed in an offset crop-box coordinate space.
+    # Splitting at ``page_width / n`` then puts a nominal gutter inside the
+    # left column (for example, a two-column page cropped 36 points from the
+    # media box).  Use the occupied text rectangle for horizontal partitions;
+    # ignore tiny folio marks so a page number cannot drag that rectangle back
+    # to the media-box origin.
+    extent_blocks = [
+        block
+        for block in blocks
+        if block.x1 - block.x0 >= max(24.0, width * 0.08)
+    ] or blocks
+    horizontal_start = min(block.x0 for block in extent_blocks)
+    horizontal_end = max(block.x1 for block in extent_blocks)
+    usable_width = horizontal_end - horizontal_start
+    if usable_width <= 0:
+        horizontal_start = 0.0
+        usable_width = width
+    gutter = max(8.0, usable_width * 0.018)
 
     def vertical_extent(values: list[OcrTextBlock]) -> tuple[float, float]:
         return (
@@ -1772,8 +1790,11 @@ def _layout_reading_order_text(layout: OcrPageLayout) -> tuple[str, bool]:
     ) -> tuple[list[list[OcrTextBlock]], list[OcrTextBlock]] | None:
         band_top = min(block.y0 for block in values)
         for column_count in (4, 3, 2):
-            column_width = width / column_count
-            boundaries = [column_width * index for index in range(1, column_count)]
+            column_width = usable_width / column_count
+            boundaries = [
+                horizontal_start + column_width * index
+                for index in range(1, column_count)
+            ]
             columns: list[list[OcrTextBlock]] = [[] for _ in range(column_count)]
             spanning: list[OcrTextBlock] = []
             for block in values:
@@ -1790,18 +1811,22 @@ def _layout_reading_order_text(layout: OcrPageLayout) -> tuple[str, bool]:
                 )
                 top_centered_display = (
                     block.y0 <= band_top + max(24.0, height * 0.04)
-                    and abs(center - width / 2) <= width * 0.12
-                    and block_width >= width * 0.08
+                    and abs(center - (horizontal_start + usable_width / 2))
+                    <= usable_width * 0.12
+                    and block_width >= usable_width * 0.08
                     and not has_row_peer
                 )
                 if (
                     block_width >= column_width * 1.45
-                    or (crosses_gutter and block_width >= width * 0.15)
+                    or (crosses_gutter and block_width >= usable_width * 0.15)
                     or top_centered_display
                 ):
                     spanning.append(block)
                     continue
-                column_index = min(column_count - 1, int(center / column_width))
+                column_index = min(
+                    column_count - 1,
+                    max(0, int((center - horizontal_start) / column_width)),
+                )
                 columns[column_index].append(block)
             if len(spanning) > max(3, len(values) // 5):
                 # A two-column page projected onto three equal bands makes most
@@ -2034,7 +2059,7 @@ def _looks_like_corrupt_visual_heading(value: str) -> bool:
     """Reject decorative or handwritten glyph extraction as document structure."""
     quote_count = value.count("'") + value.count('"')
     return bool(
-        any(char in value for char in ("\\", "~", "{", "}", "°", "•", "·", "+"))
+        any(char in value for char in ("\\", "~", "{", "}", "°", "•", "·"))
         or ".. " in value
         or quote_count >= 4
     )

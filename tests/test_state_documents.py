@@ -408,6 +408,41 @@ def test_layout_reading_order_keeps_columns_contiguous() -> None:
     assert ocr_layout_text(layout) == (text, used_columns)
 
 
+def test_layout_reading_order_uses_offset_crop_box_text_extent() -> None:
+    blocks = []
+    for row, y in enumerate((90, 120, 150, 180), 1):
+        blocks.extend(
+            (
+                OcrTextBlock(f"left {row}", 1.0, 53, y, 279, y + 20),
+                OcrTextBlock(f"right {row}", 1.0, 303, y, 529, y + 20),
+            )
+        )
+    # The PDF crop box is 538 points wide, but positioned glyphs retain an
+    # approximately 36-point media-box offset.  A page-width midpoint (269)
+    # therefore cuts through the left column instead of through the real
+    # 279-303 gutter.
+    layout = OcrPageLayout(
+        page_number=150,
+        width=538,
+        height=800,
+        blocks=tuple(blocks),
+    )
+
+    text, used_columns = _layout_reading_order_text(layout)
+
+    assert used_columns is True
+    assert text.splitlines() == [
+        "left 1",
+        "left 2",
+        "left 3",
+        "left 4",
+        "right 1",
+        "right 2",
+        "right 3",
+        "right 4",
+    ]
+
+
 def test_layout_reading_order_keeps_three_columns_contiguous() -> None:
     blocks = [OcrTextBlock("Chapter title", 1.0, 80, 20, 520, 50)]
     for row, y in enumerate((90, 120, 150, 180), 1):
@@ -824,6 +859,25 @@ def test_pdf_normalization_recovers_unbookmarked_all_caps_subheadings() -> None:
     assert "#### TOOL PROFICIENCIES" in content
     assert "##### TOOLS AND SKILLS TOGETHER" in content
     assert metadata["heading_count"] == 2
+    assert warnings == ()
+
+
+def test_pdf_normalization_recovers_bounded_display_ocr_damage_and_plus_heading() -> None:
+    content, metadata, warnings = build_structured_markdown(
+        [
+            "ADAMANTINE ARMOR\n"
+            "Armor (heavy), uncommon\n"
+            "ALCHEMY jUG\n"
+            "Wondrous item, uncommon\n"
+            "AMMUNITION, +1, +2, OR +3\n"
+            "Weapon (any ammunition), uncommon"
+        ],
+        [],
+    )
+
+    assert "##### ALCHEMY jUG" in content
+    assert "##### AMMUNITION, +1, +2, OR +3" in content
+    assert metadata["heading_count"] == 3
     assert warnings == ()
 
 
