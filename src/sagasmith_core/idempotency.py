@@ -2,19 +2,98 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import json
 import uuid
+import zlib
 from dataclasses import dataclass
 from typing import Any, Callable
 
 from sqlalchemy import select
 
 from sagasmith_core.database import Database
-from sagasmith_core.integrity import json_sha256
+from sagasmith_core.integrity import canonical_json, json_sha256
 from sagasmith_core.models import Campaign, IdempotencyRecord, MutationGroup, StateRevision
 
 
 class IdempotencyConflictError(ValueError):
     pass
+
+
+_COMPRESSED_RESPONSE_MARKER = "sagasmith.idempotency.response+zlib.v1"
+_COMPRESSED_RESPONSE_THRESHOLD = 64 * 1024
+_MAX_UNCOMPRESSED_RESPONSE_BYTES = 512 * 1024 * 1024
+
+
+def _stored_response(response: dict[str, Any]) -> dict[str, Any]:
+    """Compress large exact replay values without changing their public shape."""
+
+    raw = canonical_json(response).encode("utf-8")
+    marker_collision = "_sagasmith_encoding" in response
+    if len(raw) < _COMPRESSED_RESPONSE_THRESHOLD and not marker_collision:
+        return dict(response)
+    compressed = zlib.compress(raw)
+    envelope = {
+        "_sagasmith_encoding": _COMPRESSED_RESPONSE_MARKER,
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "uncompressed_bytes": len(raw),
+        "data_base64": base64.b64encode(compressed).decode("ascii"),
+    }
+    if not marker_collision and len(canonical_json(envelope).encode("utf-8")) >= len(raw):
+        return dict(response)
+    return envelope
+
+
+def _public_response(stored: dict[str, Any]) -> dict[str, Any]:
+    """Decode one response envelope while accepting legacy uncompressed rows."""
+
+    if stored.get("_sagasmith_encoding") != _COMPRESSED_RESPONSE_MARKER:
+        return dict(stored)
+    expected_keys = {
+        "_sagasmith_encoding",
+        "sha256",
+        "uncompressed_bytes",
+        "data_base64",
+    }
+    if set(stored) != expected_keys:
+        raise RuntimeError("compressed idempotency response envelope has unexpected fields")
+    expected_size = stored.get("uncompressed_bytes")
+    if (
+        not isinstance(expected_size, int)
+        or isinstance(expected_size, bool)
+        or expected_size < 0
+        or expected_size > _MAX_UNCOMPRESSED_RESPONSE_BYTES
+    ):
+        raise RuntimeError("compressed idempotency response size is invalid")
+    encoded = stored.get("data_base64")
+    if not isinstance(encoded, str):
+        raise RuntimeError("compressed idempotency response payload is invalid")
+    try:
+        compressed = base64.b64decode(encoded, validate=True)
+        inflater = zlib.decompressobj()
+        raw = inflater.decompress(compressed, expected_size + 1)
+    except (ValueError, zlib.error) as exc:
+        raise RuntimeError("compressed idempotency response cannot be decoded") from exc
+    # ``flush()`` after a bounded ``decompress()`` can expand the remaining
+    # stream without a limit. A valid single zlib member whose declared size is
+    # correct reaches EOF in the bounded call; anything else is corrupt.
+    if (
+        inflater.unconsumed_tail
+        or not inflater.eof
+        or inflater.unused_data
+        or len(raw) != expected_size
+    ):
+        raise RuntimeError("compressed idempotency response length does not match its receipt")
+    if hashlib.sha256(raw).hexdigest() != stored.get("sha256"):
+        raise RuntimeError("compressed idempotency response checksum does not match its receipt")
+    try:
+        response = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("compressed idempotency response is not valid JSON") from exc
+    if not isinstance(response, dict):
+        raise RuntimeError("compressed idempotency response must decode to an object")
+    return response
 
 
 @dataclass(frozen=True)
@@ -187,7 +266,7 @@ class IdempotencyService:
             return IdempotencyReceipt(
                 key,
                 True,
-                dict(row.response),
+                _public_response(dict(row.response)),
                 group.id if group is not None else row.mutation_group_id,
                 row.request_hash,
                 group.branch_id if group is not None else None,
@@ -210,7 +289,12 @@ class IdempotencyService:
             raise IdempotencyConflictError(
                 f"idempotency key reused with a different request: {key}"
             )
-        return IdempotencyResult(key, True, dict(row.response), row.mutation_group_id)
+        return IdempotencyResult(
+            key,
+            True,
+            _public_response(dict(row.response)),
+            row.mutation_group_id,
+        )
 
     def mutation_committed(
         self,
@@ -290,7 +374,12 @@ class IdempotencyService:
                 raise IdempotencyConflictError(
                     f"idempotency key reused with a different request: {key}"
                 )
-            return IdempotencyResult(key, True, dict(row.response), row.mutation_group_id)
+            return IdempotencyResult(
+                key,
+                True,
+                _public_response(dict(row.response)),
+                row.mutation_group_id,
+            )
         if mutation_group_id is None and campaign_id is not None:
             groups = list(
                 session.scalars(
@@ -318,11 +407,11 @@ class IdempotencyService:
             campaign_id=campaign_id,
             request_hash=digest,
             mutation_group_id=mutation_group_id,
-            response=dict(response),
+            response=_stored_response(response),
         )
         session.add(row)
         session.flush()
-        return IdempotencyResult(key, False, dict(row.response), row.mutation_group_id)
+        return IdempotencyResult(key, False, dict(response), row.mutation_group_id)
 
     def require_uncommitted_in_session(
         self,

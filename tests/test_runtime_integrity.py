@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import event
+from sqlalchemy import event, select
 
 from sagasmith_core import (
     AccessDeniedError,
@@ -16,6 +16,8 @@ from sagasmith_core import (
     StateMutationService,
 )
 from sagasmith_core.idempotency import request_hash
+from sagasmith_core.integrity import canonical_json
+from sagasmith_core.models import IdempotencyRecord
 
 
 def test_grouped_revision_undo_redo_is_atomic(database) -> None:
@@ -89,6 +91,64 @@ def test_idempotency_rejects_key_reuse_with_different_payload(database) -> None:
     assert replay is not None and replay.replayed is True
     with pytest.raises(IdempotencyConflictError):
         service.lookup("campaign:c1", "request-1", {"amount": 2})
+
+
+def test_large_idempotency_response_is_compressed_and_replays_exactly(database) -> None:
+    service = IdempotencyService(database)
+    response = {
+        "job": {
+            "pages": [
+                {"page": page, "text": ("source-bound repeated evidence " * 1000)}
+                for page in range(20)
+            ]
+        }
+    }
+
+    committed = service.remember("import-job:large", "compile", {"revision": 7}, response)
+
+    assert committed.response == response
+    with database.transaction() as session:
+        stored = session.scalar(
+            select(IdempotencyRecord).where(IdempotencyRecord.key == "compile")
+        )
+        assert stored is not None
+        assert stored.response["_sagasmith_encoding"] == (
+            "sagasmith.idempotency.response+zlib.v1"
+        )
+        assert len(canonical_json(stored.response)) < len(canonical_json(response)) // 5
+    replay = service.lookup("import-job:large", "compile", {"revision": 7})
+    assert replay is not None
+    assert replay.replayed is True
+    assert replay.response == response
+
+
+def test_idempotency_response_reserved_marker_is_escaped(database) -> None:
+    service = IdempotencyService(database)
+    response = {"_sagasmith_encoding": "user-authored-value", "result": "kept verbatim"}
+
+    service.remember("custom", "marker", {"request": True}, response)
+
+    replay = service.lookup("custom", "marker", {"request": True})
+    assert replay is not None
+    assert replay.response == response
+
+
+def test_compressed_idempotency_response_rejects_false_small_length(database) -> None:
+    service = IdempotencyService(database)
+    response = {"result": "source-bound evidence " * 10000}
+    service.remember("custom", "compressed", {"request": True}, response)
+
+    with database.transaction() as session:
+        stored = session.scalar(
+            select(IdempotencyRecord).where(IdempotencyRecord.key == "compressed")
+        )
+        assert stored is not None
+        corrupted = dict(stored.response)
+        corrupted["uncompressed_bytes"] = 1
+        stored.response = corrupted
+
+    with pytest.raises(RuntimeError, match="length does not match"):
+        service.lookup("custom", "compressed", {"request": True})
 
 
 def test_campaign_idempotency_receipt_recovers_response_without_stale_request(database) -> None:
