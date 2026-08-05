@@ -116,6 +116,19 @@ def _install_rule_component(database, component: dict) -> None:
     packs.install(component["id"], component["version"])
 
 
+def _install_local_rule_component_without_portable_provenance(database, component: dict) -> None:
+    payload = component["payload"]
+    packs = RulePackService(database)
+    draft = packs.save_draft(
+        manifest=payload["manifest"],
+        artifacts=payload["artifacts"],
+        mechanics=payload["mechanics"],
+        provenance=dict(payload["provenance"]),
+    )
+    assert draft.status == "validated"
+    packs.install(component["id"], component["version"])
+
+
 def test_addon_import_install_and_branch_activation_are_separate(database) -> None:
     component = _rule_component(database)
     addon_package = _addon(component)
@@ -127,9 +140,7 @@ def test_addon_import_install_and_branch_activation_are_separate(database) -> No
     assert imported.validation_report["declared_content_summary"] == {"feature": 1}
     assert imported.validation_report["embedded_content_summary"] == {"feature": 1}
     assert addons.get_package(imported.addon_id, imported.version) == addon_package
-    assert addons.component_status(imported.addon_id, imported.version)[0][
-        "status"
-    ] == "missing"
+    assert addons.component_status(imported.addon_id, imported.version)[0]["status"] == "missing"
     with pytest.raises(AddonError, match="not installed"):
         addons.install(imported.addon_id, imported.version)
 
@@ -150,9 +161,10 @@ def test_addon_import_install_and_branch_activation_are_separate(database) -> No
 
     assert activation.enabled is True
     assert after == before + 1
-    assert RulePackService(database).effective_ruleset(campaign.id).lock[0][
-        "pack_id"
-    ] == component["id"]
+    assert (
+        RulePackService(database).effective_ruleset(campaign.id).lock[0]["pack_id"]
+        == component["id"]
+    )
     assert addons.activations(campaign.id) == [activation]
 
     disabled = addons.set_activation(
@@ -165,6 +177,34 @@ def test_addon_import_install_and_branch_activation_are_separate(database) -> No
     assert RulePackService(database).effective_ruleset(campaign.id).lock == ()
     with pytest.raises(AddonError, match="activated"):
         addons.remove_version(installed.addon_id, installed.version)
+
+
+def test_addon_accepts_exact_plugin_proven_local_component_equivalence(database) -> None:
+    component = _rule_component(database)
+    addon_package = _addon(component)
+    addons = AddonService(database)
+    imported = addons.import_package(addon_package)
+    _install_local_rule_component_without_portable_provenance(database, component)
+
+    with pytest.raises(AddonError, match="unverified"):
+        addons.install(imported.addon_id, imported.version)
+    proof = addons.record_component_equivalence(
+        imported.addon_id,
+        imported.version,
+        kind="rule_pack",
+        component_id=component["id"],
+        component_version=component["version"],
+        checksum=component["checksum"],
+        basis="portable_definition_checksum",
+        proof_checksum=component["metadata"]["definition_checksum"],
+    )
+
+    assert proof["checksum"] == component["checksum"]
+    assert (
+        addons.component_status(imported.addon_id, imported.version)[0]["checksum_status"]
+        == "match"
+    )
+    assert addons.install(imported.addon_id, imported.version).status == "installed"
 
 
 def test_addon_activation_rejects_wrong_edition_and_active_combat(database) -> None:
@@ -218,13 +258,9 @@ def test_addon_lock_is_preserved_by_snapshots_and_branch_forks(database) -> None
     )
 
     assert addons.activations(campaign.id, branch_id=fork.id)[0].checksum == activation.checksum
-    assert RulePackService(database).effective_ruleset(
-        campaign.id, branch_id=fork.id
-    ).lock
+    assert RulePackService(database).effective_ruleset(campaign.id, branch_id=fork.id).lock
     original_branch_id = next(
-        item.id
-        for item in BranchService(database).list(campaign.id)
-        if item.id != fork.id
+        item.id for item in BranchService(database).list(campaign.id) if item.id != fork.id
     )
     comparison = BranchService(database).compare(
         campaign.id,
@@ -276,21 +312,13 @@ def test_shared_rule_component_tracks_options_per_addon_owner(database) -> None:
         campaign.id,
         addon_id=first["id"],
         version=first["version"],
-        options={
-            "rule_options": {
-                component["id"]: {"first_only": True, "shared": "same"}
-            }
-        },
+        options={"rule_options": {component["id"]: {"first_only": True, "shared": "same"}}},
     )
     addons.set_activation(
         campaign.id,
         addon_id=second["id"],
         version=second["version"],
-        options={
-            "rule_options": {
-                component["id"]: {"second_only": True, "shared": "same"}
-            }
-        },
+        options={"rule_options": {component["id"]: {"second_only": True, "shared": "same"}}},
     )
     lock = RulePackService(database).effective_ruleset(campaign.id).lock[0]
     assert lock["options"]["first_only"] is True
@@ -408,9 +436,7 @@ def test_addon_conflicts_are_enforced_in_both_directions(
         addons.install(package["id"], package["version"])
     campaign = CampaignService(database).create(system_id="dnd5e", name="Conflicts")
     RuleProfileService(database).set(campaign.id, edition="2014")
-    active, blocked = (
-        (first, second) if activate_conflicting_first else (second, first)
-    )
+    active, blocked = (first, second) if activate_conflicting_first else (second, first)
     addons.set_activation(
         campaign.id,
         addon_id=active["id"],

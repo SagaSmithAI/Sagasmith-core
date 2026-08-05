@@ -209,7 +209,100 @@ class AddonService:
             )
             if row is None:
                 raise LookupError(f"{addon_id}@{version}")
-            return [self._component_status(session, component) for component in row.components]
+            verifications = list(
+                dict(row.provenance or {}).get("component_equivalence_verifications") or []
+            )
+            return [
+                self._component_status(
+                    session,
+                    component,
+                    equivalence_verifications=verifications,
+                )
+                for component in row.components
+            ]
+
+    def record_component_equivalence(
+        self,
+        addon_id: str,
+        version: str,
+        *,
+        kind: str,
+        component_id: str,
+        component_version: str,
+        checksum: str,
+        basis: str,
+        proof_checksum: str,
+    ) -> dict[str, Any]:
+        """Record a plugin-proven exact local/portable component equivalence.
+
+        A system plugin can rebuild a portable definition from an already
+        installed local pack even when that pack was not originally imported
+        from the addon envelope.  Core does not interpret system-specific
+        definitions; it stores the exact addon-scoped proof after checking the
+        component lock and local identity.
+        """
+
+        normalized_basis = str(basis).strip()
+        normalized_proof = str(proof_checksum).strip().lower()
+        if not normalized_basis or len(normalized_basis) > 100:
+            raise AddonError("component equivalence basis must contain 1 to 100 characters")
+        if len(normalized_proof) != 64 or any(
+            character not in "0123456789abcdef" for character in normalized_proof
+        ):
+            raise AddonError("component equivalence proof_checksum must be sha256")
+        identity = (str(kind), str(component_id), str(component_version))
+        with self.database.transaction() as session:
+            row = session.get(
+                ContentAddonVersion,
+                {"addon_id": addon_id, "version": version},
+            )
+            if row is None:
+                raise LookupError(f"{addon_id}@{version}")
+            matches = [
+                dict(component)
+                for component in row.components
+                if (
+                    str(component.get("kind") or ""),
+                    str(component.get("id") or ""),
+                    str(component.get("version") or ""),
+                )
+                == identity
+            ]
+            if len(matches) != 1 or str(matches[0].get("checksum") or "") != checksum:
+                raise AddonError("component equivalence does not match one exact addon lock")
+            local = session.get(
+                RulePackVersion,
+                {"pack_id": component_id, "version": component_version},
+            )
+            if local is None:
+                raise AddonError("component equivalence requires the exact local component")
+            verification = {
+                "kind": identity[0],
+                "id": identity[1],
+                "version": identity[2],
+                "checksum": str(checksum),
+                "basis": normalized_basis,
+                "proof_checksum": normalized_proof,
+            }
+            provenance = dict(row.provenance or {})
+            existing = [
+                dict(item)
+                for item in provenance.get("component_equivalence_verifications") or []
+                if isinstance(item, dict)
+                and (
+                    str(item.get("kind") or ""),
+                    str(item.get("id") or ""),
+                    str(item.get("version") or ""),
+                )
+                != identity
+            ]
+            provenance["component_equivalence_verifications"] = [
+                *existing,
+                verification,
+            ]
+            row.provenance = provenance
+            session.flush()
+            return verification
 
     def activation_requirements(
         self,
@@ -243,9 +336,7 @@ class AddonService:
                 raise AddonError(f"addon does not support campaign edition {profile.edition}")
             global_errors = self._global_component_errors(session, row)
             if global_errors:
-                raise AddonError(
-                    "addon components are not installed: " + "; ".join(global_errors)
-                )
+                raise AddonError("addon components are not installed: " + "; ".join(global_errors))
             self._assert_addon_conflicts(
                 session,
                 campaign_id=campaign_id,
@@ -340,10 +431,7 @@ class AddonService:
                 enabled
                 and row is not None
                 and row.enabled
-                and (
-                    row.version != version
-                    or row.checksum != version_row.checksum
-                )
+                and (row.version != version or row.checksum != version_row.checksum)
             ):
                 previous_version = session.get(
                     ContentAddonVersion,
@@ -351,9 +439,7 @@ class AddonService:
                 )
                 if previous_version is None or previous_version.checksum != row.checksum:
                     raise AddonError("the active addon version is unavailable for replacement")
-                previous_component_locks = [
-                    dict(item) for item in row.component_locks or []
-                ]
+                previous_component_locks = [dict(item) for item in row.component_locks or []]
                 previous_options = dict(row.options or {})
             if row is None:
                 row = CampaignAddonActivation(
@@ -456,15 +542,12 @@ class AddonService:
             if references:
                 raise AddonError("an activated addon version cannot be removed")
             historical_reference = any(
-                item.get("addon_id") == addon_id
-                and item.get("version") == version
+                item.get("addon_id") == addon_id and item.get("version") == version
                 for snapshot in session.scalars(select(CampaignSnapshot))
                 for item in dict(snapshot.payload or {}).get("addon_lock", [])
             )
             if historical_reference:
-                raise AddonError(
-                    "an addon version referenced by a snapshot cannot be removed"
-                )
+                raise AddonError("an addon version referenced by a snapshot cannot be removed")
             session.delete(row)
             remaining = session.scalar(
                 select(func.count())
@@ -477,7 +560,12 @@ class AddonService:
                     session.delete(addon)
 
     @staticmethod
-    def _component_status(session, component: dict[str, Any]) -> dict[str, Any]:
+    def _component_status(
+        session,
+        component: dict[str, Any],
+        *,
+        equivalence_verifications: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         kind = str(component["kind"])
         if kind == "module_pack":
             return {**dict(component), "status": "campaign_import_required"}
@@ -494,9 +582,17 @@ class AddonService:
             )
         else:
             actual_checksum = str(provenance.get("portable_package_checksum") or "")
+        equivalence_verified = any(
+            str(item.get("kind") or "") == kind
+            and str(item.get("id") or "") == str(component["id"])
+            and str(item.get("version") or "") == str(component["version"])
+            and str(item.get("checksum") or "") == str(component["checksum"])
+            for item in equivalence_verifications or []
+            if isinstance(item, dict)
+        )
         checksum_status = (
             "match"
-            if actual_checksum == component["checksum"]
+            if actual_checksum == component["checksum"] or equivalence_verified
             else "unverified"
             if not actual_checksum
             else "conflict"
@@ -508,12 +604,17 @@ class AddonService:
         }
 
     @classmethod
-    def _global_component_errors(
-        cls, session, row: ContentAddonVersion
-    ) -> list[str]:
+    def _global_component_errors(cls, session, row: ContentAddonVersion) -> list[str]:
         errors = []
+        verifications = list(
+            dict(row.provenance or {}).get("component_equivalence_verifications") or []
+        )
         for component in row.components:
-            status = cls._component_status(session, dict(component))
+            status = cls._component_status(
+                session,
+                dict(component),
+                equivalence_verifications=verifications,
+            )
             if component["kind"] == "module_pack":
                 continue
             if status["status"] != "installed":
@@ -538,15 +639,12 @@ class AddonService:
         require_campaign_modules: bool,
     ) -> list[dict[str, Any]]:
         by_identity = {
-            (str(item.get("kind") or ""), str(item.get("id") or "")): item
-            for item in receipts
+            (str(item.get("kind") or ""), str(item.get("id") or "")): item for item in receipts
         }
         if len(by_identity) != len(receipts):
             raise AddonError("addon component receipts must have unique kind/id identities")
         result = []
-        component_identities = {
-            (str(item["kind"]), str(item["id"])) for item in row.components
-        }
+        component_identities = {(str(item["kind"]), str(item["id"])) for item in row.components}
         unknown = sorted(set(by_identity) - component_identities)
         if unknown:
             raise AddonError(
@@ -565,9 +663,11 @@ class AddonService:
                 if receipt:
                     module_id = str(receipt.get("module_id") or "")
                     module = session.get(ModuleSource, module_id)
-                    portable = dict(
-                        dict(module.metadata_json or {}).get("portable_package") or {}
-                    ) if module is not None else {}
+                    portable = (
+                        dict(dict(module.metadata_json or {}).get("portable_package") or {})
+                        if module is not None
+                        else {}
+                    )
                     if (
                         module is None
                         or module.campaign_id != campaign.id
@@ -623,9 +723,7 @@ class AddonService:
                 for item in other.manifest.get("conflicts", [])
             }:
                 reverse_conflicts.add(activation.addon_id)
-        collisions = sorted(
-            {item.addon_id for item in active} & conflicts | reverse_conflicts
-        )
+        collisions = sorted({item.addon_id for item in active} & conflicts | reverse_conflicts)
         if collisions:
             raise AddonError("addon conflicts with: " + ", ".join(collisions))
 
@@ -644,9 +742,7 @@ class AddonService:
         if set(addon_options) - {"rule_options"}:
             raise AddonError("addon activation options support only rule_options")
         rule_component_ids = {
-            str(component["id"])
-            for component in components
-            if component["kind"] == "rule_pack"
+            str(component["id"]) for component in components if component["kind"] == "rule_pack"
         }
         unknown_rule_options = sorted(set(rule_options) - rule_component_ids)
         if unknown_rule_options:
@@ -664,9 +760,7 @@ class AddonService:
                 {"pack_id": component["id"], "version": component["version"]},
             )
             if version is None or version.status != "installed":
-                raise AddonError(
-                    f"addon rule component is not installed: {component['id']}"
-                )
+                raise AddonError(f"addon rule component is not installed: {component['id']}")
             row = session.get(
                 CampaignRuleActivation,
                 {
@@ -694,22 +788,15 @@ class AddonService:
                 row.version = version.version
                 row.checksum = version.checksum
             stored = dict(row.options or {})
-            owners = {
-                str(item) for item in stored.pop("_addon_ids", []) if str(item)
-            }
-            manual_owner = bool(
-                stored.pop("_manual_activation_preserved", False)
-            )
+            owners = {str(item) for item in stored.pop("_addon_ids", []) if str(item)}
+            manual_owner = bool(stored.pop("_manual_activation_preserved", False))
             raw_owner_options = stored.pop("_addon_rule_options", {})
             if not isinstance(raw_owner_options, dict) or any(
-                not isinstance(value, dict)
-                for value in raw_owner_options.values()
+                not isinstance(value, dict) for value in raw_owner_options.values()
             ):
                 raise AddonError("stored addon rule option ownership is invalid")
             owner_options = {
-                str(owner): dict(value)
-                for owner, value in raw_owner_options.items()
-                if str(owner)
+                str(owner): dict(value) for owner, value in raw_owner_options.items() if str(owner)
             }
             raw_manual_options = stored.pop("_manual_options", {})
             if not isinstance(raw_manual_options, dict):
@@ -726,16 +813,12 @@ class AddonService:
                     manual_owner = True
                     manual_options = dict(stored)
                 owners.add(addon_id)
-                owner_options[addon_id] = dict(
-                    rule_options.get(component["id"], {})
-                )
+                owner_options[addon_id] = dict(rule_options.get(component["id"], {}))
             else:
                 owners.discard(addon_id)
                 owner_options.pop(addon_id, None)
             effective_options = dict(manual_options) if manual_owner else {}
-            option_sources = {
-                key: "manual activation" for key in effective_options
-            }
+            option_sources = {key: "manual activation" for key in effective_options}
             for owner in sorted(owners):
                 requested = dict(owner_options.get(owner) or {})
                 conflicting = {
@@ -745,12 +828,10 @@ class AddonService:
                 }
                 if conflicting:
                     details = ", ".join(
-                        f"{key} ({option_sources[key]} vs {owner})"
-                        for key in sorted(conflicting)
+                        f"{key} ({option_sources[key]} vs {owner})" for key in sorted(conflicting)
                     )
                     raise AddonError(
-                        f"addon rule options conflict for {component['id']}: "
-                        + details
+                        f"addon rule options conflict for {component['id']}: " + details
                     )
                 effective_options.update(requested)
                 option_sources.update({key: owner for key in requested})
@@ -760,8 +841,7 @@ class AddonService:
                 "_addon_ids": sorted(owners),
                 "_manual_activation_preserved": manual_owner,
                 "_addon_rule_options": {
-                    owner: dict(owner_options.get(owner) or {})
-                    for owner in sorted(owners)
+                    owner: dict(owner_options.get(owner) or {}) for owner in sorted(owners)
                 },
                 "_manual_options": manual_options if manual_owner else {},
             }
