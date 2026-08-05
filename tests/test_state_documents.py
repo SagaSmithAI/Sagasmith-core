@@ -1022,6 +1022,70 @@ def test_agent_page_revision_can_refine_the_same_unpublished_page() -> None:
     assert revised.metadata["text_revision_count"] == 2
 
 
+def test_agent_page_revision_can_recover_empty_page_from_rendered_evidence() -> None:
+    document = NormalizedDocument(
+        content="<!-- page: 1 -->\n\n<!-- page: 2 -->\n\n# Existing\n",
+        media_type="application/pdf",
+        source_path="rules.pdf",
+        checksum="a" * 64,
+        page_count=2,
+    )
+    empty_page = normalized_document_page_text(document, 1)
+    revision = {
+        "source_checksum": document.checksum,
+        "page_number": 1,
+        "base_text_sha256": hashlib.sha256(empty_page.encode("utf-8")).hexdigest(),
+        "replacements": [
+            {
+                "old": "",
+                "new": "\n\n# CLASS FEATURES\n\nRecovered from the reviewed page image.\n\n",
+            }
+        ],
+        "reviewer": "agent:ocr-editor",
+        "review_method": "agent",
+        "rationale": "The text extractor and OCR omitted the complete rendered page.",
+        "evidence": {
+            "basis": "rendered_page",
+            "rendered_image_checksum": "b" * 64,
+        },
+    }
+
+    revised = apply_document_page_revisions(document, [revision])
+
+    assert "# CLASS FEATURES" in normalized_document_page_text(revised, 1)
+    assert normalized_document_page_text(revised, 2) == "\n\n# Existing\n"
+
+    with pytest.raises(ValueError, match="requires rendered_page evidence"):
+        apply_document_page_revisions(
+            document,
+            [{**revision, "evidence": {"basis": "agent_context"}}],
+        )
+
+
+def test_agent_page_revision_rejects_empty_anchor_on_nonempty_page() -> None:
+    document = NormalizedDocument(
+        content="<!-- page: 1 -->\n\n# Existing\n",
+        media_type="application/pdf",
+        source_path="rules.pdf",
+        checksum="a" * 64,
+        page_count=1,
+    )
+    page_text = normalized_document_page_text(document, 1)
+    revision = {
+        "source_checksum": document.checksum,
+        "page_number": 1,
+        "base_text_sha256": hashlib.sha256(page_text.encode("utf-8")).hexdigest(),
+        "replacements": [{"old": "", "new": "Recovered text"}],
+        "reviewer": "agent:ocr-editor",
+        "review_method": "agent",
+        "rationale": "Attempted insertion into a page that already has text.",
+        "evidence": {"basis": "rendered_page"},
+    }
+
+    with pytest.raises(ValueError, match="is invalid"):
+        apply_document_page_revisions(document, [revision])
+
+
 def test_pdf_converter_routes_ascii_lexical_damage_through_ocr(
     tmp_path,
     monkeypatch,

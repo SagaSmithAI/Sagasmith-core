@@ -122,7 +122,9 @@ def apply_document_page_revisions(
 
     The source document and cached OCR remain immutable.  A revision can only
     replace unique text inside one physical page segment, and the reviewed page
-    must retain at least half of the original normalized text.
+    must retain at least half of the original normalized text.  A wholly missed
+    page can be recovered only by one empty-anchor replacement backed by the
+    checksum of a rendered page reviewed by an Agent or human.
     """
 
     if not revisions:
@@ -200,6 +202,16 @@ def apply_document_page_revisions(
             )
         revised_page = page_text
         replacements: list[dict[str, str]] = []
+        empty_page_recovery = (
+            not page_text.strip()
+            and len(raw_replacements) == 1
+            and isinstance(raw_replacements[0], Mapping)
+            and str(dict(raw_replacements[0]).get("old", "")) == ""
+        )
+        if empty_page_recovery and str(dict(evidence).get("basis") or "") != "rendered_page":
+            raise ValueError(
+                f"page revisions[{index}] empty-page recovery requires rendered_page evidence"
+            )
         for replacement_index, raw_replacement in enumerate(raw_replacements):
             if not isinstance(raw_replacement, Mapping):
                 raise ValueError(
@@ -214,7 +226,14 @@ def apply_document_page_revisions(
                 )
             old = str(replacement["old"])
             new = str(replacement["new"])
-            if not old or old == new or len(old) > 500 or len(new) > 500:
+            maximum_new_length = 50000 if empty_page_recovery else 500
+            if (
+                (not old and not empty_page_recovery)
+                or not new
+                or old == new
+                or len(old) > 500
+                or len(new) > maximum_new_length
+            ):
                 raise ValueError(
                     f"page revisions[{index}].replacements[{replacement_index}] is invalid"
                 )
@@ -223,6 +242,10 @@ def apply_document_page_revisions(
                     f"page revisions[{index}].replacements[{replacement_index}].new "
                     "cannot create a physical page marker"
                 )
+            if empty_page_recovery:
+                revised_page = new
+                replacements.append({"old": old, "new": new})
+                continue
             if revised_page.count(old) != 1:
                 raise ValueError(
                     f"page revisions[{index}].replacements[{replacement_index}].old "
