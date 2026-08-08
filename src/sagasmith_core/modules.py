@@ -133,6 +133,14 @@ def _portable_scene_chunks(
     ]
 
 
+def _portable_scene_content(scene: ModuleScene, chunks: Sequence[ModuleChunk]) -> str:
+    """Prefer indexed scene text and recover older rows from their real chunks."""
+
+    if scene.content.strip():
+        return scene.content
+    return "\n\n".join(chunk.content for chunk in chunks if chunk.content.strip()).strip()
+
+
 def clean_source_evidence_text(value: Any) -> str:
     """Remove PDF artifacts and normalize typography while preserving letter case."""
 
@@ -1167,12 +1175,31 @@ class ModuleService:
             )
             if not scenes:
                 raise ValueError("cannot export a module without scenes")
+            chunks = {
+                chunk.id: chunk
+                for chunk in session.scalars(
+                    select(ModuleChunk).where(ModuleChunk.module_id == module_id)
+                )
+            }
+            chunks_by_scene: dict[str, list[ModuleChunk]] = {}
+            for chunk in chunks.values():
+                chunks_by_scene.setdefault(chunk.scene_id, []).append(chunk)
+            for scene_chunks in chunks_by_scene.values():
+                scene_chunks.sort(key=lambda item: (item.ordinal, item.id))
+            scenes = [
+                (scene, chapter)
+                for scene, chapter in scenes
+                if _portable_scene_content(scene, chunks_by_scene.get(scene.id, []))
+            ]
+            if not scenes:
+                raise ValueError("cannot export a module without content-bearing scenes")
             scene_keys = {
                 scene.id: str(dict(scene.metadata_json or {}).get("stable_key") or "")
                 for scene, _chapter in scenes
             }
             if any(not key for key in scene_keys.values()):
                 raise ValueError("cannot export a module with missing scene stable keys")
+            exported_scene_keys = set(scene_keys.values())
             assets = list(
                 session.scalars(
                     select(ModuleAsset)
@@ -1222,17 +1249,6 @@ class ModuleService:
                     }
                 )
 
-            chunks = {
-                chunk.id: chunk
-                for chunk in session.scalars(
-                    select(ModuleChunk).where(ModuleChunk.module_id == module_id)
-                )
-            }
-            chunks_by_scene: dict[str, list[ModuleChunk]] = {}
-            for chunk in chunks.values():
-                chunks_by_scene.setdefault(chunk.scene_id, []).append(chunk)
-            for scene_chunks in chunks_by_scene.values():
-                scene_chunks.sort(key=lambda item: (item.ordinal, item.id))
             reviews = list(
                 session.scalars(
                     select(ModuleContentReview)
@@ -1242,6 +1258,8 @@ class ModuleService:
             )
             review_payload = []
             for review in reviews:
+                if review.scene_id not in scene_keys:
+                    continue
                 evidence = dict(review.evidence_json or {})
                 if evidence.get("asset_id"):
                     asset_key = asset_keys.get(str(evidence["asset_id"]))
@@ -1309,7 +1327,9 @@ class ModuleService:
                     "page_end": scene.page_end,
                     "headings": list(scene.headings),
                     "keywords": list(scene.keywords),
-                    "content": scene.content,
+                    "content": _portable_scene_content(
+                        scene, chunks_by_scene.get(scene.id, [])
+                    ),
                     "chunks": _portable_scene_chunks(
                         scene,
                         chunks_by_scene.get(scene.id, []),
@@ -1321,7 +1341,9 @@ class ModuleService:
                         if key not in {"stable_key", "content_checksum"}
                     },
                     "content_checksum": hashlib.sha256(
-                        scene.content.encode("utf-8")
+                        _portable_scene_content(
+                            scene, chunks_by_scene.get(scene.id, [])
+                        ).encode("utf-8")
                     ).hexdigest(),
                 }
                 for scene, chapter in scenes
@@ -1385,6 +1407,8 @@ class ModuleService:
                                 },
                             }
                             for binding in bindings
+                            if not binding.scene_key
+                            or binding.scene_key in exported_scene_keys
                         ],
                     )
                     for portable_actor_id, (character, bindings) in grouped.items()

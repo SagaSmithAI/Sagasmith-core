@@ -8,7 +8,7 @@ from sqlalchemy import delete
 
 from sagasmith_core.campaigns import CampaignService
 from sagasmith_core.characters import CharacterService
-from sagasmith_core.models import CampaignSnapshot, ModuleChunk
+from sagasmith_core.models import CampaignSnapshot, ModuleChunk, ModuleScene
 from sagasmith_core.modules import ModuleService
 from sagasmith_core.portable import (
     PortableContentError,
@@ -585,6 +585,32 @@ def test_module_pack_export_derives_chunk_from_real_scene_content(database) -> N
     exported = package["payload"]["scene_atlas"][0]
     assert exported["chunks"][0]["content"] == exported["content"]
     assert exported["chunks"][0]["metadata"] == {"derived_from_scene_content": True}
+
+
+def test_module_pack_export_recovers_empty_legacy_scene_from_chunks(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Scene fallback")
+    modules = ModuleService(database)
+    imported = modules.ingest(
+        campaign_id=campaign.id,
+        source_key="example.scene-fallback",
+        title="Scene Fallback",
+        content="# Chapter\nIntro.\n## Indexed Text\nRecovered from the indexed chunk.",
+    )
+    scene = modules.scene_index(campaign.id, module_id=imported.module_id)[0]
+    chunks = modules.list_chunks(campaign.id, imported.module_id, scene_id=scene["scene_id"])
+    expected = "\n\n".join(chunk["content"] for chunk in chunks if chunk["content"].strip())
+    with database.transaction() as session:
+        row = session.get(ModuleScene, scene["scene_id"])
+        assert row is not None
+        row.content = ""
+
+    package = modules.export_portable_pack(
+        campaign.id,
+        imported.module_id,
+        portable_id="example.scene-fallback",
+    )
+
+    assert package["payload"]["scene_atlas"][0]["content"] == expected
 
 
 def test_module_actor_binding_exports_local_cast_without_runtime_ids(database) -> None:
