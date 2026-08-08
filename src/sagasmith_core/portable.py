@@ -17,6 +17,7 @@ import re
 import zipfile
 from typing import Any, Mapping, Sequence
 
+from sagasmith_core.integrity import canonical_json, json_sha256
 from sagasmith_core.parsing import MAX_RULE_SECTION_TITLE_CHARS
 
 PORTABLE_FORMAT = "sagasmith.portable"
@@ -34,7 +35,6 @@ PORTABLE_KINDS = frozenset(
 ADDON_PACK_SCHEMA = "sagasmith.addon-pack.v1"
 ADDON_READINESS_SCHEMA_VERSION = 1
 ACTOR_CARD_SCHEMA = "sagasmith.actor-card.v2"
-LEGACY_ACTOR_CARD_SCHEMA = "sagasmith.actor-card.v1"
 ACTOR_CARD_IMAGE_MEDIA_TYPES = frozenset(
     {"image/avif", "image/jpeg", "image/png", "image/webp"}
 )
@@ -85,17 +85,11 @@ class PortableContentError(ValueError):
     """Raised when a portable envelope is malformed or has been modified."""
 
 
-def canonical_json(value: Any) -> str:
-    """Serialize portable content deterministically for hashing and sharing."""
-
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-
-
 def portable_checksum(value: Mapping[str, Any]) -> str:
     """Return the SHA-256 of an envelope without its top-level checksum."""
 
     unsigned = {key: copy.deepcopy(item) for key, item in value.items() if key != "checksum"}
-    return hashlib.sha256(canonical_json(unsigned).encode("utf-8")).hexdigest()
+    return json_sha256(unsigned)
 
 
 def build_portable_envelope(
@@ -258,7 +252,7 @@ def validate_actor_card(
             f"actor card system_id must be {expected_system_id!r}"
         )
     payload = value["payload"]
-    legacy_allowed = {
+    allowed = {
         "card_schema",
         "actor_type",
         "name",
@@ -268,20 +262,13 @@ def validate_actor_card(
         "notes",
         "provenance",
         "bindings",
+        "image",
     }
     schema = payload.get("card_schema")
-    allowed = (
-        legacy_allowed
-        if schema == LEGACY_ACTOR_CARD_SCHEMA
-        else legacy_allowed | {"image"}
-    )
     _exact_fields(payload, allowed, "actor card payload")
-    if schema not in {ACTOR_CARD_SCHEMA, LEGACY_ACTOR_CARD_SCHEMA}:
-        raise PortableContentError(
-            f"card_schema must be {ACTOR_CARD_SCHEMA!r} or {LEGACY_ACTOR_CARD_SCHEMA!r}"
-        )
-    if schema == ACTOR_CARD_SCHEMA:
-        _validate_actor_card_image(payload["image"])
+    if schema != ACTOR_CARD_SCHEMA:
+        raise PortableContentError(f"card_schema must be {ACTOR_CARD_SCHEMA!r}")
+    _validate_actor_card_image(payload["image"])
     _required_text(payload["actor_type"], "actor_card.actor_type", maximum=50)
     _required_text(payload["name"], "actor_card.name", maximum=300)
     player_name = payload["player_name"]
@@ -1956,9 +1943,9 @@ def validate_addon_pack(
         raise PortableContentError(
             "addon_pack.manifest.content_summary must map content kinds to non-negative counts"
         )
-    readiness = manifest.get("readiness")
-    if readiness is not None:
-        manifest["readiness"] = validate_addon_readiness(readiness)
+    if "readiness" not in manifest:
+        raise PortableContentError("addon_pack.manifest.readiness is required")
+    manifest["readiness"] = validate_addon_readiness(manifest["readiness"])
     activation = manifest.get("activation")
     if not isinstance(activation, dict):
         raise PortableContentError("addon_pack.manifest.activation must be an object")

@@ -76,6 +76,36 @@ def _addon(
     version: str = "1.0.0",
     conflicts: list[str] | None = None,
 ) -> dict:
+    readiness = {
+        "schema_version": 1,
+        "source": {
+            "item_count": 1,
+            "verified_count": 1,
+            "complete": True,
+            "blockers": [],
+        },
+        "catalog": {
+            "item_count": 1,
+            "reviewed_count": 1,
+            "complete": True,
+            "blockers": [],
+        },
+        "selection": {
+            "applicable_count": 1,
+            "ready_count": 1,
+            "not_applicable_count": 0,
+            "complete": True,
+            "blockers": [],
+        },
+        "runtime": {
+            "item_count": 1,
+            "resolved_count": 1,
+            "modes": {"kernel_mechanic": 1},
+            "complete": True,
+            "blockers": [],
+        },
+        "complete": True,
+    }
     return build_addon_pack(
         portable_id=addon_id,
         version=version,
@@ -88,6 +118,7 @@ def _addon(
             "editions": ["2014"],
             "classification": "third_party",
             "content_summary": {"feature": 1},
+            "readiness": readiness,
             "conflicts": list(conflicts or []),
             "activation": {
                 "rule_policy": "branch",

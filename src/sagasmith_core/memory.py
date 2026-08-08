@@ -11,6 +11,7 @@ from sqlalchemy import select
 
 from sagasmith_core.branches import resolve_branch
 from sagasmith_core.campaigns import CampaignNotFoundError
+from sagasmith_core.clock import operational_utcnow
 from sagasmith_core.context_anchors import (
     CONTEXT_ANCHOR_KIND,
     normalize_context_anchor_metadata,
@@ -24,7 +25,6 @@ from sagasmith_core.models import (
     CampaignMemory,
     CampaignSnapshot,
     MemoryRevision,
-    utcnow,
 )
 from sagasmith_core.retrieval import lexical_score
 from sagasmith_core.visibility import MEMORY_DISCLOSURE_SCOPES
@@ -509,7 +509,7 @@ class MemoryService:
             campaign_id=campaign_id,
             kind=kind,
             subject=subject,
-            fact_key=self._validate_fact_key(fact_key or f"legacy:{memory_id}"),
+            fact_key=self._validate_fact_key(fact_key or f"memory:{memory_id}"),
             subject_ref=subject_ref,
             predicate=predicate,
         )
@@ -580,7 +580,7 @@ class MemoryService:
         session.add(
             BranchFactHead(branch_id=branch_id, memory_id=memory.id, revision_id=revision.id)
         )
-        memory.updated_at = utcnow()
+        memory.updated_at = operational_utcnow()
         return self._info(memory, revision)
 
     def _revise_in_session(
@@ -646,7 +646,7 @@ class MemoryService:
         session.add(revision)
         session.flush()
         head.revision_id = revision.id
-        memory.updated_at = utcnow()
+        memory.updated_at = operational_utcnow()
         return self._info(memory, revision)
 
     @staticmethod

@@ -11,7 +11,7 @@ from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.database import Database
 from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
 from sagasmith_core.models import Campaign, CampaignRuleProfile, Character
-from sagasmith_core.rule_profile_contract import LEGACY_RULE_PROFILE_SETTING_FIELDS
+from sagasmith_core.rule_profile_contract import RULE_PROFILE_OWNED_SETTING_FIELDS
 
 
 @dataclass(frozen=True)
@@ -114,7 +114,7 @@ class RuleProfileService:
             campaign.settings = {
                 key: value
                 for key, value in dict(campaign.settings or {}).items()
-                if key not in LEGACY_RULE_PROFILE_SETTING_FIELDS
+                if key not in RULE_PROFILE_OWNED_SETTING_FIELDS
             }
             campaign.revision += 1
             session.flush()

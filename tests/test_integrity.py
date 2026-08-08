@@ -5,7 +5,6 @@ from sagasmith_core.integrity import (
     json_sha256,
     unique_retired_source_key,
 )
-from sagasmith_core.rule_packs import content_checksum
 
 
 def test_persisted_json_contracts_share_one_canonical_encoding() -> None:
@@ -13,7 +12,6 @@ def test_persisted_json_contracts_share_one_canonical_encoding() -> None:
 
     assert canonical_json(value) == '{"a":{"enabled":true},"z":["雪",1]}'
     assert request_hash(value) == json_sha256(value)
-    assert content_checksum(value) == json_sha256(value)
 
 
 def test_retired_source_keys_share_one_collision_contract() -> None:

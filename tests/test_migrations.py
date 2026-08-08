@@ -200,7 +200,7 @@ def test_branch_continuity_does_not_backfill_existing_campaigns(tmp_path: Path) 
         database.dispose()
 
 
-def test_long_term_memory_v2_backfills_stable_legacy_fact_keys(tmp_path: Path) -> None:
+def test_long_term_memory_v2_backfills_stable_fact_keys(tmp_path: Path) -> None:
     database = Database(sqlite_database_url(tmp_path / "legacy-memory.db"))
     config = alembic_config(database.url)
     with database.engine.begin() as connection:
@@ -245,7 +245,7 @@ def test_long_term_memory_v2_backfills_stable_legacy_fact_keys(tmp_path: Path) -
                 column["name"]
                 for column in inspect(database.engine).get_columns("memory_revisions")
             }
-        assert tuple(row) == ("legacy:memory-1", "", "")
+        assert tuple(row) == ("memory:memory-1", "", "")
         assert tuple(revision) == ("retracted", "[]", 3, "dm")
         assert "active" not in revision_columns
     finally:

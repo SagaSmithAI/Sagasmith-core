@@ -119,9 +119,9 @@ def terms(text: str) -> list[str]:
 
 
 def lexical_score(query: str, *, title: str, content: str) -> float:
-    """Legacy single-field scorer \u2014 kept for backward compatibility.
+    """Score a compact title/content document using the shared lexical model.
 
-    Prefer ``structured_score()`` in new code; it accepts multiple weighted
+    Prefer ``structured_score()`` when structured fields are available; it accepts weighted
     fields (headings, keywords, tags, \u2026) and produces significantly better
     rankings when those fields are populated.
     """

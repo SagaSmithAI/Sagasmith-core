@@ -59,6 +59,39 @@ def _card() -> dict:
     )
 
 
+def _complete_addon_readiness(item_count: int) -> dict:
+    return {
+        "schema_version": 1,
+        "source": {
+            "item_count": item_count,
+            "verified_count": item_count,
+            "complete": True,
+            "blockers": [],
+        },
+        "catalog": {
+            "item_count": item_count,
+            "reviewed_count": item_count,
+            "complete": True,
+            "blockers": [],
+        },
+        "selection": {
+            "applicable_count": item_count,
+            "ready_count": item_count,
+            "not_applicable_count": 0,
+            "complete": True,
+            "blockers": [],
+        },
+        "runtime": {
+            "item_count": item_count,
+            "resolved_count": item_count,
+            "modes": {"kernel_mechanic": item_count},
+            "complete": True,
+            "blockers": [],
+        },
+        "complete": True,
+    }
+
+
 def test_actor_card_is_deterministic_and_tamper_evident() -> None:
     card = _card()
 
@@ -150,14 +183,14 @@ def test_actor_card_image_is_strictly_validated() -> None:
         validate_actor_card(card)
 
 
-def test_legacy_actor_card_remains_importable() -> None:
+def test_actor_card_rejects_retired_schema() -> None:
     card = _card()
     card["payload"]["card_schema"] = "sagasmith.actor-card.v1"
-    card["payload"].pop("image")
     from sagasmith_core.portable import portable_checksum
 
     card["checksum"] = portable_checksum(card)
-    assert validate_actor_card(card)["payload"]["card_schema"].endswith(".v1")
+    with pytest.raises(PortableContentError, match="card_schema must be"):
+        validate_actor_card(card)
 
 
 def test_actor_card_rejects_unstable_database_binding() -> None:
@@ -357,6 +390,7 @@ def test_addon_pack_embeds_exact_components_without_granting_authority() -> None
             "editions": ["2014"],
             "classification": "third_party",
             "content_summary": {"actor_card": 1},
+            "readiness": _complete_addon_readiness(1),
             "activation": {
                 "rule_policy": "none",
                 "preset_policy": "library",
@@ -412,7 +446,7 @@ def test_addon_pack_embeds_exact_components_without_granting_authority() -> None
         validate_addon_pack(self_conflict)
 
 
-def test_addon_readiness_is_strict_consistent_and_optional_for_legacy_packs() -> None:
+def test_addon_readiness_is_strict_and_consistent() -> None:
     readiness = {
         "schema_version": 1,
         "source": {
@@ -637,30 +671,30 @@ def test_module_pack_export_derives_chunk_from_real_scene_content(database) -> N
     assert exported["chunks"][0]["metadata"] == {"derived_from_scene_content": True}
 
 
-def test_module_pack_export_recovers_empty_legacy_scene_from_chunks(database) -> None:
-    campaign = CampaignService(database).create(system_id="dnd5e", name="Scene fallback")
+def test_module_pack_export_rejects_empty_scene_even_when_chunks_remain(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Invalid scene")
     modules = ModuleService(database)
     imported = modules.ingest(
         campaign_id=campaign.id,
-        source_key="example.scene-fallback",
-        title="Scene Fallback",
-        content="# Chapter\nIntro.\n## Indexed Text\nRecovered from the indexed chunk.",
+        source_key="example.invalid-scene",
+        title="Invalid Scene",
+        content="# Chapter\nIntro.\n## Indexed Text\nCurrent scene content.",
     )
     scene = modules.scene_index(campaign.id, module_id=imported.module_id)[0]
-    chunks = modules.list_chunks(campaign.id, imported.module_id, scene_id=scene["scene_id"])
-    expected = "\n\n".join(chunk["content"] for chunk in chunks if chunk["content"].strip())
+    assert modules.list_chunks(
+        campaign.id, imported.module_id, scene_id=scene["scene_id"]
+    )
     with database.transaction() as session:
         row = session.get(ModuleScene, scene["scene_id"])
         assert row is not None
         row.content = ""
 
-    package = modules.export_portable_pack(
-        campaign.id,
-        imported.module_id,
-        portable_id="example.scene-fallback",
-    )
-
-    assert package["payload"]["scene_atlas"][0]["content"] == expected
+    with pytest.raises(ValueError, match="without content-bearing scenes"):
+        modules.export_portable_pack(
+            campaign.id,
+            imported.module_id,
+            portable_id="example.invalid-scene",
+        )
 
 
 def test_module_actor_binding_exports_local_cast_without_runtime_ids(database) -> None:

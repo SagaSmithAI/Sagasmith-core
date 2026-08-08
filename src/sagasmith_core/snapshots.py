@@ -34,7 +34,6 @@ from sagasmith_core.models import (
     Character,
     ContentAddonVersion,
     MemoryRevision,
-    ModuleScene,
     ModuleSource,
     MutationGroup,
     RulePackVersion,
@@ -45,7 +44,7 @@ from sagasmith_core.models import (
     StateRevision,
 )
 from sagasmith_core.rule_profile_contract import (
-    LEGACY_RULE_PROFILE_SETTING_FIELDS,
+    RULE_PROFILE_OWNED_SETTING_FIELDS,
     SNAPSHOT_RULE_PROFILE_FIELDS,
 )
 from sagasmith_core.visibility import (
@@ -870,7 +869,7 @@ class SnapshotService:
             campaign.settings = {
                 key: setting
                 for key, setting in dict(campaign.settings or {}).items()
-                if key not in LEGACY_RULE_PROFILE_SETTING_FIELDS
+                if key not in RULE_PROFILE_OWNED_SETTING_FIELDS
             }
 
         branch = resolve_branch(session, campaign)
@@ -1033,7 +1032,7 @@ class SnapshotService:
     @classmethod
     def _assert_integrity(cls, session, row: CampaignSnapshot) -> None:
         """Verify the full payload, DAG ancestry, and indexed continuity bindings."""
-        if row.schema_version not in {3, 4, 5, 6, cls.SCHEMA_VERSION}:
+        if row.schema_version != cls.SCHEMA_VERSION:
             raise SnapshotIntegrityError(
                 "snapshot schema is unsupported; create a new snapshot with the current runtime"
             )
@@ -1053,53 +1052,49 @@ class SnapshotService:
         }
         if not required.issubset(payload):
             raise SnapshotIntegrityError("snapshot payload is incomplete")
-        if row.schema_version >= 5:
-            active_module_ids = payload.get("module_activations")
-            if (
-                not isinstance(active_module_ids, list)
-                or any(not isinstance(item, str) or not item for item in active_module_ids)
-                or len(active_module_ids) != len(set(active_module_ids))
-            ):
-                raise SnapshotIntegrityError("snapshot module activations are malformed")
-        if row.schema_version >= 7:
-            addon_lock = payload.get("addon_lock")
-            if not isinstance(addon_lock, list):
+        active_module_ids = payload.get("module_activations")
+        if (
+            not isinstance(active_module_ids, list)
+            or any(not isinstance(item, str) or not item for item in active_module_ids)
+            or len(active_module_ids) != len(set(active_module_ids))
+        ):
+            raise SnapshotIntegrityError("snapshot module activations are malformed")
+        addon_lock = payload.get("addon_lock")
+        if not isinstance(addon_lock, list):
+            raise SnapshotIntegrityError("snapshot addon lock is malformed")
+        identities: set[str] = set()
+        rule_locks = {
+            (str(item.get("pack_id") or ""), str(item.get("version") or ""))
+            for item in payload.get("rule_lock") or []
+            if bool(item.get("enabled", True))
+        }
+        for item in addon_lock:
+            if not isinstance(item, dict):
                 raise SnapshotIntegrityError("snapshot addon lock is malformed")
-            identities: set[str] = set()
-            rule_locks = {
-                (str(item.get("pack_id") or ""), str(item.get("version") or ""))
-                for item in payload.get("rule_lock") or []
-                if bool(item.get("enabled", True))
-            }
-            for item in addon_lock:
-                if not isinstance(item, dict):
-                    raise SnapshotIntegrityError("snapshot addon lock is malformed")
-                addon_id = str(item.get("addon_id") or "")
-                if not addon_id or addon_id in identities:
-                    raise SnapshotIntegrityError("snapshot addon lock identities are malformed")
-                identities.add(addon_id)
-                components = item.get("component_locks")
-                if not isinstance(components, list):
+            addon_id = str(item.get("addon_id") or "")
+            if not addon_id or addon_id in identities:
+                raise SnapshotIntegrityError("snapshot addon lock identities are malformed")
+            identities.add(addon_id)
+            components = item.get("component_locks")
+            if not isinstance(components, list):
+                raise SnapshotIntegrityError("snapshot addon component locks are malformed")
+            if bool(item.get("enabled", True)):
+                missing_rule_locks = sorted(
+                    str(component.get("id") or "")
+                    for component in components
+                    if isinstance(component, dict)
+                    and component.get("kind") == "rule_pack"
+                    and (
+                        str(component.get("id") or ""),
+                        str(component.get("version") or ""),
+                    )
+                    not in rule_locks
+                )
+                if missing_rule_locks:
                     raise SnapshotIntegrityError(
-                        "snapshot addon component locks are malformed"
+                        "snapshot addon rule locks are absent from the runtime rule lock: "
+                        + ", ".join(missing_rule_locks)
                     )
-                if bool(item.get("enabled", True)):
-                    missing_rule_locks = sorted(
-                        str(component.get("id") or "")
-                        for component in components
-                        if isinstance(component, dict)
-                        and component.get("kind") == "rule_pack"
-                        and (
-                            str(component.get("id") or ""),
-                            str(component.get("version") or ""),
-                        )
-                        not in rule_locks
-                    )
-                    if missing_rule_locks:
-                        raise SnapshotIntegrityError(
-                            "snapshot addon rule locks are absent from the runtime rule lock: "
-                            + ", ".join(missing_rule_locks)
-                        )
             available_module_ids = set(
                 session.scalars(
                     select(ModuleSource.id).where(
@@ -1147,16 +1142,12 @@ class SnapshotService:
                 or memory.kind != item.get("kind")
                 or memory.subject != item.get("subject")
                 or memory.created_at.isoformat() != item.get("created_at")
-                or (
-                    row.schema_version < 4
-                    and memory.updated_at.isoformat() != item.get("updated_at")
-                )
                 or revision.snapshot_id != revision_item.get("snapshot_id")
                 or revision.content != revision_item.get("content")
                 or dict(revision.metadata_json) != dict(revision_item.get("metadata") or {})
                 or revision.created_at.isoformat() != revision_item.get("created_at")
             )
-            if not invalid and row.schema_version >= 4:
+            if not invalid:
                 invalid = (
                     memory.fact_key != item.get("fact_key")
                     or memory.subject_ref != item.get("subject_ref")
@@ -1262,7 +1253,7 @@ class SnapshotService:
                 or dict(event.payload) != dict(item.get("payload") or {})
                 or event.audience_scope != item.get("audience_scope")
                 or event.created_at.isoformat() != item.get("created_at")
-                or (row.schema_version >= 6 and actual_participants != expected_participants)
+                or actual_participants != expected_participants
             ):
                 raise SnapshotIntegrityError("snapshot event ledger differs from its full payload")
 
@@ -1304,10 +1295,6 @@ class SnapshotService:
         cls._assert_integrity(session, head)
         current = cls._capture(session, campaign, branch.id)
         expected = dict(head.payload)
-        if head.schema_version < 5:
-            # Older snapshots did not capture the active module-revision set.
-            # Do not mistake the new derived field for unsaved branch work.
-            current.pop("module_activations", None)
         # Campaign revision is a live optimistic-concurrency token. Checkout
         # advances it monotonically, so it is not part of worktree dirtiness.
         current_campaign = dict(current.get("campaign") or {})
@@ -1329,59 +1316,21 @@ class SnapshotService:
         """Restore the active module revisions that own playable scene progress."""
 
         explicit_ids = payload.get("module_activations")
-        if explicit_ids is not None:
-            selected_ids = {str(item) for item in explicit_ids}
-            rows = list(
-                session.scalars(
-                    select(ModuleSource).where(ModuleSource.campaign_id == campaign_id)
-                )
-            )
-            available_ids = {row.id for row in rows}
-            if not selected_ids.issubset(available_ids):
-                raise SnapshotIntegrityError(
-                    "snapshot module activation references an unavailable revision"
-                )
-            for row in rows:
-                row.active = row.id in selected_ids
-            return
-
-        # Compatibility for schema 3/4 snapshots: their current scene rows are
-        # the only evidence of the module revisions that were playable. Restore
-        # those logical keys without disturbing unrelated active modules.
-        current_scene_ids = {
-            str(item.get("scene_id") or "")
-            for item in payload.get("scene_progress", [])
-            if item.get("status") == "current" and item.get("scene_id")
-        }
-        if not current_scene_ids:
-            return
-        referenced_modules = list(
+        if not isinstance(explicit_ids, list):
+            raise SnapshotIntegrityError("snapshot module activations are malformed")
+        selected_ids = {str(item) for item in explicit_ids}
+        rows = list(
             session.scalars(
-                select(ModuleSource)
-                .join(ModuleScene, ModuleScene.module_id == ModuleSource.id)
-                .where(
-                    ModuleSource.campaign_id == campaign_id,
-                    ModuleScene.id.in_(current_scene_ids),
-                )
+                select(ModuleSource).where(ModuleSource.campaign_id == campaign_id)
             )
         )
-        referenced_by_key = {
-            str(
-                dict(row.metadata_json or {}).get("logical_source_key")
-                or row.source_key
-            ): row
-            for row in referenced_modules
-        }
-        for row in session.scalars(
-            select(ModuleSource).where(ModuleSource.campaign_id == campaign_id)
-        ):
-            logical_key = str(
-                dict(row.metadata_json or {}).get("logical_source_key")
-                or row.source_key
+        available_ids = {row.id for row in rows}
+        if not selected_ids.issubset(available_ids):
+            raise SnapshotIntegrityError(
+                "snapshot module activation references an unavailable revision"
             )
-            selected = referenced_by_key.get(logical_key)
-            if selected is not None:
-                row.active = row.id == selected.id
+        for row in rows:
+            row.active = row.id in selected_ids
 
     @staticmethod
     def _visible_events(session, campaign_id: str, branch_id: str) -> list[CampaignEvent]:

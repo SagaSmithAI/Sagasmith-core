@@ -37,13 +37,13 @@ def test_character_cannot_bind_across_systems(database) -> None:
         characters.bind(hero.id, coc.id)
 
 
-def test_character_instantiation_can_canonicalize_legacy_template_notes(database) -> None:
+def test_character_instantiation_overrides_template_notes(database) -> None:
     campaigns = CampaignService(database)
     characters = CharacterService(database)
     campaign = campaigns.create(system_id="dnd5e", name="Template notes")
     template = characters.create(
         system_id="dnd5e",
-        name="Legacy monster",
+        name="Template monster",
         character_type="monster",
         notes={"profile": {"summary": ""}},
     )

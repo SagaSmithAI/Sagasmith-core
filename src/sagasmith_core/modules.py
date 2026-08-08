@@ -132,14 +132,6 @@ def _portable_scene_chunks(
     ]
 
 
-def _portable_scene_content(scene: ModuleScene, chunks: Sequence[ModuleChunk]) -> str:
-    """Prefer indexed scene text and recover older rows from their real chunks."""
-
-    if scene.content.strip():
-        return scene.content
-    return "\n\n".join(chunk.content for chunk in chunks if chunk.content.strip()).strip()
-
-
 def _indexed_module_readiness(
     *, source_key: str, scene_count: int, asset_count: int
 ) -> dict[str, Any]:
@@ -1264,7 +1256,7 @@ class ModuleService:
             scenes = [
                 (scene, chapter)
                 for scene, chapter in scenes
-                if _portable_scene_content(scene, chunks_by_scene.get(scene.id, []))
+                if scene.content.strip()
             ]
             if not scenes:
                 raise ValueError("cannot export a module without content-bearing scenes")
@@ -1404,9 +1396,7 @@ class ModuleService:
                     "page_end": scene.page_end,
                     "headings": list(scene.headings),
                     "keywords": list(scene.keywords),
-                    "content": _portable_scene_content(
-                        scene, chunks_by_scene.get(scene.id, [])
-                    ),
+                    "content": scene.content,
                     "chunks": _portable_scene_chunks(
                         scene,
                         chunks_by_scene.get(scene.id, []),
@@ -1418,9 +1408,7 @@ class ModuleService:
                         if key not in {"stable_key", "content_checksum"}
                     },
                     "content_checksum": hashlib.sha256(
-                        _portable_scene_content(
-                            scene, chunks_by_scene.get(scene.id, [])
-                        ).encode("utf-8")
+                        scene.content.encode("utf-8")
                     ).hexdigest(),
                 }
                 for scene, chapter in scenes
@@ -2431,20 +2419,6 @@ class ModuleService:
                     item["scene_id"],
                 ),
             )
-
-    def set_active(self, campaign_id: str, module_id: str, *, active: bool) -> dict[str, Any]:
-        if active:
-            # There is only one activation transaction.  Keep this legacy
-            # convenience API from bypassing logical-key replacement and
-            # branch progress migration.
-            return self.activate_candidate(campaign_id, module_id)
-        with self.database.transaction() as session:
-            row = session.get(ModuleSource, module_id)
-            if row is None or row.campaign_id != campaign_id:
-                raise LookupError(module_id)
-            row.active = False
-            session.flush()
-            return {"module_id": row.id, "active": row.active}
 
     def activate_candidate(
         self,

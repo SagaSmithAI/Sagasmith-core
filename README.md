@@ -42,9 +42,9 @@ Core 不负责主持风格、MCP 工具暴露或具体规则裁决。Agent Skill
 - `actor_card`：PC、NPC 和怪物统一格式，`actor_type` 只表示角色类别。导入总是创建新的本地 identity；数据库 id、campaign、revision、权限和 ActorKnowledge 不会被导出。
 - `module_pack` v2：独立的 `.sagasmith-module` ZIP 归档。JSON 描述文件封装分类、适用版本、推荐人数/等级/升级方式、连续战役策略、精确依赖、标准化文档、签名 Scene Atlas、内容目录、叙事 dossier/关系/结局、审核记录、actor cards、组件锁和七维 readiness；大文件按 SHA-256 放入 `blobs/sha256/`。只有 `playable`/`complete` 可激活。它不封装进度、世界状态、记忆、随机流、分支或 Snapshot。旧 `sagasmith.module-pack.v1` 被直接拒绝，不提供兼容读取。
 - `preset_pack`：可复用 actor card 集合，例如某规则系统随附的标准怪物/NPC 卡库。
-- `actor_card` v2 可内嵌一张带 checksum、媒体类型、许可、署名和来源引用的
-  PNG/JPEG/WebP/AVIF 角色图。图片属于便携卡，不导入运行时角色，也不进入 Snapshot；
-  v1 无图卡仍可导入。
+- `actor_card` v2 必须内嵌一张带 checksum、媒体类型、许可、署名和来源引用的
+  PNG/JPEG/WebP/AVIF 角色图。图片属于便携卡，不导入运行时角色，也不进入 Snapshot。
+  旧 v1 卡被拒绝，不提供兼容读取。
 - `rule_pack`：封装规则 manifest、catalog artifacts、mechanic IR、来源 provenance 与完整检索 source/section/chunk。数据库 UUID 会替换为稳定 `source_key`/`chunk_key`，接收端再创建本地 id；`metadata.definition_checksum` 只锁定规则语义与依赖，不受本地 UUID 或 private/shareable 发布元数据影响。
 - `release_manifest`：只以精确版本与完整 envelope checksum 组合 `rule_pack`、`preset_pack`、`module_pack`；它不是安装、启用或权限载体。
 

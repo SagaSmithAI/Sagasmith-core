@@ -468,33 +468,6 @@ def test_staged_module_reparses_same_content_when_parser_version_changes(databas
     assert second.skipped is False
 
 
-def test_legacy_set_active_uses_the_candidate_activation_transaction(database) -> None:
-    campaign = CampaignService(database).create(system_id="dnd5e", name="One activation path")
-    service = ModuleService(database)
-    current = service.ingest(
-        campaign_id=campaign.id,
-        source_key="module-v1",
-        logical_source_key="module",
-        title="Module",
-        content="# Chapter\n## Opening\nOld.\n",
-        activate=True,
-    )
-    candidate = service.ingest(
-        campaign_id=campaign.id,
-        source_key="module-v2",
-        logical_source_key="module",
-        title="Module",
-        content="# Chapter\n## Opening\nNew.\n",
-        activate=False,
-    )
-
-    activation = service.set_active(campaign.id, candidate.module_id, active=True)
-
-    assert activation["replaced_module_ids"] == [current.module_id]
-    visible = service.list(campaign.id)
-    assert [item["id"] for item in visible] == [candidate.module_id]
-
-
 def test_direct_active_ingest_uses_logical_key_activation_and_progress_migration(
     database,
 ) -> None:

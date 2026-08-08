@@ -52,6 +52,7 @@ from sagasmith_core.documents import (
     _layout_reading_order_text,
     _looks_like_corrupt_visual_heading,
     _ocr_page_layout,
+    _ocr_suspect_pages,
     _page_quality,
     _pdf_form_metadata,
     apply_document_page_revisions,
@@ -740,6 +741,22 @@ def test_pdf_converter_ocr_replaces_only_suspect_pages(tmp_path) -> None:
     assert "RECOVERED HEADING" in document.content
     assert document.metadata["ocr_pages"] == [1]
     assert document.metadata["quality"]["suspect_page_count"] == 0
+
+
+def test_bounded_ocr_rejects_provider_without_page_selection(tmp_path) -> None:
+    class AllPagesOnlyOcr:
+        name = "all-pages-only"
+
+        def extract(self, path):
+            return ["unbounded OCR result"]
+
+    with pytest.raises(TypeError):
+        _ocr_suspect_pages(
+            AllPagesOnlyOcr(),
+            tmp_path / "source.pdf",
+            ["embedded text"],
+            [1],
+        )
 
 
 def test_pdf_converter_ocr_repairs_unmatched_text_bearing_bookmark(
@@ -1739,7 +1756,7 @@ def test_campaign_profile_events_snapshot_and_memory(database) -> None:
     payload = saves.get(campaign.id, first.slot)["payload"]
     assert payload["events"][0]["summary"] == "The door is found"
     assert payload["memories"][0]["revision"]["content"].endswith("locked.")
-    assert payload["memories"][0]["fact_key"].startswith("legacy:")
+    assert payload["memories"][0]["fact_key"].startswith("memory:")
     assert payload["memories"][0]["revision"]["status"] == "active"
     campaigns.update(campaign.id, state={"door": "open"})
     CharacterService(database).update(character.id, sheet={"hp": 4}, notes={"memories": []})

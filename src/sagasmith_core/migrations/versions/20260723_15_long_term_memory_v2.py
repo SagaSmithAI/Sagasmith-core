@@ -66,7 +66,7 @@ def upgrade() -> None:
                         "predicate", sa.String(length=200), nullable=False, server_default=""
                     )
                 )
-    op.execute("UPDATE campaign_memories SET fact_key = 'legacy:' || id WHERE fact_key IS NULL")
+    op.execute("UPDATE campaign_memories SET fact_key = 'memory:' || id WHERE fact_key IS NULL")
     memory_columns = _columns("campaign_memories")
     needs_not_null = bool(memory_columns["fact_key"].get("nullable", True))
     needs_unique = "uq_campaign_memory_fact_key" not in _unique_constraints(

@@ -2475,12 +2475,7 @@ def _ocr_suspect_pages(
             if used_columns:
                 layout_pages.append(int(layout.page_number))
     else:
-        try:
-            extracted = provider.extract(source, page_numbers=page_numbers)
-        except TypeError:
-            # Compatibility with providers implementing the original all-pages contract.
-            all_pages = provider.extract(source)
-            extracted = [all_pages[page_number - 1] for page_number in page_numbers]
+        extracted = provider.extract(source, page_numbers=page_numbers)
     if len(extracted) != len(page_numbers):
         raise DocumentQualityError(
             "pdf_ocr_page_mismatch",

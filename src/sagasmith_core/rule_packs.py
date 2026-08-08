@@ -12,7 +12,6 @@ from sagasmith_core.branches import resolve_branch
 from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.database import Database
 from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
-from sagasmith_core.integrity import canonical_json as _canonical_json
 from sagasmith_core.integrity import json_sha256
 from sagasmith_core.models import (
     Campaign,
@@ -73,18 +72,6 @@ class EffectiveRulesetInfo:
     mechanics: tuple[dict[str, Any], ...]
 
 
-def canonical_json(value: Any) -> str:
-    """Compatibility name for the shared canonical JSON encoder."""
-
-    return _canonical_json(value)
-
-
-def content_checksum(value: Any) -> str:
-    """Compatibility name for the shared canonical JSON hash."""
-
-    return json_sha256(value)
-
-
 class RulePackService:
     """Owns pack lifecycle; install and campaign activation are deliberately separate."""
 
@@ -109,7 +96,7 @@ class RulePackService:
             report["valid"] = False
         pack_id = str(manifest.get("id") or "")
         version = str(manifest.get("version") or "")
-        checksum = content_checksum(
+        checksum = json_sha256(
             {"manifest": manifest, "artifacts": artifacts, "mechanics": mechanics}
         )
         if (
@@ -191,22 +178,20 @@ class RulePackService:
                 raise LookupError(f"{pack_id}@{version}")
             return self._version_info(row)
 
-    def provenance(self, pack_id: str, version: str | None = None) -> dict[str, Any]:
-        """Return exact-version provenance, falling back to legacy pack metadata."""
+    def provenance(self, pack_id: str, version: str) -> dict[str, Any]:
+        """Return provenance for one exact immutable pack version."""
 
         with self.database.transaction() as session:
             row = session.get(RulePack, pack_id)
             if row is None:
                 raise LookupError(pack_id)
-            if version is not None:
-                version_row = session.get(
-                    RulePackVersion,
-                    {"pack_id": pack_id, "version": version},
-                )
-                if version_row is None:
-                    raise LookupError(f"{pack_id}@{version}")
-                return dict(version_row.provenance or {})
-            return dict(row.provenance or {})
+            version_row = session.get(
+                RulePackVersion,
+                {"pack_id": pack_id, "version": version},
+            )
+            if version_row is None:
+                raise LookupError(f"{pack_id}@{version}")
+            return dict(version_row.provenance or {})
 
     def remove_version(self, pack_id: str, version: str) -> None:
         """Remove an unreferenced version; historical branch locks are never broken."""
@@ -763,7 +748,7 @@ class RulePackService:
                         raise RulePackError(
                             f"patch target is unavailable or requires a native provider: {target}"
                         )
-                    if content_checksum(target_mechanic) != expected:
+                    if json_sha256(target_mechanic) != expected:
                         raise RulePackError(f"patch checksum mismatch for {target}")
                     patch_targets.add(target)
                 mechanics.append(dict(mechanic))
@@ -790,7 +775,7 @@ class RulePackService:
             branch_id=branch_id,
             system_id=campaign.system_id,
             edition=profile.edition if profile else "",
-            fingerprint=content_checksum(base),
+            fingerprint=json_sha256(base),
             lock=lock,
             mechanics=tuple(mechanics),
         )

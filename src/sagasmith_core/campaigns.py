@@ -25,8 +25,8 @@ from sagasmith_core.models import (
     Principal,
 )
 from sagasmith_core.rule_profile_contract import (
-    LEGACY_RULE_PROFILE_SETTING_FIELDS,
     RULE_PROFILE_FIELDS,
+    RULE_PROFILE_OWNED_SETTING_FIELDS,
 )
 from sagasmith_core.text import ascii_slug
 
@@ -111,7 +111,7 @@ class CampaignService:
                 )
         normalized_settings = dict(settings or {})
         if normalized_profile is not None:
-            for field in LEGACY_RULE_PROFILE_SETTING_FIELDS:
+            for field in RULE_PROFILE_OWNED_SETTING_FIELDS:
                 normalized_settings.pop(field, None)
         payload = {
             "system_id": system_id,

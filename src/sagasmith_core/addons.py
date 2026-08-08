@@ -700,12 +700,11 @@ class AddonService:
             if not isinstance(raw_manual_options, dict):
                 raise AddonError("stored manual rule options are invalid")
             manual_options = dict(raw_manual_options)
-            # Compatibility for addon rows created before per-owner option
-            # accounting existed: every recorded owner conservatively retains
-            # the legacy effective options until that owner is disabled.
             if owners and not owner_options and stored:
-                owner_options = {owner: dict(stored) for owner in owners}
-                stored = {}
+                raise AddonError(
+                    "stored addon rule options predate owner accounting; "
+                    "reinstall the affected addon release"
+                )
             if enabled:
                 if row.enabled and not owners:
                     manual_owner = True

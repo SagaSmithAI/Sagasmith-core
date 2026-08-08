@@ -46,7 +46,7 @@ def _stored_response(response: dict[str, Any]) -> dict[str, Any]:
 
 
 def _public_response(stored: dict[str, Any]) -> dict[str, Any]:
-    """Decode one response envelope while accepting legacy uncompressed rows."""
+    """Decode a response stored either directly or in the compressed envelope."""
 
     if stored.get("_sagasmith_encoding") != _COMPRESSED_RESPONSE_MARKER:
         return dict(stored)

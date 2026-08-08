@@ -21,22 +21,18 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sagasmith_core.clock import operational_utcnow
 
 
-def utcnow() -> datetime:
-    """Compatibility alias for the shared operational wall clock."""
-
-    return operational_utcnow()
-
-
 class Base(DeclarativeBase):
     pass
 
 
 class TimestampMixin:
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=operational_utcnow
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=utcnow,
-        onupdate=utcnow,
+        default=operational_utcnow,
+        onupdate=operational_utcnow,
     )
 
 
@@ -283,8 +279,8 @@ class SceneProgress(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(32), default="current")
     progress: Mapped[int] = mapped_column(Integer, default=0)
     current_room: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    # ``current_room`` is retained as a human-readable compatibility field.  A
-    # profile may additionally provide a stable spatial location key so room
+    # ``current_room`` is a human-readable label. A profile may additionally
+    # provide a stable spatial location key so room
     # renames do not break branch-local progress or a temporary battle map.
     current_location_key: Mapped[str | None] = mapped_column(String(300), nullable=True)
     state_version: Mapped[int] = mapped_column(Integer, default=1)
@@ -333,7 +329,9 @@ class RulePackVersion(Base):
     checksum: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(32), default="draft", index=True)
     validation_report: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=operational_utcnow
+    )
 
 
 class CampaignRuleActivation(TimestampMixin, Base):
@@ -387,7 +385,9 @@ class ContentAddonVersion(Base):
     checksum: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(32), default="imported", index=True)
     validation_report: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=operational_utcnow
+    )
 
 
 class CampaignAddonActivation(TimestampMixin, Base):
@@ -439,7 +439,9 @@ class CampaignEvent(Base):
     committed_snapshot_id: Mapped[str | None] = mapped_column(
         ForeignKey("campaign_snapshots.id", ondelete="SET NULL"), nullable=True, index=True
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=operational_utcnow
+    )
 
 
 class CampaignEventParticipant(Base):
@@ -495,7 +497,9 @@ class StateRevision(Base):
     after: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     applied: Mapped[bool] = mapped_column(Boolean, default=True)
     redoable: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=operational_utcnow
+    )
 
 
 class MutationGroup(Base):
@@ -526,7 +530,9 @@ class MutationGroup(Base):
     request_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     applied: Mapped[bool] = mapped_column(Boolean, default=True)
     redoable: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=operational_utcnow
+    )
 
 
 class RuleResolutionReceipt(Base):
@@ -552,7 +558,9 @@ class RuleResolutionReceipt(Base):
     mechanic_id: Mapped[str] = mapped_column(String(300), nullable=False)
     event: Mapped[str] = mapped_column(String(100), nullable=False)
     receipt: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=operational_utcnow
+    )
 
 
 class IdempotencyRecord(Base):
@@ -575,7 +583,9 @@ class IdempotencyRecord(Base):
         ForeignKey("mutation_groups.id", ondelete="SET NULL"), nullable=True
     )
     response: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=operational_utcnow
+    )
 
 
 class Principal(Base):
@@ -591,7 +601,9 @@ class Principal(Base):
     external_id: Mapped[str] = mapped_column(String(200), nullable=False)
     display_name: Mapped[str] = mapped_column(String(200), default="")
     is_service: Mapped[bool] = mapped_column(Boolean, default=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=operational_utcnow
+    )
 
 
 class CampaignMembership(Base):
@@ -609,7 +621,9 @@ class CampaignMembership(Base):
         ForeignKey("principals.id", ondelete="CASCADE"), primary_key=True
     )
     role: Mapped[str] = mapped_column(String(32), default="player")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=operational_utcnow
+    )
 
 
 class ActorGrant(Base):
@@ -629,7 +643,9 @@ class ActorGrant(Base):
     actor_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     can_control: Mapped[bool] = mapped_column(Boolean, default=False)
     can_view_private: Mapped[bool] = mapped_column(Boolean, default=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=operational_utcnow
+    )
 
 
 class AuditLog(Base):
@@ -652,7 +668,9 @@ class AuditLog(Base):
     actor: Mapped[str] = mapped_column(String(100), default="runtime")
     before: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     after: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=operational_utcnow
+    )
 
 
 class CampaignSnapshot(Base):
@@ -679,7 +697,9 @@ class CampaignSnapshot(Base):
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     checksum: Mapped[str] = mapped_column(String(64), nullable=False)
     recap: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=operational_utcnow
+    )
 
 
 class CampaignMemory(TimestampMixin, Base):
@@ -725,7 +745,9 @@ class MemoryRevision(Base):
     source_event_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
     importance: Mapped[int] = mapped_column(Integer, default=3)
     disclosure_scope: Mapped[str] = mapped_column(String(32), default="dm")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=operational_utcnow
+    )
 
 
 class CampaignBranch(TimestampMixin, Base):
@@ -813,7 +835,9 @@ class ActorKnowledge(Base):
     actor_id: Mapped[str] = mapped_column(String(36), index=True)
     knowledge_key: Mapped[str] = mapped_column(String(200), nullable=False)
     subject_ref: Mapped[str] = mapped_column(String(200), default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=operational_utcnow
+    )
 
 
 class ActorKnowledgeRevision(Base):
@@ -834,7 +858,9 @@ class ActorKnowledgeRevision(Base):
     )
     cause: Mapped[str] = mapped_column(String(64), default="witnessed")
     disclosure_scope: Mapped[str] = mapped_column(String(200), default="dm")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=operational_utcnow
+    )
 
 
 class BranchActorKnowledgeHead(Base):

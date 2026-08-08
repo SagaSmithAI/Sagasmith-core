@@ -38,8 +38,10 @@ Core does not decide GM style, MCP exposure, or system-specific rules. Skills ow
 canonical JSON and SHA-256 checksums:
 
 - `actor_card` is the shared PC/NPC/monster form; `actor_type` selects the role.
-  Import creates a fresh local identity. Database ids, campaign ids, revisions,
-  access grants, and ActorKnowledge are never exported.
+  Version 2 requires one checksum-protected PNG/JPEG/WebP/AVIF portrait with
+  license, attribution, and source references. Import creates a fresh local
+  identity. Database ids, campaign ids, revisions, access grants, and
+  ActorKnowledge are never exported. Version 1 cards are rejected.
 - `module_pack` v2 is an independent `.sagasmith-module` ZIP archive. Its JSON
   descriptor carries classification, edition compatibility, party/level/
   advancement guidance, continuity policy, exact dependencies, normalized
