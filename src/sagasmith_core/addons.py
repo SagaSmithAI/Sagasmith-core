@@ -19,7 +19,6 @@ from sagasmith_core.models import (
     CampaignSnapshot,
     ContentAddon,
     ContentAddonVersion,
-    ModuleSource,
     RulePackVersion,
 )
 from sagasmith_core.portable import validate_addon_pack
@@ -86,14 +85,6 @@ class AddonService:
                 )
             elif component["kind"] == "preset_pack":
                 cards = list(component["payload"]["cards"])
-                embedded_content["actor_card"] += len(cards)
-                embedded_content.update(
-                    str(dict(card.get("payload") or {}).get("actor_type") or "actor")
-                    for card in cards
-                )
-            elif component["kind"] == "module_pack":
-                embedded_content["module"] += 1
-                cards = list(component["payload"].get("actor_cards") or [])
                 embedded_content["actor_card"] += len(cards)
                 embedded_content.update(
                     str(dict(card.get("payload") or {}).get("actor_type") or "actor")
@@ -363,14 +354,12 @@ class AddonService:
         addon_id: str,
         version: str,
         enabled: bool = True,
-        component_receipts: list[dict[str, Any]] | None = None,
         options: dict[str, Any] | None = None,
         branch_id: str | None = None,
         expected_campaign_revision: int | None = None,
     ) -> AddonActivationInfo:
         """Atomically lock an addon and all of its rule components to a branch."""
 
-        receipts = [dict(item) for item in component_receipts or []]
         addon_options = dict(options or {})
         with self.database.transaction() as session:
             campaign = session.get(Campaign, campaign_id)
@@ -425,7 +414,6 @@ class AddonService:
                         f"{row.version}@{row.checksum}"
                     )
             previous_version = None
-            previous_component_locks: list[dict[str, Any]] = []
             previous_options: dict[str, Any] = {}
             if (
                 enabled
@@ -439,7 +427,6 @@ class AddonService:
                 )
                 if previous_version is None or previous_version.checksum != row.checksum:
                     raise AddonError("the active addon version is unavailable for replacement")
-                previous_component_locks = [dict(item) for item in row.component_locks or []]
                 previous_options = dict(row.options or {})
             if row is None:
                 row = CampaignAddonActivation(
@@ -448,20 +435,6 @@ class AddonService:
                     addon_id=addon_id,
                 )
                 session.add(row)
-            effective_receipts = receipts
-            if not enabled and not receipts:
-                effective_receipts = [
-                    dict(item)
-                    for item in row.component_locks or []
-                    if item.get("kind") == "module_pack" and item.get("module_id")
-                ]
-            receipt_locks = self._validate_receipts(
-                session,
-                campaign,
-                version_row,
-                effective_receipts,
-                require_campaign_modules=enabled,
-            )
             if previous_version is not None:
                 self._set_rule_component_ownership(
                     session,
@@ -472,17 +445,10 @@ class AddonService:
                     enabled=False,
                     addon_options=previous_options,
                 )
-                self._set_module_component_ownership(
-                    session,
-                    addon_id=addon_id,
-                    manifest=dict(previous_version.manifest or {}),
-                    component_locks=previous_component_locks,
-                    enabled=False,
-                )
             row.version = version
             row.checksum = version_row.checksum
             row.enabled = bool(enabled)
-            row.component_locks = receipt_locks
+            row.component_locks = [dict(item) for item in version_row.components]
             row.options = addon_options
             self._set_rule_component_ownership(
                 session,
@@ -492,13 +458,6 @@ class AddonService:
                 components=list(version_row.components),
                 enabled=enabled,
                 addon_options=addon_options,
-            )
-            self._set_module_component_ownership(
-                session,
-                addon_id=addon_id,
-                manifest=version_row.manifest,
-                component_locks=receipt_locks,
-                enabled=enabled,
             )
             campaign.revision += 1
             session.flush()
@@ -567,8 +526,6 @@ class AddonService:
         equivalence_verifications: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         kind = str(component["kind"])
-        if kind == "module_pack":
-            return {**dict(component), "status": "campaign_import_required"}
         row = session.get(
             RulePackVersion,
             {"pack_id": component["id"], "version": component["version"]},
@@ -615,8 +572,6 @@ class AddonService:
                 dict(component),
                 equivalence_verifications=verifications,
             )
-            if component["kind"] == "module_pack":
-                continue
             if status["status"] != "installed":
                 errors.append(
                     f"{component['kind']}:{component['id']}@{component['version']} "
@@ -628,63 +583,6 @@ class AddonService:
                     f"checksum is {status['checksum_status']}"
                 )
         return errors
-
-    @staticmethod
-    def _validate_receipts(
-        session,
-        campaign: Campaign,
-        row: ContentAddonVersion,
-        receipts: list[dict[str, Any]],
-        *,
-        require_campaign_modules: bool,
-    ) -> list[dict[str, Any]]:
-        by_identity = {
-            (str(item.get("kind") or ""), str(item.get("id") or "")): item for item in receipts
-        }
-        if len(by_identity) != len(receipts):
-            raise AddonError("addon component receipts must have unique kind/id identities")
-        result = []
-        component_identities = {(str(item["kind"]), str(item["id"])) for item in row.components}
-        unknown = sorted(set(by_identity) - component_identities)
-        if unknown:
-            raise AddonError(
-                "addon component receipts reference unknown components: "
-                + ", ".join(f"{kind}:{identifier}" for kind, identifier in unknown)
-            )
-        module_policy = str(dict(row.manifest.get("activation") or {}).get("module_policy"))
-        for component in row.components:
-            lock = dict(component)
-            receipt = by_identity.get((component["kind"], component["id"]), {})
-            if component["kind"] == "module_pack":
-                if require_campaign_modules and module_policy == "campaign" and not receipt:
-                    raise AddonError(
-                        f"addon module {component['id']} requires a campaign import receipt"
-                    )
-                if receipt:
-                    module_id = str(receipt.get("module_id") or "")
-                    module = session.get(ModuleSource, module_id)
-                    portable = (
-                        dict(dict(module.metadata_json or {}).get("portable_package") or {})
-                        if module is not None
-                        else {}
-                    )
-                    if (
-                        module is None
-                        or module.campaign_id != campaign.id
-                        or portable.get("id") != component["id"]
-                        or portable.get("version") != component["version"]
-                        or portable.get("checksum") != component["checksum"]
-                    ):
-                        raise AddonError(
-                            f"addon module receipt is not active in campaign: {component['id']}"
-                        )
-                    lock["module_id"] = module_id
-            elif receipt:
-                allowed = {"kind", "id", "status"}
-                if set(receipt) - allowed:
-                    raise AddonError("global component receipts contain unsupported fields")
-            result.append(lock)
-        return result
 
     @staticmethod
     def _assert_addon_conflicts(
@@ -845,44 +743,6 @@ class AddonService:
                 },
                 "_manual_options": manual_options if manual_owner else {},
             }
-
-    @staticmethod
-    def _set_module_component_ownership(
-        session,
-        *,
-        addon_id: str,
-        manifest: dict[str, Any],
-        component_locks: list[dict[str, Any]],
-        enabled: bool,
-    ) -> None:
-        """Activate campaign modules in the same transaction as the addon lock."""
-
-        if str(dict(manifest.get("activation") or {}).get("module_policy")) != "campaign":
-            return
-        for lock in component_locks:
-            if lock.get("kind") != "module_pack" or not lock.get("module_id"):
-                continue
-            module = session.get(ModuleSource, str(lock["module_id"]))
-            if module is None:
-                raise AddonError(f"addon module receipt disappeared: {lock['id']}")
-            metadata = dict(module.metadata_json or {})
-            ownership = dict(metadata.get("addon_ownership") or {})
-            owners = {str(item) for item in ownership.get("addon_ids", []) if str(item)}
-            manual_owner = bool(ownership.get("manual_activation_preserved", False))
-            if enabled:
-                if module.active and not owners:
-                    manual_owner = True
-                owners.add(addon_id)
-                module.active = True
-            else:
-                owners.discard(addon_id)
-                if not owners and not manual_owner:
-                    module.active = False
-            metadata["addon_ownership"] = {
-                "addon_ids": sorted(owners),
-                "manual_activation_preserved": manual_owner,
-            }
-            module.metadata_json = metadata
 
     @staticmethod
     def _version_info(row: ContentAddonVersion, addon: ContentAddon) -> AddonVersionInfo:

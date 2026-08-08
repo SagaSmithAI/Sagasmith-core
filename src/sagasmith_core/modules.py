@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import re
 import uuid
@@ -139,6 +138,74 @@ def _portable_scene_content(scene: ModuleScene, chunks: Sequence[ModuleChunk]) -
     if scene.content.strip():
         return scene.content
     return "\n\n".join(chunk.content for chunk in chunks if chunk.content.strip()).strip()
+
+
+def _indexed_module_readiness(
+    *, source_key: str, scene_count: int, asset_count: int
+) -> dict[str, Any]:
+    def blocker(code: str, message: str) -> dict[str, Any]:
+        return {"code": code, "message": message, "source_refs": []}
+
+    dimensions = {
+        "source": {"complete": True, "item_count": 1, "blockers": []},
+        "structure": {
+            "complete": True,
+            "item_count": scene_count,
+            "blockers": [],
+        },
+        "play_profile": {
+            "complete": False,
+            "item_count": 0,
+            "blockers": [
+                blocker(
+                    "play_profile_unreviewed",
+                    "Recommended party size, levels, advancement, and "
+                    "pregenerated characters require review.",
+                )
+            ],
+        },
+        "catalog": {
+            "complete": False,
+            "item_count": 0,
+            "blockers": [
+                blocker(
+                    "catalog_unreviewed",
+                    "Module actors, encounters, items, hazards, and handouts require review.",
+                )
+            ],
+        },
+        "narrative": {
+            "complete": False,
+            "item_count": 0,
+            "blockers": [
+                blocker(
+                    "narrative_unreviewed",
+                    "Narrative dossiers, relationships, contingencies, and endings require review.",
+                )
+            ],
+        },
+        "runtime": {
+            "complete": False,
+            "item_count": 0,
+            "blockers": [
+                blocker(
+                    "runtime_unreviewed",
+                    "Runtime dependencies and campaign activation require review.",
+                )
+            ],
+        },
+        "portability": {
+            "complete": True,
+            "item_count": asset_count,
+            "blockers": [],
+        },
+    }
+    return {
+        "schema_version": 1,
+        "level": "indexed",
+        "dimensions": dimensions,
+        "complete": False,
+    }
 
 
 def clean_source_evidence_text(value: Any) -> str:
@@ -1128,6 +1195,9 @@ class ModuleService:
                     "runtime_manifest": dict(row.metadata_json or {}).get(
                         "runtime_manifest"
                     ),
+                    "portable_package": dict(row.metadata_json or {}).get(
+                        "portable_package"
+                    ),
                     "chapters": self._counts(session, row.id)[0],
                     "scenes": self._counts(session, row.id)[1],
                     "chunks": self._counts(session, row.id)[2],
@@ -1146,6 +1216,11 @@ class ModuleService:
         metadata: dict[str, Any] | None = None,
         dependencies: Sequence[dict[str, Any]] | None = None,
         asset_loader: Callable[[str], bytes] | None = None,
+        blob_sink: Callable[[str, bytes], None] | None = None,
+        manifest: dict[str, Any] | None = None,
+        catalogs: dict[str, Any] | None = None,
+        narrative: dict[str, Any] | None = None,
+        readiness: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Export one immutable module revision as a self-contained package.
 
@@ -1232,6 +1307,8 @@ class ModuleService:
                         "module asset bytes are unavailable; provide asset_loader for a "
                         f"self-contained export: {asset.source_path}"
                     )
+                if blob_sink is not None:
+                    blob_sink(asset.checksum, content)
                 asset_payload.append(
                     {
                         "asset_key": asset_keys[asset.id],
@@ -1239,11 +1316,7 @@ class ModuleService:
                         "media_type": asset.media_type,
                         "checksum": asset.checksum,
                         "size": len(content) if content is not None else 0,
-                        "data_base64": (
-                            base64.b64encode(content).decode("ascii")
-                            if content is not None
-                            else None
-                        ),
+                        "blob_key": f"blobs/sha256/{asset.checksum}",
                         "normalized_content": asset.normalized_content,
                         "metadata": dict(asset.metadata_json or {}),
                     }
@@ -1276,11 +1349,15 @@ class ModuleService:
                     if not chunk_ids or any(chunk_id not in chunks for chunk_id in chunk_ids):
                         raise ValueError("content review refers to unknown module chunks")
                     portable_evidence = {
-                        "chunk_hashes": [
-                            chunks[chunk_id].content_hash
-                            or hashlib.sha256(chunks[chunk_id].content.encode("utf-8")).hexdigest()
-                            for chunk_id in chunk_ids
-                        ],
+                        "chunk_hashes": list(
+                            dict.fromkeys(
+                                chunks[chunk_id].content_hash
+                                or hashlib.sha256(
+                                    chunks[chunk_id].content.encode("utf-8")
+                                ).hexdigest()
+                                for chunk_id in chunk_ids
+                            )
+                        ),
                         "reviewer": evidence.get("reviewer"),
                         "observation": evidence.get("observation"),
                     }
@@ -1413,10 +1490,49 @@ class ModuleService:
                     )
                     for portable_actor_id, (character, bindings) in grouped.items()
                 ]
+            module_manifest = manifest or {
+                "title": source.title,
+                "classification": str(
+                    source_metadata.get("module_classification") or "adventure"
+                ),
+                "compatibility": {
+                    "editions": list(source_metadata.get("editions") or []),
+                    "required_capabilities": ["module_pack_v2"],
+                },
+                "play_profile": {
+                    "party_size": {"minimum": None, "maximum": None, "source_refs": []},
+                    "starting_level": {"value": None, "source_refs": []},
+                    "expected_end_level": {"value": None, "source_refs": []},
+                    "advancement": {
+                        "modes": ["unknown"],
+                        "recommended": "unknown",
+                        "source_refs": [],
+                    },
+                    "pregenerated_characters": {
+                        "available": False,
+                        "applicability": "Not reviewed",
+                        "source_refs": [],
+                    },
+                },
+                "continuity": {
+                    "series_id": source_metadata.get("series_id"),
+                    "order": source_metadata.get("series_order"),
+                    "continues_from": source_metadata.get("continues_from"),
+                    "state_policy": dict(source_metadata.get("state_policy") or {}),
+                },
+                "activation": {"mode": "campaign_attach", "default_active": False},
+                "content_summary": {},
+            }
+            module_readiness = readiness or _indexed_module_readiness(
+                source_key=source_key,
+                scene_count=len(scene_atlas),
+                asset_count=len(asset_payload),
+            )
             return build_module_pack(
                 portable_id=portable_id,
                 version=version,
                 system_id=source.system_id,
+                manifest=module_manifest,
                 source={
                     "source_key": source_key,
                     "title": source.title,
@@ -1433,6 +1549,9 @@ class ModuleService:
                 assets=asset_payload,
                 content_reviews=review_payload,
                 actors=actors,
+                catalogs=catalogs,
+                narrative=narrative,
+                readiness=module_readiness,
                 metadata=metadata,
                 dependencies=dependencies,
             )
@@ -1446,7 +1565,8 @@ class ModuleService:
         embedder: Embedder | None = None,
         vector_store: VectorStore | None = None,
         activate: bool = True,
-        asset_writer: Callable[[str, dict[str, Any]], str] | None = None,
+        asset_loader: Callable[[dict[str, Any]], bytes] | None = None,
+        asset_writer: Callable[[str, dict[str, Any], bytes], str] | None = None,
     ) -> dict[str, Any]:
         """Import a portable module and remap logical evidence references."""
 
@@ -1493,11 +1613,20 @@ class ModuleService:
             )
 
         asset_map: dict[str, str] = {}
-        if payload["assets"] and asset_writer is None:
-            raise ValueError("asset_writer is required to import module package assets")
+        if payload["assets"] and (asset_loader is None or asset_writer is None):
+            raise ValueError(
+                "asset_loader and asset_writer are required to import module package assets"
+            )
         for asset in payload["assets"]:
+            assert asset_loader is not None
             assert asset_writer is not None
-            path = asset_writer(ingest_result.module_id, dict(asset))
+            content = asset_loader(dict(asset))
+            if (
+                len(content) != asset["size"]
+                or hashlib.sha256(content).hexdigest() != asset["checksum"]
+            ):
+                raise ValueError("portable module asset blob does not match descriptor")
+            path = asset_writer(ingest_result.module_id, dict(asset), content)
             registered = self.register_asset(
                 campaign_id=campaign_id,
                 module_id=ingest_result.module_id,
@@ -1576,6 +1705,8 @@ class ModuleService:
             "asset_map": asset_map,
             "content_review_ids": imported_reviews,
             "actor_cards": list(payload["actors"]),
+            "manifest": dict(payload["manifest"]),
+            "readiness": dict(payload["readiness"]),
         }
 
     def bind_actor(

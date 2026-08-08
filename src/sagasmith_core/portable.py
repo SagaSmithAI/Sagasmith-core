@@ -11,8 +11,10 @@ from __future__ import annotations
 import base64
 import copy
 import hashlib
+import io
 import json
 import re
+import zipfile
 from typing import Any, Mapping, Sequence
 
 from sagasmith_core.parsing import MAX_RULE_SECTION_TITLE_CHARS
@@ -37,7 +39,40 @@ ACTOR_CARD_IMAGE_MEDIA_TYPES = frozenset(
     {"image/avif", "image/jpeg", "image/png", "image/webp"}
 )
 MAX_ACTOR_CARD_IMAGE_BYTES = 8 * 1024 * 1024
-MODULE_PACK_SCHEMA = "sagasmith.module-pack.v1"
+MODULE_PACK_SCHEMA = "sagasmith.module-pack.v2"
+MODULE_READINESS_SCHEMA_VERSION = 1
+MODULE_COMPONENT_NAMES = (
+    "source",
+    "document",
+    "scene_atlas",
+    "assets",
+    "content_reviews",
+    "actors",
+    "catalogs",
+    "narrative",
+)
+MODULE_CLASSIFICATIONS = frozenset(
+    {
+        "campaign",
+        "adventure",
+        "campaign_chapter",
+        "supplement",
+        "dm_guide",
+        "player_aid",
+        "map_pack",
+        "pregenerated_character_pack",
+    }
+)
+MODULE_READINESS_LEVELS = ("draft", "indexed", "playable", "complete")
+MODULE_READINESS_DIMENSIONS = (
+    "source",
+    "structure",
+    "play_profile",
+    "catalog",
+    "narrative",
+    "runtime",
+    "portability",
+)
 PRESET_PACK_SCHEMA = "sagasmith.preset-pack.v1"
 RELEASE_MANIFEST_SCHEMA = "sagasmith.release-manifest.v1"
 RULE_PACK_SCHEMA = "sagasmith.rule-pack.v1"
@@ -382,21 +417,369 @@ def _validate_actor_card_image(image: Any) -> None:
         _required_text(image[field], f"actor_card.image.{field}", maximum=maximum)
 
 
+def _empty_module_catalogs() -> dict[str, list[dict[str, Any]]]:
+    return {
+        "items": [],
+        "encounters": [],
+        "hazards": [],
+        "handouts": [],
+        "mechanics": [],
+    }
+
+
+def _empty_module_narrative() -> dict[str, list[dict[str, Any]]]:
+    return {"dossiers": [], "endings": []}
+
+
+def _module_content_summary(components: Mapping[str, Any]) -> dict[str, int]:
+    catalogs = dict(components["catalogs"])
+    narrative = dict(components["narrative"])
+    return {
+        "scenes": len(components["scene_atlas"]),
+        "assets": len(components["assets"]),
+        "content_reviews": len(components["content_reviews"]),
+        "actors": len(components["actors"]),
+        "catalog_entries": sum(len(value) for value in catalogs.values()),
+        "dossiers": len(narrative["dossiers"]),
+        "endings": len(narrative["endings"]),
+    }
+
+
+def _validate_module_source_refs(value: Any, field: str) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        raise PortableContentError(f"{field} must be an array")
+    result = copy.deepcopy(value)
+    for index, item in enumerate(result):
+        item_field = f"{field}[{index}]"
+        if not isinstance(item, dict):
+            raise PortableContentError(f"{item_field} must be an object")
+        _exact_fields(
+            item,
+            {"source_key", "page", "chunk_hash", "note"},
+            item_field,
+        )
+        _required_text(item["source_key"], f"{item_field}.source_key", maximum=200)
+        page = item["page"]
+        if page is not None and (
+            isinstance(page, bool) or not isinstance(page, int) or page < 1
+        ):
+            raise PortableContentError(f"{item_field}.page must be null or positive")
+        chunk_hash = item["chunk_hash"]
+        if chunk_hash is not None and (
+            not isinstance(chunk_hash, str) or not _SHA256_RE.fullmatch(chunk_hash)
+        ):
+            raise PortableContentError(f"{item_field}.chunk_hash must be null or SHA-256")
+        if page is None and chunk_hash is None:
+            raise PortableContentError(f"{item_field} requires page or chunk_hash")
+        if not isinstance(item["note"], str):
+            raise PortableContentError(f"{item_field}.note must be a string")
+    return result
+
+
+def _validate_module_ref_targets(
+    refs: Sequence[Mapping[str, Any]],
+    *,
+    field: str,
+    source_key: str,
+    chunk_hashes: set[str],
+) -> None:
+    """Reject citations that cannot be resolved inside the signed module source."""
+
+    for index, ref in enumerate(refs):
+        if ref["source_key"] != source_key:
+            raise PortableContentError(f"{field}[{index}].source_key is not packaged")
+        chunk_hash = ref["chunk_hash"]
+        if chunk_hash is not None and chunk_hash not in chunk_hashes:
+            raise PortableContentError(f"{field}[{index}].chunk_hash is not packaged")
+
+
+def _validate_module_manifest(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise PortableContentError("module_pack.manifest must be an object")
+    result = copy.deepcopy(value)
+    _exact_fields(
+        result,
+        {
+            "title",
+            "classification",
+            "compatibility",
+            "play_profile",
+            "continuity",
+            "activation",
+            "content_summary",
+        },
+        "module manifest",
+    )
+    _required_text(result["title"], "module manifest.title", maximum=300)
+    if result["classification"] not in MODULE_CLASSIFICATIONS:
+        raise PortableContentError("module manifest.classification is unsupported")
+    compatibility = result["compatibility"]
+    if not isinstance(compatibility, dict):
+        raise PortableContentError("module manifest.compatibility must be an object")
+    _exact_fields(
+        compatibility,
+        {"editions", "required_capabilities"},
+        "module manifest.compatibility",
+    )
+    for field in ("editions", "required_capabilities"):
+        items = compatibility[field]
+        if not isinstance(items, list) or any(
+            not isinstance(item, str) or not item.strip() for item in items
+        ):
+            raise PortableContentError(
+                f"module manifest.compatibility.{field} must be a string array"
+            )
+    profile = result["play_profile"]
+    if not isinstance(profile, dict):
+        raise PortableContentError("module manifest.play_profile must be an object")
+    _exact_fields(
+        profile,
+        {
+            "party_size",
+            "starting_level",
+            "expected_end_level",
+            "advancement",
+            "pregenerated_characters",
+        },
+        "module manifest.play_profile",
+    )
+    party_size = profile["party_size"]
+    if not isinstance(party_size, dict):
+        raise PortableContentError("module play_profile.party_size must be an object")
+    _exact_fields(
+        party_size,
+        {"minimum", "maximum", "source_refs"},
+        "module play_profile.party_size",
+    )
+    for field in ("minimum", "maximum"):
+        count = party_size[field]
+        if count is not None and (
+            isinstance(count, bool) or not isinstance(count, int) or count < 1
+        ):
+            raise PortableContentError(f"module play_profile.party_size.{field} is invalid")
+    if (
+        party_size["minimum"] is not None
+        and party_size["maximum"] is not None
+        and party_size["minimum"] > party_size["maximum"]
+    ):
+        raise PortableContentError("module play_profile party minimum exceeds maximum")
+    _validate_module_source_refs(
+        party_size["source_refs"], "module play_profile.party_size.source_refs"
+    )
+    for field in ("starting_level", "expected_end_level"):
+        item = profile[field]
+        if not isinstance(item, dict):
+            raise PortableContentError(f"module play_profile.{field} must be an object")
+        _exact_fields(item, {"value", "source_refs"}, f"module play_profile.{field}")
+        level = item["value"]
+        if level is not None and (
+            isinstance(level, bool) or not isinstance(level, int) or not 1 <= level <= 20
+        ):
+            raise PortableContentError(f"module play_profile.{field}.value is invalid")
+        _validate_module_source_refs(
+            item["source_refs"], f"module play_profile.{field}.source_refs"
+        )
+    advancement = profile["advancement"]
+    if not isinstance(advancement, dict):
+        raise PortableContentError("module play_profile.advancement must be an object")
+    _exact_fields(
+        advancement,
+        {"modes", "recommended", "source_refs"},
+        "module play_profile.advancement",
+    )
+    modes = advancement["modes"]
+    if not isinstance(modes, list) or any(
+        item not in {"xp", "milestone", "story", "unknown"} for item in modes
+    ):
+        raise PortableContentError("module play_profile.advancement.modes is invalid")
+    if advancement["recommended"] is not None and advancement["recommended"] not in modes:
+        raise PortableContentError("module advancement recommendation must be one of modes")
+    _validate_module_source_refs(
+        advancement["source_refs"], "module play_profile.advancement.source_refs"
+    )
+    pregenerated = profile["pregenerated_characters"]
+    if not isinstance(pregenerated, dict):
+        raise PortableContentError(
+            "module play_profile.pregenerated_characters must be an object"
+        )
+    _exact_fields(
+        pregenerated,
+        {"available", "applicability", "source_refs"},
+        "module play_profile.pregenerated_characters",
+    )
+    if not isinstance(pregenerated["available"], bool):
+        raise PortableContentError("module pregenerated available must be a boolean")
+    if not isinstance(pregenerated["applicability"], str):
+        raise PortableContentError("module pregenerated applicability must be a string")
+    _validate_module_source_refs(
+        pregenerated["source_refs"],
+        "module play_profile.pregenerated_characters.source_refs",
+    )
+    continuity = result["continuity"]
+    if not isinstance(continuity, dict):
+        raise PortableContentError("module manifest.continuity must be an object")
+    _exact_fields(
+        continuity,
+        {"series_id", "order", "continues_from", "state_policy"},
+        "module manifest.continuity",
+    )
+    for field in ("series_id", "continues_from"):
+        if continuity[field] is not None:
+            _required_text(continuity[field], f"module continuity.{field}", maximum=200)
+    order = continuity["order"]
+    if order is not None and (
+        isinstance(order, bool) or not isinstance(order, int) or order < 1
+    ):
+        raise PortableContentError("module continuity.order must be null or positive")
+    if not isinstance(continuity["state_policy"], dict):
+        raise PortableContentError("module continuity.state_policy must be an object")
+    activation = result["activation"]
+    if not isinstance(activation, dict):
+        raise PortableContentError("module manifest.activation must be an object")
+    _exact_fields(
+        activation,
+        {"mode", "default_active"},
+        "module manifest.activation",
+    )
+    if activation["mode"] != "campaign_attach":
+        raise PortableContentError("module activation.mode must be campaign_attach")
+    if not isinstance(activation["default_active"], bool):
+        raise PortableContentError("module activation.default_active must be a boolean")
+    summary = result["content_summary"]
+    if not isinstance(summary, dict):
+        raise PortableContentError("module manifest.content_summary must be an object")
+    expected_summary_fields = {
+        "scenes",
+        "assets",
+        "content_reviews",
+        "actors",
+        "catalog_entries",
+        "dossiers",
+        "endings",
+    }
+    _exact_fields(summary, expected_summary_fields, "module manifest.content_summary")
+    if any(
+        isinstance(summary[field], bool)
+        or not isinstance(summary[field], int)
+        or summary[field] < 0
+        for field in expected_summary_fields
+    ):
+        raise PortableContentError("module manifest.content_summary counts are invalid")
+    return result
+
+
+def validate_module_readiness(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate the seven-dimensional module publication gate."""
+
+    if not isinstance(value, Mapping):
+        raise PortableContentError("module readiness must be an object")
+    result = copy.deepcopy(dict(value))
+    _exact_fields(
+        result,
+        {"schema_version", "level", "dimensions", "complete"},
+        "module readiness",
+    )
+    if result["schema_version"] != MODULE_READINESS_SCHEMA_VERSION:
+        raise PortableContentError("module readiness.schema_version is unsupported")
+    if result["level"] not in MODULE_READINESS_LEVELS:
+        raise PortableContentError("module readiness.level is unsupported")
+    dimensions = result["dimensions"]
+    if not isinstance(dimensions, dict):
+        raise PortableContentError("module readiness.dimensions must be an object")
+    _exact_fields(dimensions, set(MODULE_READINESS_DIMENSIONS), "module readiness.dimensions")
+    all_complete = True
+    for name in MODULE_READINESS_DIMENSIONS:
+        dimension = dimensions[name]
+        field = f"module readiness.dimensions.{name}"
+        if not isinstance(dimension, dict):
+            raise PortableContentError(f"{field} must be an object")
+        _exact_fields(dimension, {"complete", "item_count", "blockers"}, field)
+        if not isinstance(dimension["complete"], bool):
+            raise PortableContentError(f"{field}.complete must be a boolean")
+        if (
+            isinstance(dimension["item_count"], bool)
+            or not isinstance(dimension["item_count"], int)
+            or dimension["item_count"] < 0
+        ):
+            raise PortableContentError(f"{field}.item_count is invalid")
+        blockers = dimension["blockers"]
+        if not isinstance(blockers, list):
+            raise PortableContentError(f"{field}.blockers must be an array")
+        for index, blocker in enumerate(blockers):
+            blocker_field = f"{field}.blockers[{index}]"
+            if not isinstance(blocker, dict):
+                raise PortableContentError(f"{blocker_field} must be an object")
+            _exact_fields(
+                blocker,
+                {"code", "message", "source_refs"},
+                blocker_field,
+            )
+            _required_text(blocker["code"], f"{blocker_field}.code", maximum=100)
+            _required_text(blocker["message"], f"{blocker_field}.message", maximum=2000)
+            _validate_module_source_refs(
+                blocker["source_refs"], f"{blocker_field}.source_refs"
+            )
+        if dimension["complete"] != (not blockers):
+            raise PortableContentError(
+                f"{field}.complete must equal whether blockers are empty"
+            )
+        all_complete = all_complete and dimension["complete"]
+    if not isinstance(result["complete"], bool):
+        raise PortableContentError("module readiness.complete must be a boolean")
+    if result["complete"] != all_complete:
+        raise PortableContentError("module readiness.complete must equal all dimensions")
+    if result["level"] == "complete" and not result["complete"]:
+        raise PortableContentError("complete module readiness cannot have blockers")
+    if result["level"] in {"playable", "complete"}:
+        for required in ("source", "structure", "play_profile", "runtime", "portability"):
+            if not dimensions[required]["complete"]:
+                raise PortableContentError(
+                    f"{result['level']} module requires complete {required} readiness"
+                )
+    return result
+
+
 def build_module_pack(
     *,
     portable_id: str,
     version: str,
     system_id: str,
+    manifest: Mapping[str, Any],
     source: Mapping[str, Any],
     document: Mapping[str, Any],
     scene_atlas: Sequence[Mapping[str, Any]],
     assets: Sequence[Mapping[str, Any]] | None = None,
     content_reviews: Sequence[Mapping[str, Any]] | None = None,
     actors: Sequence[Mapping[str, Any]] | None = None,
+    catalogs: Mapping[str, Any] | None = None,
+    narrative: Mapping[str, Any] | None = None,
+    readiness: Mapping[str, Any],
     metadata: Mapping[str, Any] | None = None,
     dependencies: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Build a self-contained adventure-module package."""
+    """Build one immutable v2 module descriptor with locked logical components."""
+
+    component_values = {
+        "source": copy.deepcopy(dict(source)),
+        "document": copy.deepcopy(dict(document)),
+        "scene_atlas": copy.deepcopy(list(scene_atlas)),
+        "assets": copy.deepcopy(list(assets or [])),
+        "content_reviews": copy.deepcopy(list(content_reviews or [])),
+        "actors": copy.deepcopy(list(actors or [])),
+        "catalogs": copy.deepcopy(dict(catalogs or _empty_module_catalogs())),
+        "narrative": copy.deepcopy(dict(narrative or _empty_module_narrative())),
+    }
+    normalized_manifest = copy.deepcopy(dict(manifest))
+    normalized_manifest["content_summary"] = _module_content_summary(component_values)
+    component_locks = [
+        {
+            "component": name,
+            "checksum": hashlib.sha256(
+                canonical_json(component_values[name]).encode("utf-8")
+            ).hexdigest(),
+        }
+        for name in MODULE_COMPONENT_NAMES
+    ]
 
     envelope = build_portable_envelope(
         kind="module_pack",
@@ -405,17 +788,128 @@ def build_module_pack(
         system_id=system_id,
         payload={
             "module_schema": MODULE_PACK_SCHEMA,
-            "source": copy.deepcopy(dict(source)),
-            "document": copy.deepcopy(dict(document)),
-            "scene_atlas": copy.deepcopy(list(scene_atlas)),
-            "assets": copy.deepcopy(list(assets or [])),
-            "content_reviews": copy.deepcopy(list(content_reviews or [])),
-            "actors": copy.deepcopy(list(actors or [])),
+            "manifest": normalized_manifest,
+            "component_locks": component_locks,
+            **component_values,
+            "readiness": copy.deepcopy(dict(readiness)),
         },
         metadata=metadata,
         dependencies=dependencies,
     )
     return validate_module_pack(envelope)
+
+
+def _validate_module_catalogs(value: Any, scene_keys: set[str]) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise PortableContentError("module_pack.catalogs must be an object")
+    result = copy.deepcopy(value)
+    _exact_fields(result, set(_empty_module_catalogs()), "module catalogs")
+    seen: set[str] = set()
+    for kind, entries in result.items():
+        if not isinstance(entries, list):
+            raise PortableContentError(f"module catalogs.{kind} must be an array")
+        for index, entry in enumerate(entries):
+            field = f"module catalogs.{kind}[{index}]"
+            if not isinstance(entry, dict):
+                raise PortableContentError(f"{field} must be an object")
+            _exact_fields(
+                entry,
+                {"id", "title", "summary", "scene_keys", "source_refs", "definition", "metadata"},
+                field,
+            )
+            item_id = _required_text(entry["id"], f"{field}.id", maximum=200)
+            if item_id in seen:
+                raise PortableContentError(f"duplicate module catalog id: {item_id}")
+            seen.add(item_id)
+            _required_text(entry["title"], f"{field}.title", maximum=500)
+            if not isinstance(entry["summary"], str):
+                raise PortableContentError(f"{field}.summary must be a string")
+            bound_scenes = entry["scene_keys"]
+            if not isinstance(bound_scenes, list) or any(
+                scene_key not in scene_keys for scene_key in bound_scenes
+            ):
+                raise PortableContentError(f"{field}.scene_keys contains an unknown scene")
+            _validate_module_source_refs(entry["source_refs"], f"{field}.source_refs")
+            if not isinstance(entry["definition"], dict):
+                raise PortableContentError(f"{field}.definition must be an object")
+            if not isinstance(entry["metadata"], dict):
+                raise PortableContentError(f"{field}.metadata must be an object")
+    return result
+
+
+def _validate_module_narrative(
+    value: Any,
+    scene_keys: set[str],
+    actor_ids: set[str],
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise PortableContentError("module_pack.narrative must be an object")
+    result = copy.deepcopy(value)
+    _exact_fields(result, {"dossiers", "endings"}, "module narrative")
+    seen: set[str] = set()
+    for collection, allowed_kinds in (
+        ("dossiers", {"actor", "faction", "location", "event", "relationship", "secret"}),
+        ("endings", {"ending"}),
+    ):
+        entries = result[collection]
+        if not isinstance(entries, list):
+            raise PortableContentError(f"module narrative.{collection} must be an array")
+        for index, entry in enumerate(entries):
+            field = f"module narrative.{collection}[{index}]"
+            if not isinstance(entry, dict):
+                raise PortableContentError(f"{field} must be an object")
+            _exact_fields(
+                entry,
+                {
+                    "id",
+                    "kind",
+                    "title",
+                    "summary",
+                    "scene_keys",
+                    "actor_ids",
+                    "relationships",
+                    "goals",
+                    "secrets",
+                    "contingencies",
+                    "required_context",
+                    "source_refs",
+                    "metadata",
+                },
+                field,
+            )
+            item_id = _required_text(entry["id"], f"{field}.id", maximum=200)
+            if item_id in seen:
+                raise PortableContentError(f"duplicate module narrative id: {item_id}")
+            seen.add(item_id)
+            if entry["kind"] not in allowed_kinds:
+                raise PortableContentError(f"{field}.kind is unsupported")
+            _required_text(entry["title"], f"{field}.title", maximum=500)
+            if not isinstance(entry["summary"], str):
+                raise PortableContentError(f"{field}.summary must be a string")
+            if not isinstance(entry["scene_keys"], list) or any(
+                scene_key not in scene_keys for scene_key in entry["scene_keys"]
+            ):
+                raise PortableContentError(f"{field}.scene_keys contains an unknown scene")
+            if not isinstance(entry["actor_ids"], list) or any(
+                actor_id not in actor_ids for actor_id in entry["actor_ids"]
+            ):
+                raise PortableContentError(f"{field}.actor_ids contains an unknown actor")
+            for list_field in (
+                "relationships",
+                "goals",
+                "secrets",
+                "contingencies",
+                "required_context",
+            ):
+                items = entry[list_field]
+                if not isinstance(items, list) or any(
+                    not isinstance(item, str) or not item.strip() for item in items
+                ):
+                    raise PortableContentError(f"{field}.{list_field} is invalid")
+            _validate_module_source_refs(entry["source_refs"], f"{field}.source_refs")
+            if not isinstance(entry["metadata"], dict):
+                raise PortableContentError(f"{field}.metadata must be an object")
+    return result
 
 
 def validate_module_pack(
@@ -428,19 +922,54 @@ def validate_module_pack(
         raise PortableContentError(
             f"module pack system_id must be {expected_system_id!r}"
         )
+    for index, dependency in enumerate(value["dependencies"]):
+        if dependency["kind"] not in {"rule_pack", "module_pack"}:
+            raise PortableContentError(
+                f"module dependency {index} must be a rule_pack or module_pack"
+            )
+        if not dependency.get("checksum"):
+            raise PortableContentError(
+                f"module dependency {index} requires an exact checksum"
+            )
     payload = value["payload"]
     allowed = {
         "module_schema",
+        "manifest",
+        "component_locks",
         "source",
         "document",
         "scene_atlas",
         "assets",
         "content_reviews",
         "actors",
+        "catalogs",
+        "narrative",
+        "readiness",
     }
     _exact_fields(payload, allowed, "module pack payload")
     if payload["module_schema"] != MODULE_PACK_SCHEMA:
         raise PortableContentError(f"module_schema must be {MODULE_PACK_SCHEMA!r}")
+    manifest = _validate_module_manifest(payload["manifest"])
+    component_locks = payload["component_locks"]
+    if not isinstance(component_locks, list) or len(component_locks) != len(
+        MODULE_COMPONENT_NAMES
+    ):
+        raise PortableContentError("module_pack.component_locks is incomplete")
+    lock_values: dict[str, str] = {}
+    for index, lock in enumerate(component_locks):
+        field = f"module_pack.component_locks[{index}]"
+        if not isinstance(lock, dict):
+            raise PortableContentError(f"{field} must be an object")
+        _exact_fields(lock, {"component", "checksum"}, field)
+        component = _required_text(lock["component"], f"{field}.component", maximum=100)
+        if component not in MODULE_COMPONENT_NAMES or component in lock_values:
+            raise PortableContentError(f"{field}.component is invalid or duplicated")
+        checksum = _required_text(lock["checksum"], f"{field}.checksum", maximum=64)
+        if not _SHA256_RE.fullmatch(checksum):
+            raise PortableContentError(f"{field}.checksum must be a SHA-256")
+        lock_values[component] = checksum
+    if set(lock_values) != set(MODULE_COMPONENT_NAMES):
+        raise PortableContentError("module_pack.component_locks is incomplete")
     source = payload["source"]
     if not isinstance(source, dict):
         raise PortableContentError("module_pack.source must be an object")
@@ -472,6 +1001,7 @@ def validate_module_pack(
     scene_keys: set[str] = set()
     scene_ordinals: set[tuple[int, int]] = set()
     chapter_titles: dict[int, str] = {}
+    scene_chunk_hashes: dict[str, set[str]] = {}
     for index, raw_scene in enumerate(scene_atlas):
         field = f"module_pack.scene_atlas[{index}]"
         if not isinstance(raw_scene, dict):
@@ -480,6 +1010,7 @@ def validate_module_pack(
         if key in scene_keys:
             raise PortableContentError(f"duplicate module scene stable_key: {key}")
         scene_keys.add(key)
+        scene_chunk_hashes[key] = set()
         _required_text(raw_scene.get("title"), f"{field}.title", maximum=500)
         ordinals: dict[str, int] = {}
         for ordinal_field in ("chapter_ordinal", "scene_ordinal"):
@@ -581,6 +1112,11 @@ def validate_module_pack(
                 raise PortableContentError(
                     f"{chunk_field}.content_hash does not match content"
                 )
+            scene_chunk_hashes[key].add(chunk_hash)
+
+    all_chunk_hashes = {
+        chunk_hash for hashes in scene_chunk_hashes.values() for chunk_hash in hashes
+    }
 
     assets = payload["assets"]
     if not isinstance(assets, list):
@@ -596,7 +1132,7 @@ def validate_module_pack(
             "media_type",
             "checksum",
             "size",
-            "data_base64",
+            "blob_key",
             "normalized_content",
             "metadata",
         }
@@ -613,18 +1149,10 @@ def validate_module_pack(
         size = raw_asset["size"]
         if isinstance(size, bool) or not isinstance(size, int) or size < 0:
             raise PortableContentError(f"{field}.size must be a non-negative integer")
-        encoded = raw_asset["data_base64"]
+        blob_key = raw_asset["blob_key"]
         normalized = raw_asset["normalized_content"]
-        if not isinstance(encoded, str):
-            raise PortableContentError(f"{field}.data_base64 must contain embedded bytes")
-        try:
-            content = base64.b64decode(encoded, validate=True)
-        except (ValueError, TypeError) as exc:
-            raise PortableContentError(f"{field}.data_base64 is invalid") from exc
-        if len(content) != size:
-            raise PortableContentError(f"{field}.size does not match embedded bytes")
-        if hashlib.sha256(content).hexdigest() != checksum:
-            raise PortableContentError(f"{field}.checksum does not match embedded bytes")
+        if blob_key != f"blobs/sha256/{checksum}":
+            raise PortableContentError(f"{field}.blob_key does not match checksum")
         if normalized is not None and not isinstance(normalized, str):
             raise PortableContentError(f"{field}.normalized_content must be a string or null")
         if not isinstance(raw_asset["metadata"], dict):
@@ -657,8 +1185,20 @@ def validate_module_pack(
                 raise PortableContentError(
                     f"{field}.evidence.page must be a positive integer for asset evidence"
                 )
-        elif not isinstance(chunk_hashes, list) or not chunk_hashes:
-            raise PortableContentError(f"{field}.evidence requires asset_key or chunk_hashes")
+        else:
+            if not isinstance(chunk_hashes, list) or not chunk_hashes:
+                raise PortableContentError(
+                    f"{field}.evidence requires asset_key or chunk_hashes"
+                )
+            if len(set(chunk_hashes)) != len(chunk_hashes) or any(
+                not isinstance(chunk_hash, str)
+                or not _SHA256_RE.fullmatch(chunk_hash)
+                or chunk_hash not in scene_chunk_hashes[scene_key]
+                for chunk_hash in chunk_hashes
+            ):
+                raise PortableContentError(
+                    f"{field}.evidence.chunk_hashes must uniquely reference its scene"
+                )
         if not isinstance(review.get("metadata", {}), dict):
             raise PortableContentError(f"{field}.metadata must be an object")
 
@@ -682,6 +1222,102 @@ def validate_module_pack(
                 raise PortableContentError(
                     f"module actor {card['id']} binding {binding_index} has an unknown scene_key"
                 )
+    catalogs = _validate_module_catalogs(payload["catalogs"], scene_keys)
+    narrative = _validate_module_narrative(payload["narrative"], scene_keys, actor_ids)
+    readiness = validate_module_readiness(payload["readiness"])
+    profile = manifest["play_profile"]
+    profile_ref_fields = (
+        (profile["party_size"]["source_refs"], "module play_profile.party_size.source_refs"),
+        (
+            profile["starting_level"]["source_refs"],
+            "module play_profile.starting_level.source_refs",
+        ),
+        (
+            profile["expected_end_level"]["source_refs"],
+            "module play_profile.expected_end_level.source_refs",
+        ),
+        (profile["advancement"]["source_refs"], "module play_profile.advancement.source_refs"),
+        (
+            profile["pregenerated_characters"]["source_refs"],
+            "module play_profile.pregenerated_characters.source_refs",
+        ),
+    )
+    for refs, field in profile_ref_fields:
+        _validate_module_ref_targets(
+            refs,
+            field=field,
+            source_key=source["source_key"],
+            chunk_hashes=all_chunk_hashes,
+        )
+    for catalog_kind, entries in catalogs.items():
+        for index, entry in enumerate(entries):
+            _validate_module_ref_targets(
+                entry["source_refs"],
+                field=f"module catalogs.{catalog_kind}[{index}].source_refs",
+                source_key=source["source_key"],
+                chunk_hashes=all_chunk_hashes,
+            )
+    for collection, entries in narrative.items():
+        for index, entry in enumerate(entries):
+            _validate_module_ref_targets(
+                entry["source_refs"],
+                field=f"module narrative.{collection}[{index}].source_refs",
+                source_key=source["source_key"],
+                chunk_hashes=all_chunk_hashes,
+            )
+    for dimension_name, dimension in readiness["dimensions"].items():
+        for index, blocker in enumerate(dimension["blockers"]):
+            _validate_module_ref_targets(
+                blocker["source_refs"],
+                field=(
+                    f"module readiness.dimensions.{dimension_name}.blockers[{index}].source_refs"
+                ),
+                source_key=source["source_key"],
+                chunk_hashes=all_chunk_hashes,
+            )
+    if readiness["dimensions"]["play_profile"]["complete"]:
+        if (
+            profile["party_size"]["minimum"] is None
+            or profile["party_size"]["maximum"] is None
+            or profile["starting_level"]["value"] is None
+            or profile["expected_end_level"]["value"] is None
+            or profile["advancement"]["recommended"] in {None, "unknown"}
+            or "unknown" in profile["advancement"]["modes"]
+            or any(not refs for refs, _field in profile_ref_fields)
+        ):
+            raise PortableContentError(
+                "complete module play_profile requires sourced party, level, "
+                "advancement, and pregenerated-character review"
+            )
+    if (
+        manifest["activation"]["default_active"]
+        and readiness["level"] not in {"playable", "complete"}
+    ):
+        raise PortableContentError(
+            "draft or indexed module activation.default_active must be false"
+        )
+    components = {
+        "source": source,
+        "document": document,
+        "scene_atlas": scene_atlas,
+        "assets": assets,
+        "content_reviews": reviews,
+        "actors": actors,
+        "catalogs": catalogs,
+        "narrative": narrative,
+    }
+    for component in MODULE_COMPONENT_NAMES:
+        checksum = hashlib.sha256(
+            canonical_json(components[component]).encode("utf-8")
+        ).hexdigest()
+        if lock_values[component] != checksum:
+            raise PortableContentError(
+                f"module component lock mismatch for {component}"
+            )
+    if manifest["content_summary"] != _module_content_summary(components):
+        raise PortableContentError("module manifest.content_summary does not match components")
+    if readiness["level"] == "complete" and not narrative["endings"]:
+        raise PortableContentError("complete campaign module requires at least one ending")
     return value
 
 
@@ -1342,9 +1978,10 @@ def validate_addon_pack(
         raise PortableContentError(
             "addon_pack.manifest.activation.preset_policy must be library or none"
         )
-    if activation.get("module_policy") not in {"manual", "campaign", "none"}:
+    if activation.get("module_policy") != "none":
         raise PortableContentError(
-            "addon_pack.manifest.activation.module_policy must be manual, campaign, or none"
+            "addon_pack.manifest.activation.module_policy must be none; "
+            "module releases are distributed separately"
         )
     conflicts = manifest.get("conflicts", [])
     if not isinstance(conflicts, list):
@@ -1393,17 +2030,6 @@ def validate_addon_pack(
                 f"addon_pack.manifest.activation.{policy_name} must be none "
                 f"without {component_kind} components"
             )
-    module_policy = activation["module_policy"]
-    if "module_pack" in component_kinds and module_policy == "none":
-        raise PortableContentError(
-            "addon_pack.manifest.activation.module_policy cannot be none when "
-            "module_pack components are embedded"
-        )
-    if "module_pack" not in component_kinds and module_policy != "none":
-        raise PortableContentError(
-            "addon_pack.manifest.activation.module_policy must be none without "
-            "module_pack components"
-        )
     addon_editions = {str(item) for item in editions}
     for component in components:
         if component["kind"] != "rule_pack":
@@ -1453,7 +2079,6 @@ def _validate_addon_component(value: Mapping[str, Any], index: int) -> dict[str,
         raise PortableContentError(f"addon_pack.components[{index}] must be an object")
     kind = str(value.get("kind") or "")
     validators = {
-        "module_pack": validate_module_pack,
         "preset_pack": validate_preset_pack,
         "rule_pack": validate_rule_pack,
     }
@@ -1706,6 +2331,94 @@ def loads_portable(content: str | bytes) -> dict[str, Any]:
     except json.JSONDecodeError as exc:
         raise PortableContentError(f"invalid portable JSON: {exc.msg}") from exc
     return validate_portable_envelope(value)
+
+
+def dumps_module_archive(
+    package: Mapping[str, Any],
+    blobs: Mapping[str, bytes],
+) -> bytes:
+    """Serialize one v2 module descriptor and its exact content-addressed blobs."""
+
+    value = validate_module_pack(package)
+    expected = {
+        asset["checksum"]: asset for asset in value["payload"]["assets"]
+    }
+    normalized_blobs = {
+        str(key).removeprefix("blobs/sha256/"): bytes(data)
+        for key, data in blobs.items()
+    }
+    if set(normalized_blobs) != set(expected):
+        raise PortableContentError("module archive blobs do not match asset descriptors")
+    for checksum, content in normalized_blobs.items():
+        asset = expected[checksum]
+        if len(content) != asset["size"] or hashlib.sha256(content).hexdigest() != checksum:
+            raise PortableContentError(f"module archive blob mismatch: {checksum}")
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", allowZip64=True) as archive:
+        archive.writestr(
+            "module.sagasmith.json",
+            canonical_json(value).encode("utf-8"),
+            compress_type=zipfile.ZIP_DEFLATED,
+        )
+        for checksum, content in sorted(normalized_blobs.items()):
+            archive.writestr(
+                f"blobs/sha256/{checksum}",
+                content,
+                compress_type=zipfile.ZIP_STORED,
+            )
+    return output.getvalue()
+
+
+def loads_module_archive(
+    content: bytes,
+    *,
+    maximum_uncompressed_bytes: int = 2 * 1024 * 1024 * 1024,
+) -> tuple[dict[str, Any], dict[str, bytes]]:
+    """Load and fully verify a v2 module archive without accepting extra files."""
+
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(content), "r")
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise PortableContentError("invalid module archive") from exc
+    with archive:
+        infos = archive.infolist()
+        names = [info.filename for info in infos]
+        if len(names) != len(set(names)):
+            raise PortableContentError("module archive contains duplicate paths")
+        if "module.sagasmith.json" not in names:
+            raise PortableContentError("module archive has no descriptor")
+        if any(info.flag_bits & 0x1 for info in infos):
+            raise PortableContentError("encrypted module archive entries are not supported")
+        if sum(info.file_size for info in infos) > maximum_uncompressed_bytes:
+            raise PortableContentError("module archive exceeds the uncompressed safety limit")
+        allowed_path = re.compile(r"blobs/sha256/[0-9a-f]{64}")
+        unexpected = [
+            name
+            for name in names
+            if name != "module.sagasmith.json" and not allowed_path.fullmatch(name)
+        ]
+        if unexpected:
+            raise PortableContentError("module archive contains unsupported paths")
+        try:
+            package = json.loads(archive.read("module.sagasmith.json").decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise PortableContentError("module archive descriptor is invalid") from exc
+        value = validate_module_pack(package)
+        blobs = {
+            name.removeprefix("blobs/sha256/"): archive.read(name)
+            for name in names
+            if name.startswith("blobs/sha256/")
+        }
+    expected = {asset["checksum"] for asset in value["payload"]["assets"]}
+    if set(blobs) != expected:
+        raise PortableContentError("module archive blobs do not match descriptor")
+    for checksum, data in blobs.items():
+        asset = next(
+            item for item in value["payload"]["assets"] if item["checksum"] == checksum
+        )
+        if len(data) != asset["size"] or hashlib.sha256(data).hexdigest() != checksum:
+            raise PortableContentError(f"module archive blob mismatch: {checksum}")
+    return value, blobs
 
 
 def _validate_dependency(value: Any, index: int) -> dict[str, Any]:

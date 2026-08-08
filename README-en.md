@@ -40,12 +40,15 @@ canonical JSON and SHA-256 checksums:
 - `actor_card` is the shared PC/NPC/monster form; `actor_type` selects the role.
   Import creates a fresh local identity. Database ids, campaign ids, revisions,
   access grants, and ActorKnowledge are never exported.
-- `module_pack` carries the normalized document, a signed Scene Atlas with exact
-  scene text and retrieval chunks, content-addressed assets, reviewed content,
-  cards, and stable scene bindings. Import replays that structure instead of
-  asking the receiver's current parser to guess boundaries again.
-  It excludes progress, world state, memory, random streams, branches, and
-  Snapshots.
+- `module_pack` v2 is an independent `.sagasmith-module` ZIP archive. Its JSON
+  descriptor carries classification, edition compatibility, party/level/
+  advancement guidance, continuity policy, exact dependencies, normalized
+  source, signed Scene Atlas, catalogs, narrative dossiers/relationships/
+  endings, reviews, actor cards, component locks, and seven-dimensional
+  readiness. Large assets live under content-addressed `blobs/sha256/` paths.
+  Only `playable` or `complete` modules may activate. It excludes progress,
+  world state, memory, random streams, branches, and Snapshots. The removed
+  `sagasmith.module-pack.v1` schema is rejected; there is no compatibility reader.
 - `preset_pack` distributes a reusable actor-card library, such as a game
   system's bundled standard creature cards.
 - `rule_pack` carries the rule manifest, catalog artifacts, mechanic IR,
@@ -55,6 +58,9 @@ canonical JSON and SHA-256 checksums:
   depending on local UUIDs or private/shareable distribution metadata.
 - `release_manifest` composes exact rule, preset, and module package versions and
   full envelope checksums. It grants no install, activation, or access authority.
+
+An `addon_pack` cannot embed or activate a module. Rules, presets, and modules
+remain independent distributions connected by exact dependencies.
 
 Core validates the generic envelope and rebuilds content through public service
 paths. System plugins still validate sheets, editions, and rule dependencies;

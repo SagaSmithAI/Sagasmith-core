@@ -1,6 +1,8 @@
 import base64
 import copy
 import hashlib
+import io
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -17,12 +19,16 @@ from sagasmith_core.portable import (
     build_preset_pack,
     build_release_manifest,
     build_rule_pack,
+    dumps_module_archive,
     dumps_portable,
+    loads_module_archive,
     loads_portable,
+    portable_checksum,
     portable_rule_definition_checksum,
     validate_actor_card,
     validate_addon_pack,
     validate_addon_readiness,
+    validate_module_pack,
     validate_release_manifest,
     validate_rule_pack,
 )
@@ -522,23 +528,66 @@ def test_module_pack_round_trip_remaps_scenes_assets_reviews_and_actor_cards(
         ],
     )
 
+    blobs: dict[str, bytes] = {}
     package = modules.export_portable_pack(
         source_campaign.id,
         imported.module_id,
         portable_id="example.keep",
         actors=[actor],
         asset_loader=lambda path: Path(path).read_bytes(),
+        blob_sink=blobs.__setitem__,
     )
     assert "two wolves" in package["payload"]["scene_atlas"][0]["content"].casefold()
     assert package["payload"]["scene_atlas"][0]["chunks"][0]["content"] == chunks[0][
         "content"
     ]
 
-    def write_asset(module_id: str, asset: dict) -> str:
+    legacy = copy.deepcopy(package)
+    legacy["payload"]["module_schema"] = "sagasmith.module-pack.v1"
+    legacy["checksum"] = portable_checksum(legacy)
+    with pytest.raises(PortableContentError, match="sagasmith.module-pack.v2"):
+        validate_module_pack(legacy)
+
+    unsafe_default = copy.deepcopy(package)
+    unsafe_default["payload"]["manifest"]["activation"]["default_active"] = True
+    unsafe_default["payload"]["component_locks"] = copy.deepcopy(
+        package["payload"]["component_locks"]
+    )
+    unsafe_default["checksum"] = portable_checksum(unsafe_default)
+    with pytest.raises(PortableContentError, match="default_active must be false"):
+        validate_module_pack(unsafe_default)
+
+    forged_playable = copy.deepcopy(package)
+    forged_playable["payload"]["readiness"]["level"] = "playable"
+    for dimension_name in ("play_profile", "runtime"):
+        dimension = forged_playable["payload"]["readiness"]["dimensions"][dimension_name]
+        dimension["complete"] = True
+        dimension["blockers"] = []
+    forged_playable["checksum"] = portable_checksum(forged_playable)
+    with pytest.raises(PortableContentError, match="requires sourced party"):
+        validate_module_pack(forged_playable)
+
+    def write_asset(module_id: str, asset: dict, content: bytes) -> str:
         target = tmp_path / "imported" / module_id / asset["name"]
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(base64.b64decode(asset["data_base64"]))
+        target.write_bytes(content)
         return str(target)
+
+    archive = dumps_module_archive(package, blobs)
+    archived_package, archived_blobs = loads_module_archive(archive)
+    assert archived_package == package
+
+    damaged = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(archive)) as source_zip, zipfile.ZipFile(
+        damaged, "w"
+    ) as target_zip:
+        for name in source_zip.namelist():
+            value = source_zip.read(name)
+            if name.startswith("blobs/sha256/"):
+                value += b"tampered"
+            target_zip.writestr(name, value)
+    with pytest.raises(PortableContentError, match="archive blob mismatch"):
+        loads_module_archive(damaged.getvalue())
 
     class ChangedLocalParser:
         def parse(self, _content):
@@ -546,8 +595,9 @@ def test_module_pack_round_trip_remaps_scenes_assets_reviews_and_actor_cards(
 
     result = modules.import_portable_pack(
         target_campaign.id,
-        package,
+        archived_package,
         parser=ChangedLocalParser(),
+        asset_loader=lambda asset: archived_blobs[asset["checksum"]],
         asset_writer=write_asset,
     )
 
