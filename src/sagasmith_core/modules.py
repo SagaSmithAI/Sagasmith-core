@@ -98,6 +98,41 @@ def canonical_heading_path(headings: Sequence[str]) -> tuple[str, ...]:
     return tuple(normalized)
 
 
+def _portable_scene_chunks(
+    scene: ModuleScene,
+    chunks: Sequence[ModuleChunk],
+    chapter_title: str,
+) -> list[dict[str, Any]]:
+    """Export real scene text when an imported structural scene has no chunk rows."""
+
+    if chunks:
+        return [
+            {
+                "ordinal": chunk.ordinal,
+                "heading_path": list(chunk.heading_path),
+                "content": chunk.content,
+                "start_offset": chunk.char_start,
+                "end_offset": chunk.char_end,
+                "metadata": dict(chunk.metadata_json or {}),
+                "content_hash": chunk.content_hash
+                or hashlib.sha256(chunk.content.encode("utf-8")).hexdigest(),
+            }
+            for chunk in chunks
+        ]
+    headings = list(canonical_heading_path([chapter_title, *scene.headings, scene.title]))
+    return [
+        {
+            "ordinal": 0,
+            "heading_path": headings,
+            "content": scene.content,
+            "start_offset": 0,
+            "end_offset": len(scene.content),
+            "metadata": {"derived_from_scene_content": True},
+            "content_hash": hashlib.sha256(scene.content.encode("utf-8")).hexdigest(),
+        }
+    ]
+
+
 def clean_source_evidence_text(value: Any) -> str:
     """Remove PDF artifacts and normalize typography while preserving letter case."""
 
@@ -1275,19 +1310,11 @@ class ModuleService:
                     "headings": list(scene.headings),
                     "keywords": list(scene.keywords),
                     "content": scene.content,
-                    "chunks": [
-                        {
-                            "ordinal": chunk.ordinal,
-                            "heading_path": list(chunk.heading_path),
-                            "content": chunk.content,
-                            "start_offset": chunk.char_start,
-                            "end_offset": chunk.char_end,
-                            "metadata": dict(chunk.metadata_json or {}),
-                            "content_hash": chunk.content_hash
-                            or hashlib.sha256(chunk.content.encode("utf-8")).hexdigest(),
-                        }
-                        for chunk in chunks_by_scene.get(scene.id, [])
-                    ],
+                    "chunks": _portable_scene_chunks(
+                        scene,
+                        chunks_by_scene.get(scene.id, []),
+                        chapter.title,
+                    ),
                     "metadata": {
                         key: value
                         for key, value in dict(scene.metadata_json or {}).items()

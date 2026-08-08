@@ -4,10 +4,11 @@ import hashlib
 from pathlib import Path
 
 import pytest
+from sqlalchemy import delete
 
 from sagasmith_core.campaigns import CampaignService
 from sagasmith_core.characters import CharacterService
-from sagasmith_core.models import CampaignSnapshot
+from sagasmith_core.models import CampaignSnapshot, ModuleChunk
 from sagasmith_core.modules import ModuleService
 from sagasmith_core.portable import (
     PortableContentError,
@@ -560,6 +561,30 @@ def test_module_pack_round_trip_remaps_scenes_assets_reviews_and_actor_cards(
     assert modules.list_assets(target_campaign.id, result["module_id"])[0][
         "metadata"
     ]["portable_asset_key"]
+
+
+def test_module_pack_export_derives_chunk_from_real_scene_content(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Chunk fallback")
+    modules = ModuleService(database)
+    imported = modules.ingest(
+        campaign_id=campaign.id,
+        source_key="example.chunk-fallback",
+        title="Chunk Fallback",
+        content="# Chapter\nIntro.\n## Empty Index Row\nThe actual scene text remains available.",
+    )
+    scene = modules.scene_index(campaign.id, module_id=imported.module_id)[0]
+    with database.transaction() as session:
+        session.execute(delete(ModuleChunk).where(ModuleChunk.scene_id == scene["scene_id"]))
+
+    package = modules.export_portable_pack(
+        campaign.id,
+        imported.module_id,
+        portable_id="example.chunk-fallback",
+    )
+
+    exported = package["payload"]["scene_atlas"][0]
+    assert exported["chunks"][0]["content"] == exported["content"]
+    assert exported["chunks"][0]["metadata"] == {"derived_from_scene_content": True}
 
 
 def test_module_actor_binding_exports_local_cast_without_runtime_ids(database) -> None:
