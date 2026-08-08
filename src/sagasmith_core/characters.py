@@ -84,6 +84,7 @@ class CharacterService:
         metadata: dict[str, Any] | None = None,
         provenance: dict[str, Any] | None = None,
         bindings: list[dict[str, Any]] | None = None,
+        image: dict[str, Any] | None = None,
         dependencies: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Export an actor without leaking campaign identity or runtime revision."""
@@ -101,6 +102,7 @@ class CharacterService:
             notes=character.notes,
             provenance=provenance,
             bindings=bindings,
+            image=image,
             metadata=metadata,
             dependencies=dependencies,
         )

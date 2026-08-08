@@ -7,6 +7,7 @@ import pytest
 
 from sagasmith_core.campaigns import CampaignService
 from sagasmith_core.characters import CharacterService
+from sagasmith_core.models import CampaignSnapshot
 from sagasmith_core.modules import ModuleService
 from sagasmith_core.portable import (
     PortableContentError,
@@ -25,6 +26,7 @@ from sagasmith_core.portable import (
     validate_rule_pack,
 )
 from sagasmith_core.rules import RuleService
+from sagasmith_core.snapshots import SnapshotService
 
 
 def _card() -> dict:
@@ -78,9 +80,21 @@ def test_character_portable_round_trip_creates_fresh_runtime_identity(database) 
         notes={"schema_version": 2, "profile": {"summary": "Knows the old road."}},
     )
 
+    image_bytes = b"\x89PNG\r\n\x1a\nportable-test-image"
+    image = {
+        "media_type": "image/png",
+        "data_base64": base64.b64encode(image_bytes).decode("ascii"),
+        "checksum": hashlib.sha256(image_bytes).hexdigest(),
+        "size": len(image_bytes),
+        "alt": "Portrait of Mira",
+        "license": "CC0-1.0",
+        "attribution": "Example fixture",
+        "source_ref": "fixture:mira.png",
+    }
     card = characters.export_portable_card(
         source.id,
         portable_id="example.mira",
+        image=image,
         bindings=[
             {
                 "kind": "module_scene",
@@ -100,6 +114,43 @@ def test_character_portable_round_trip_creates_fresh_runtime_identity(database) 
     assert "campaign_id" not in card["payload"]
     assert "revision" not in card["payload"]
     assert "id" not in card["payload"]
+    assert card["payload"]["image"] == image
+
+    snapshot = SnapshotService(database).create(target_campaign.id, label="Imported actor")
+    with database.transaction() as session:
+        stored = session.get(CampaignSnapshot, snapshot.id)
+        serialized = str(stored.payload)
+    assert image["checksum"] not in serialized
+    assert image["data_base64"] not in serialized
+
+
+def test_actor_card_image_is_strictly_validated() -> None:
+    card = _card()
+    card["payload"]["image"] = {
+        "media_type": "image/svg+xml",
+        "data_base64": base64.b64encode(b"<svg/>").decode("ascii"),
+        "checksum": hashlib.sha256(b"<svg/>").hexdigest(),
+        "size": 6,
+        "alt": "unsafe",
+        "license": "CC0-1.0",
+        "attribution": "fixture",
+        "source_ref": "fixture:unsafe.svg",
+    }
+    from sagasmith_core.portable import portable_checksum
+
+    card["checksum"] = portable_checksum(card)
+    with pytest.raises(PortableContentError, match="media_type"):
+        validate_actor_card(card)
+
+
+def test_legacy_actor_card_remains_importable() -> None:
+    card = _card()
+    card["payload"]["card_schema"] = "sagasmith.actor-card.v1"
+    card["payload"].pop("image")
+    from sagasmith_core.portable import portable_checksum
+
+    card["checksum"] = portable_checksum(card)
+    assert validate_actor_card(card)["payload"]["card_schema"].endswith(".v1")
 
 
 def test_actor_card_rejects_unstable_database_binding() -> None:

@@ -31,7 +31,12 @@ PORTABLE_KINDS = frozenset(
 )
 ADDON_PACK_SCHEMA = "sagasmith.addon-pack.v1"
 ADDON_READINESS_SCHEMA_VERSION = 1
-ACTOR_CARD_SCHEMA = "sagasmith.actor-card.v1"
+ACTOR_CARD_SCHEMA = "sagasmith.actor-card.v2"
+LEGACY_ACTOR_CARD_SCHEMA = "sagasmith.actor-card.v1"
+ACTOR_CARD_IMAGE_MEDIA_TYPES = frozenset(
+    {"image/avif", "image/jpeg", "image/png", "image/webp"}
+)
+MAX_ACTOR_CARD_IMAGE_BYTES = 8 * 1024 * 1024
 MODULE_PACK_SCHEMA = "sagasmith.module-pack.v1"
 PRESET_PACK_SCHEMA = "sagasmith.preset-pack.v1"
 RELEASE_MANIFEST_SCHEMA = "sagasmith.release-manifest.v1"
@@ -173,6 +178,7 @@ def build_actor_card(
     summary: str = "",
     provenance: Mapping[str, Any] | None = None,
     bindings: Sequence[Mapping[str, Any]] | None = None,
+    image: Mapping[str, Any] | None = None,
     metadata: Mapping[str, Any] | None = None,
     dependencies: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -188,6 +194,7 @@ def build_actor_card(
         "notes": copy.deepcopy(dict(notes)),
         "provenance": copy.deepcopy(dict(provenance or {})),
         "bindings": copy.deepcopy(list(bindings or [])),
+        "image": copy.deepcopy(dict(image)) if image is not None else None,
     }
     envelope = build_portable_envelope(
         kind="actor_card",
@@ -216,7 +223,7 @@ def validate_actor_card(
             f"actor card system_id must be {expected_system_id!r}"
         )
     payload = value["payload"]
-    allowed = {
+    legacy_allowed = {
         "card_schema",
         "actor_type",
         "name",
@@ -227,9 +234,19 @@ def validate_actor_card(
         "provenance",
         "bindings",
     }
+    schema = payload.get("card_schema")
+    allowed = (
+        legacy_allowed
+        if schema == LEGACY_ACTOR_CARD_SCHEMA
+        else legacy_allowed | {"image"}
+    )
     _exact_fields(payload, allowed, "actor card payload")
-    if payload["card_schema"] != ACTOR_CARD_SCHEMA:
-        raise PortableContentError(f"card_schema must be {ACTOR_CARD_SCHEMA!r}")
+    if schema not in {ACTOR_CARD_SCHEMA, LEGACY_ACTOR_CARD_SCHEMA}:
+        raise PortableContentError(
+            f"card_schema must be {ACTOR_CARD_SCHEMA!r} or {LEGACY_ACTOR_CARD_SCHEMA!r}"
+        )
+    if schema == ACTOR_CARD_SCHEMA:
+        _validate_actor_card_image(payload["image"])
     _required_text(payload["actor_type"], "actor_card.actor_type", maximum=50)
     _required_text(payload["name"], "actor_card.name", maximum=300)
     player_name = payload["player_name"]
@@ -301,6 +318,68 @@ def validate_actor_card(
                 f"actor_card.bindings[{index}].metadata must be an object"
             )
     return value
+
+
+def _validate_actor_card_image(image: Any) -> None:
+    """Validate the one self-contained image owned by a portable actor card."""
+
+    if image is None:
+        return
+    if not isinstance(image, dict):
+        raise PortableContentError("actor_card.image must be an object or null")
+    fields = {
+        "media_type",
+        "data_base64",
+        "checksum",
+        "size",
+        "alt",
+        "license",
+        "attribution",
+        "source_ref",
+    }
+    _exact_fields(image, fields, "actor_card.image")
+    media_type = _required_text(
+        image["media_type"], "actor_card.image.media_type", maximum=50
+    )
+    if media_type not in ACTOR_CARD_IMAGE_MEDIA_TYPES:
+        raise PortableContentError(
+            "actor_card.image.media_type must be image/avif, image/jpeg, image/png, or image/webp"
+        )
+    encoded = _required_text(
+        image["data_base64"], "actor_card.image.data_base64", maximum=12_000_000
+    )
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise PortableContentError("actor_card.image.data_base64 is invalid") from exc
+    if not raw or len(raw) > MAX_ACTOR_CARD_IMAGE_BYTES:
+        raise PortableContentError(
+            f"actor_card.image must contain 1 to {MAX_ACTOR_CARD_IMAGE_BYTES} bytes"
+        )
+    signatures = {
+        "image/png": raw.startswith(b"\x89PNG\r\n\x1a\n"),
+        "image/jpeg": raw.startswith(b"\xff\xd8\xff"),
+        "image/webp": len(raw) >= 12 and raw[:4] == b"RIFF" and raw[8:12] == b"WEBP",
+        "image/avif": len(raw) >= 12 and raw[4:8] == b"ftyp" and b"avif" in raw[8:32],
+    }
+    if not signatures[media_type]:
+        raise PortableContentError(
+            "actor_card.image bytes do not match actor_card.image.media_type"
+        )
+    if image["size"] != len(raw):
+        raise PortableContentError("actor_card.image.size does not match decoded bytes")
+    checksum = _required_text(
+        image["checksum"], "actor_card.image.checksum", maximum=64
+    )
+    if not _SHA256_RE.fullmatch(checksum) or hashlib.sha256(raw).hexdigest() != checksum:
+        raise PortableContentError("actor_card.image.checksum does not match decoded bytes")
+    for field, maximum in (
+        ("alt", 500),
+        ("license", 200),
+        ("attribution", 2000),
+        ("source_ref", 2000),
+    ):
+        _required_text(image[field], f"actor_card.image.{field}", maximum=maximum)
 
 
 def build_module_pack(
