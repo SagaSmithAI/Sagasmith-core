@@ -2,7 +2,7 @@
 
 `sagasmith.content-package` schema version 2 is SagaSmith's only public content
 exchange boundary. Core rules, addons, modules, and presets use the same archive
-and evidence model. Their `kind` changes installation and activation semantics;
+and evidence model. Their `kind` changes storage and activation semantics;
 it does not create a second transport format.
 
 ## Archive
@@ -79,14 +79,14 @@ source art and later rulings traceable in the composed package.
 
 ## Kind semantics
 
-- `core_rules`: installs immutable rule definitions; activation remains a
+- `core_rules`: stores immutable rule definitions; activation remains a
   campaign/branch decision.
-- `addon`: installs optional rule definitions and actor catalogs; conflicts and
+- `addon`: stores optional rule definitions and actor catalogs; conflicts and
   activation policy are explicit.
 - `module`: carries normalized/original documents, Scene Atlas, module actors,
   maps/assets, narrative context, endings, sourced play profile, and Agent
   finalization; activation is DM-only and separate from import.
-- `preset`: installs reusable actor cards in a library; it does not activate a
+- `preset`: stores reusable actor cards in a library; it does not activate a
   rule or module by itself.
 
 The descriptor carries content and evidence, not a publication matrix. Core

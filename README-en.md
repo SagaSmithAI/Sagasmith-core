@@ -50,7 +50,7 @@ revisions, access grants, ActorKnowledge, random streams, or Snapshot state.
 Core validates and rebuilds the common source, actor, and module structures.
 System plugins still validate sheets, editions, dependencies, and game semantics;
 applications/MCP servers own authorization and import roots. `RulePackService`
-retains the separate draft, install, and campaign-activation lifecycle. Legacy
+retains the separate draft, immutable-storage, and campaign-activation lifecycle. Legacy
 portable envelopes, release manifests, and `.sagasmith-module` files are not a
 public compatibility protocol.
 
@@ -108,7 +108,7 @@ The package supplies its profile, character schema, module parser, and rules eng
 - Checkout never silently discards a dirty worktree; save a snapshot before switching branches.
 - Writes should use expected revisions and idempotency keys so agent retries cannot duplicate effects.
 - Player reads are limited to visible branches, scene scopes, and actor knowledge; GM authority requires an explicit principal/role.
-- Portable packages are not saves or permission carriers. Imported actors receive fresh identities and must acquire subjective knowledge in the target campaign; imported rule packs are never installed or activated automatically.
+- Finalized unified Packs are not saves or permission carriers. Imported actors receive fresh identities and must acquire subjective knowledge in the target campaign; imported rule Packs are never activated automatically.
 - Parsed content retains provenance, pages, parser profile, and quality warnings; rich metadata is best effort.
 - Document caches are checksum- and profile-bound. Corrupt cache entries are ignored, and
   parser-version changes can reuse verified PDF page extraction/OCR without accepting stale

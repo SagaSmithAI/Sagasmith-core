@@ -49,8 +49,8 @@ actor card 使用 `sagasmith.actor-card.v3`，统一表示 PC、NPC 与怪物。
 revision、权限、ActorKnowledge、随机流或进度。
 
 Core 校验统一归档并通过公开服务重建来源、角色与模组结构；系统插件继续校验
-sheet、edition、规则依赖和具体语义，应用/MCP 负责权限与导入根目录。规则包仍由
-`RulePackService` 完成 draft、install 和 campaign activation 生命周期。旧 portable、
+sheet、edition、规则依赖和具体语义，应用/MCP 负责权限与导入根目录。规则包由
+`RulePackService` 完成 draft、不可变存储和 campaign activation 生命周期。旧 portable、
 release manifest 与 `.sagasmith-module` 不是公开兼容协议。
 
 ## 核心领域
@@ -116,7 +116,7 @@ my_system = "my_package.system:get_system"
 - checkout 不会静默丢弃工作区：当前分支有未保存变化时，必须先创建 Snapshot。
 - 写操作应携带 expected revision 与幂等键，避免 Agent 重试造成重复副作用。
 - 玩家读取只允许当前可见分支、场景作用域和角色知识；GM 权限需要显式 principal/role。
-- Portable 包从不充当存档或权限载体；导入 actor 必须使用新身份，主观知识必须在目标战役中重新获得或合理传递；导入 rule pack 也不能自动安装或启用。
+- 最终统一 Pack 从不充当存档或权限载体；导入 actor 必须使用新身份，主观知识必须在目标战役中重新获得或合理传递；导入规则 Pack 也不能自动启用。
 - 文档解析结果保留来源、页码、质量警告和 parser profile；调用方必须处理缺失的富元数据。
 - 这是 Alpha 项目；主线迁移会保留当前已发布 schema 的数据，但不承诺任意旧实验版本或 downgrade 路径。
 
