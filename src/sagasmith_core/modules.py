@@ -1386,7 +1386,7 @@ class ModuleService:
                 "classification": str(source_metadata.get("module_classification") or "adventure"),
                 "compatibility": {
                     "editions": list(source_metadata.get("editions") or []),
-                    "required_capabilities": ["module_pack_v2"],
+                    "required_capabilities": ["content_package_v2"],
                 },
                 "play_profile": {
                     "party_size": {"minimum": None, "maximum": None, "source_refs": []},
