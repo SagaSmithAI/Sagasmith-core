@@ -252,7 +252,7 @@ def test_agent_can_finalize_a_reviewed_empty_candidate_inventory(database) -> No
     )
 
     assert finalized.state == "reviewed"
-    assert finalized.candidates == ()
+    assert finalized.candidates == []
     assert finalized.result["review_finalization"]["candidate_set_fingerprint"]
 
 
