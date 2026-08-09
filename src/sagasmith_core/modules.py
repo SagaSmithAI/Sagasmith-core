@@ -1634,19 +1634,19 @@ class ModuleService:
         campaign_id: str,
         module_id: str,
         character_id: str,
-        portable_actor_id: str,
+        actor_card_id: str,
         binding_kind: str,
         role: str = "",
         scene_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Associate a local actor with a module using a portable logical identity."""
+        """Associate a local actor with a module using a finalized card identity."""
 
-        portable_id = str(portable_actor_id).strip()
+        portable_id = str(actor_card_id).strip()
         kind = str(binding_kind).strip().casefold()
         role_value = str(role).strip()
         if not portable_id or len(portable_id) > 200:
-            raise ValueError("portable_actor_id must contain 1 to 200 characters")
+            raise ValueError("actor_card_id must contain 1 to 200 characters")
         if kind not in {"cast", "encounter", "preset_pc"}:
             raise ValueError("binding_kind must be cast, encounter, or preset_pc")
         if len(role_value) > 200:
@@ -1694,7 +1694,7 @@ class ModuleService:
                 )
                 session.add(existing)
             elif existing.portable_actor_id != portable_id:
-                raise ValueError("module actor binding has a different portable_actor_id")
+                raise ValueError("module actor binding has a different actor_card_id")
             else:
                 existing.metadata_json = {
                     **dict(existing.metadata_json or {}),
@@ -3094,7 +3094,7 @@ class ModuleService:
             "scene_id": row.scene_id,
             "scene_key": row.scene_key or None,
             "character_id": row.character_id,
-            "portable_actor_id": row.portable_actor_id,
+            "actor_card_id": row.portable_actor_id,
             "binding_kind": row.binding_kind,
             "role": row.role,
             "metadata": dict(row.metadata_json or {}),

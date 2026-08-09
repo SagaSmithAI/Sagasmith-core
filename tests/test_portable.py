@@ -654,7 +654,7 @@ def test_module_actor_binding_exports_local_cast_without_runtime_ids(database) -
         module_id=imported.module_id,
         scene_id=scene["scene_id"],
         character_id=actor.id,
-        portable_actor_id="example.cast.magistrate",
+        actor_card_id="example.cast.magistrate",
         binding_kind="cast",
         role="quest giver",
     )
@@ -667,6 +667,8 @@ def test_module_actor_binding_exports_local_cast_without_runtime_ids(database) -
     card = descriptor["actors"][0]
 
     assert binding["scene_key"] == scene["stable_key"]
+    assert binding["actor_card_id"] == "example.cast.magistrate"
+    assert "portable_actor_id" not in binding
     assert card["id"] == "example.cast.magistrate"
     assert card["payload"]["bindings"][0]["scene_key"] == scene["stable_key"]
     assert card["payload"]["bindings"][0]["role"] == "quest giver"
