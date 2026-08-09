@@ -1,8 +1,7 @@
 import base64
 import copy
 import hashlib
-import io
-import zipfile
+import json
 from pathlib import Path
 
 import pytest
@@ -19,16 +18,12 @@ from sagasmith_core.portable import (
     build_preset_pack,
     build_release_manifest,
     build_rule_pack,
-    dumps_module_archive,
     dumps_portable,
-    loads_module_archive,
     loads_portable,
-    portable_checksum,
     portable_rule_definition_checksum,
     validate_actor_card,
     validate_addon_pack,
     validate_addon_validation,
-    validate_module_pack,
     validate_release_manifest,
     validate_rule_pack,
 )
@@ -495,13 +490,12 @@ def test_addon_validation_is_strict_and_consistent() -> None:
         validate_addon_validation(unsupported)
 
 
-def test_module_pack_round_trip_remaps_scenes_assets_reviews_and_actor_cards(
+def test_module_content_descriptor_keeps_scenes_assets_reviews_and_actor_cards(
     database, tmp_path
 ) -> None:
     campaigns = CampaignService(database)
     modules = ModuleService(database)
     source_campaign = campaigns.create(system_id="dnd5e", name="Source module")
-    target_campaign = campaigns.create(system_id="dnd5e", name="Target module")
     content = (
         "# Chapter One\nArrival.\n"
         "## Broken Gate\nThe gate is guarded by two wolves.\n"
@@ -528,7 +522,7 @@ def test_module_pack_round_trip_remaps_scenes_assets_reviews_and_actor_cards(
         reviewer="test-dm",
         observation="Direct text evidence.",
     )
-    asset_bytes = b"portable-map-bytes"
+    asset_bytes = b"module-map-bytes"
     source_asset = tmp_path / "keep-map.png"
     source_asset.write_bytes(asset_bytes)
     modules.register_asset(
@@ -558,7 +552,7 @@ def test_module_pack_round_trip_remaps_scenes_assets_reviews_and_actor_cards(
     )
 
     blobs: dict[str, bytes] = {}
-    package = modules.export_portable_pack(
+    descriptor = modules.export_content_descriptor(
         source_campaign.id,
         imported.module_id,
         portable_id="example.keep",
@@ -566,78 +560,30 @@ def test_module_pack_round_trip_remaps_scenes_assets_reviews_and_actor_cards(
         asset_loader=lambda path: Path(path).read_bytes(),
         blob_sink=blobs.__setitem__,
     )
-    assert "two wolves" in package["payload"]["scene_atlas"][0]["content"].casefold()
-    assert package["payload"]["scene_atlas"][0]["chunks"][0]["content"] == chunks[0]["content"]
-
-    legacy = copy.deepcopy(package)
-    legacy["payload"]["module_schema"] = "sagasmith.module-pack.v1"
-    legacy["checksum"] = portable_checksum(legacy)
-    with pytest.raises(PortableContentError, match="sagasmith.module-pack.v2"):
-        validate_module_pack(legacy)
-
-    unsafe_default = copy.deepcopy(package)
-    unsafe_default["payload"]["manifest"]["activation"]["default_active"] = True
-    unsafe_default["payload"]["component_locks"] = copy.deepcopy(
-        package["payload"]["component_locks"]
-    )
-    unsafe_default["checksum"] = portable_checksum(unsafe_default)
-    with pytest.raises(PortableContentError, match="default_active must be false"):
-        validate_module_pack(unsafe_default)
-
-    forged_legacy_gate = copy.deepcopy(package)
-    forged_legacy_gate["payload"]["readiness"] = {"complete": True}
-    forged_legacy_gate["checksum"] = portable_checksum(forged_legacy_gate)
-    with pytest.raises(PortableContentError, match="unsupported fields: readiness"):
-        validate_module_pack(forged_legacy_gate)
-
-    def write_asset(module_id: str, asset: dict, content: bytes) -> str:
-        target = tmp_path / "imported" / module_id / asset["name"]
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(content)
-        return str(target)
-
-    archive = dumps_module_archive(package, blobs)
-    archived_package, archived_blobs = loads_module_archive(archive)
-    assert archived_package == package
-
-    damaged = io.BytesIO()
-    with (
-        zipfile.ZipFile(io.BytesIO(archive)) as source_zip,
-        zipfile.ZipFile(damaged, "w") as target_zip,
-    ):
-        for name in source_zip.namelist():
-            value = source_zip.read(name)
-            if name.startswith("blobs/sha256/"):
-                value += b"tampered"
-            target_zip.writestr(name, value)
-    with pytest.raises(PortableContentError, match="archive blob mismatch"):
-        loads_module_archive(damaged.getvalue())
-
-    class ChangedLocalParser:
-        def parse(self, _content):
-            raise AssertionError("portable imports must not rerun local scene heuristics")
-
-    result = modules.import_portable_pack(
-        target_campaign.id,
-        archived_package,
-        parser=ChangedLocalParser(),
-        asset_loader=lambda asset: archived_blobs[asset["checksum"]],
-        asset_writer=write_asset,
-    )
-
-    assert set(result["scene_map"]) == {scene["stable_key"] for scene in scenes}
-    assert list(result["asset_map"]) == [package["payload"]["assets"][0]["asset_key"]]
-    assert len(result["content_review_ids"]) == 1
-    assert result["actor_cards"][0]["id"] == "example.keep.wolf"
-    target_reviews = modules.list_content_reviews(target_campaign.id, result["module_id"])
-    assert target_reviews[0]["content_key"] == "gate.wolves"
-    assert target_reviews[0]["evidence"]["confidence"] == "reviewed_text"
-    assert modules.list_assets(target_campaign.id, result["module_id"])[0]["metadata"][
-        "portable_asset_key"
-    ]
+    assert set(descriptor) == {
+        "id",
+        "version",
+        "system_id",
+        "manifest",
+        "source",
+        "document",
+        "scene_atlas",
+        "assets",
+        "content_reviews",
+        "actors",
+        "catalogs",
+        "narrative",
+        "metadata",
+        "dependencies",
+    }
+    assert "two wolves" in descriptor["scene_atlas"][0]["content"].casefold()
+    assert descriptor["scene_atlas"][0]["chunks"][0]["content"] == chunks[0]["content"]
+    assert descriptor["assets"][0]["checksum"] in blobs
+    assert descriptor["content_reviews"][0]["content_key"] == "gate.wolves"
+    assert descriptor["actors"][0]["id"] == "example.keep.wolf"
 
 
-def test_module_pack_export_derives_chunk_from_real_scene_content(database) -> None:
+def test_module_descriptor_derives_chunk_from_real_scene_content(database) -> None:
     campaign = CampaignService(database).create(system_id="dnd5e", name="Chunk fallback")
     modules = ModuleService(database)
     imported = modules.ingest(
@@ -650,18 +596,18 @@ def test_module_pack_export_derives_chunk_from_real_scene_content(database) -> N
     with database.transaction() as session:
         session.execute(delete(ModuleChunk).where(ModuleChunk.scene_id == scene["scene_id"]))
 
-    package = modules.export_portable_pack(
+    descriptor = modules.export_content_descriptor(
         campaign.id,
         imported.module_id,
         portable_id="example.chunk-fallback",
     )
 
-    exported = package["payload"]["scene_atlas"][0]
+    exported = descriptor["scene_atlas"][0]
     assert exported["chunks"][0]["content"] == exported["content"]
     assert exported["chunks"][0]["metadata"] == {"derived_from_scene_content": True}
 
 
-def test_module_pack_export_rejects_empty_scene_even_when_chunks_remain(database) -> None:
+def test_module_descriptor_rejects_empty_scene_even_when_chunks_remain(database) -> None:
     campaign = CampaignService(database).create(system_id="dnd5e", name="Invalid scene")
     modules = ModuleService(database)
     imported = modules.ingest(
@@ -678,7 +624,7 @@ def test_module_pack_export_rejects_empty_scene_even_when_chunks_remain(database
         row.content = ""
 
     with pytest.raises(ValueError, match="without content-bearing scenes"):
-        modules.export_portable_pack(
+        modules.export_content_descriptor(
             campaign.id,
             imported.module_id,
             portable_id="example.invalid-scene",
@@ -713,15 +659,15 @@ def test_module_actor_binding_exports_local_cast_without_runtime_ids(database) -
         role="quest giver",
     )
 
-    package = modules.export_portable_pack(
+    descriptor = modules.export_content_descriptor(
         campaign.id,
         imported.module_id,
         portable_id="example.cast",
     )
-    card = package["payload"]["actors"][0]
+    card = descriptor["actors"][0]
 
     assert binding["scene_key"] == scene["stable_key"]
     assert card["id"] == "example.cast.magistrate"
     assert card["payload"]["bindings"][0]["scene_key"] == scene["stable_key"]
     assert card["payload"]["bindings"][0]["role"] == "quest giver"
-    assert actor.id not in dumps_portable(package)
+    assert actor.id not in json.dumps(descriptor, sort_keys=True)
