@@ -55,6 +55,8 @@ from sagasmith_core.documents import (
     _ocr_suspect_pages,
     _page_quality,
     _pdf_form_metadata,
+    _repair_pdf_control_artifacts,
+    _repair_pdf_word_break_noncharacters,
     apply_document_page_revisions,
     build_structured_markdown,
     extract_pdf_page_text,
@@ -170,6 +172,29 @@ def test_rapidocr_profile_binds_model_version_and_scale() -> None:
         RapidOcrProvider(model_type="server")
 
 
+def test_rapidocr_engine_is_shared_by_model_not_render_scale(monkeypatch) -> None:
+    import sagasmith_core.documents as documents
+
+    engines = {"small": object(), "medium": object()}
+    created: list[str] = []
+
+    def fake_engine(model_name: str):
+        created.append(model_name)
+        return engines[model_name]
+
+    documents._RAPIDOCR_ENGINES.clear()
+    monkeypatch.setattr(documents, "_new_rapidocr_engine", fake_engine)
+    small_low = RapidOcrProvider(scale=1.5, model_type="small")
+    small_high = RapidOcrProvider(scale=4.0, model_type="small")
+    medium = RapidOcrProvider(scale=2.0, model_type="medium")
+
+    assert small_low._load_engine() is small_high._load_engine() is engines["small"]
+    assert medium._load_engine() is engines["medium"]
+    assert small_low._engine_lock is small_high._engine_lock
+    assert created == ["small", "medium"]
+    documents._RAPIDOCR_ENGINES.clear()
+
+
 def test_rapidocr_page_cache_survives_provider_restart_and_rejects_tampering(
     tmp_path,
     monkeypatch,
@@ -219,9 +244,7 @@ def test_rapidocr_page_cache_survives_provider_restart_and_rejects_tampering(
     monkeypatch.setattr(
         restarted,
         "_extract_layout_uncached",
-        lambda path, *, page_numbers=None, on_page=None: pytest.fail(
-            "page should be cached"
-        ),
+        lambda path, *, page_numbers=None, on_page=None: pytest.fail("page should be cached"),
     )
     cached = restarted.extract_layout(source, page_numbers=[1, 2])
 
@@ -320,11 +343,7 @@ def test_ocr_cascade_uses_stronger_model_only_for_unusable_pages() -> None:
                     page_number=page,
                     width=600,
                     height=800,
-                    blocks=(
-                        OcrTextBlock(self.text, 0.99, 20, 20, 580, 60),
-                    )
-                    if self.text
-                    else (),
+                    blocks=(OcrTextBlock(self.text, 0.99, 20, 20, 580, 60),) if self.text else (),
                 )
                 for page in pages
             ]
@@ -341,9 +360,7 @@ def test_ocr_cascade_uses_stronger_model_only_for_unusable_pages() -> None:
     assert small.calls == [[3]]
     assert medium.calls == [[3]]
     assert layouts[0].blocks[0].text.startswith("RECOVERED HEADING")
-    assert cascade.cache_profile == (
-        "rapidocr-cascade:min-confidence=0.860:small:v1=>medium:v1"
-    )
+    assert cascade.cache_profile == ("rapidocr-cascade:min-confidence=0.860:small:v1=>medium:v1")
 
 
 def test_ocr_cascade_prefers_confidence_over_extra_garbage_characters() -> None:
@@ -360,9 +377,7 @@ def test_ocr_cascade_prefers_confidence_over_extra_garbage_characters() -> None:
                     page_number=page,
                     width=600,
                     height=800,
-                    blocks=(
-                        OcrTextBlock(self.text, self.confidence, 20, 20, 580, 60),
-                    ),
+                    blocks=(OcrTextBlock(self.text, self.confidence, 20, 20, 580, 60),),
                 )
                 for page in list(page_numbers or [])
             ]
@@ -370,9 +385,7 @@ def test_ocr_cascade_prefers_confidence_over_extra_garbage_characters() -> None:
     noisy = FakeLayoutOcr("small", "ABCDEFGHIJKLMNO1234567", 0.7)
     accurate = FakeLayoutOcr("medium", "CORRECT TEXT EVIDENCE", 0.99)
 
-    layouts = CascadingOcrProvider(noisy, accurate).extract_layout(
-        "unused.pdf", page_numbers=[3]
-    )
+    layouts = CascadingOcrProvider(noisy, accurate).extract_layout("unused.pdf", page_numbers=[3])
 
     assert layouts[0].blocks[0].text == "CORRECT TEXT EVIDENCE"
 
@@ -394,9 +407,7 @@ def test_ocr_cascade_audits_long_low_confidence_pages() -> None:
                     page_number=page,
                     width=600,
                     height=800,
-                    blocks=(
-                        OcrTextBlock(self.text, self.confidence, 20, 20, 580, 60),
-                    ),
+                    blocks=(OcrTextBlock(self.text, self.confidence, 20, 20, 580, 60),),
                 )
                 for page in pages
             ]
@@ -436,9 +447,7 @@ def test_ocr_cascade_rejects_high_confidence_truncated_fallback() -> None:
                     page_number=page,
                     width=600,
                     height=800,
-                    blocks=(
-                        OcrTextBlock(self.text, self.confidence, 20, 20, 580, 60),
-                    ),
+                    blocks=(OcrTextBlock(self.text, self.confidence, 20, 20, 580, 60),),
                 )
                 for page in list(page_numbers or [])
             ]
@@ -703,11 +712,7 @@ def test_layout_profile_preserves_repeated_mechanical_margin_fields() -> None:
 
 
 def test_page_locator_reuses_one_marker_index() -> None:
-    content = (
-        "<!-- page: 1 -->\nfirst\n"
-        "<!-- page: 2 -->\nsecond\n"
-        "<!-- page: 20 -->\nlast\n"
-    )
+    content = "<!-- page: 1 -->\nfirst\n<!-- page: 2 -->\nsecond\n<!-- page: 20 -->\nlast\n"
     locator = PageLocator(content)
 
     assert locator.page_for_offset(content.index("first")) == 1
@@ -759,9 +764,7 @@ def test_bounded_ocr_rejects_provider_without_page_selection(tmp_path) -> None:
         )
 
 
-def test_pdf_converter_ocr_repairs_unmatched_text_bearing_bookmark(
-    tmp_path, monkeypatch
-) -> None:
+def test_pdf_converter_ocr_repairs_unmatched_text_bearing_bookmark(tmp_path, monkeypatch) -> None:
     pypdf = pytest.importorskip("pypdf")
     pytest.importorskip("pypdfium2")
     source = tmp_path / "damaged-heading.pdf"
@@ -867,9 +870,7 @@ def test_pdf_converter_preserves_layout_order_over_bookmark_only_ocr_gain(
 
     document = PdfDocumentConverter(ocr_provider=BookmarkOnlyGainOcr()).convert(source)
 
-    assert document.content.index("First bard spell") < document.content.index(
-        "CLERIC SPELLS"
-    )
+    assert document.content.index("First bard spell") < document.content.index("CLERIC SPELLS")
     assert document.metadata["bookmark_ocr_pages"] == []
     assert document.metadata["ocr_pages"] == []
     assert document.metadata["ocr_rejected_pages"] == []
@@ -902,6 +903,22 @@ def test_page_quality_detects_fused_pdf_word_streams() -> None:
 
     assert _page_quality(fused)["fused_text"] is True
     assert _page_quality(ordinary)["fused_text"] is False
+
+
+def test_pdf_word_break_noncharacter_repair_joins_layout_split_words() -> None:
+    pages, count = _repair_pdf_word_break_noncharacters(
+        ["The creature is trans￾\nformed.", "No sentinel here."]
+    )
+
+    assert pages == ["The creature is transformed.", "No sentinel here."]
+    assert count == 1
+
+
+def test_pdf_control_artifact_repair_removes_font_position_marker() -> None:
+    pages, count = _repair_pdf_control_artifacts(["A glyph\x02 marker.", "Clean."])
+
+    assert pages == ["A glyph marker.", "Clean."]
+    assert count == 1
 
 
 def test_page_quality_detects_ascii_font_map_lexical_damage() -> None:
@@ -954,9 +971,7 @@ def test_agent_page_revision_is_bounded_audited_and_non_destructive() -> None:
 
     assert "# Rod Of Rulership" in original.content
     assert "# ROD OF RULERSHIP" in revised.content
-    assert normalized_document_page_text(revised, 2) == normalized_document_page_text(
-        original, 2
-    )
+    assert normalized_document_page_text(revised, 2) == normalized_document_page_text(original, 2)
     assert revised.metadata["text_revision_pages"] == [1]
     assert revised.metadata["text_revisions"][0]["replacements"] == revision["replacements"]
 
@@ -994,9 +1009,7 @@ def test_agent_page_revision_rejects_ambiguous_or_stale_source_text() -> None:
             [
                 {
                     **revision,
-                    "replacements": [
-                        {"old": "rod and rod", "new": "<!-- page: 2 -->"}
-                    ],
+                    "replacements": [{"old": "rod and rod", "new": "<!-- page: 2 -->"}],
                 }
             ],
         )
@@ -1026,9 +1039,7 @@ def test_agent_page_revision_can_refine_the_same_unpublished_page() -> None:
     second = {
         **first,
         "base_text_sha256": hashlib.sha256(second_page.encode("utf-8")).hexdigest(),
-        "replacements": [
-            {"old": "## ROD OF RULERSHIP", "new": "##### ROD OF RULERSHIP"}
-        ],
+        "replacements": [{"old": "## ROD OF RULERSHIP", "new": "##### ROD OF RULERSHIP"}],
         "rationale": "Match the adjacent item-heading level.",
     }
 
@@ -1121,9 +1132,7 @@ def test_pdf_converter_routes_ascii_lexical_damage_through_ocr(
         )
         for _index in range(10)
     )
-    ordinary = (
-        "The second page retains every glyph and supplies ordinary source text. "
-    ) * 30
+    ordinary = ("The second page retains every glyph and supplies ordinary source text. ") * 30
     monkeypatch.setattr(
         "sagasmith_core.documents._extract_pdfium_pages",
         lambda _source, _profile: ([damaged, ordinary], {}, [1, 2]),
@@ -1166,9 +1175,7 @@ def test_pdf_converter_rejects_truncated_lexical_damage_ocr(
         )
         for _index in range(10)
     )
-    ordinary = (
-        "The second page retains every glyph and supplies ordinary source text. "
-    ) * 30
+    ordinary = ("The second page retains every glyph and supplies ordinary source text. ") * 30
     monkeypatch.setattr(
         "sagasmith_core.documents._extract_pdfium_pages",
         lambda _source, _profile: ([damaged, ordinary], {}, [1, 2]),
@@ -1486,21 +1493,14 @@ def test_pdf_normalization_promotes_only_targeted_top_level_bookmark() -> None:
     assert "# Episode 1: Greenest in Flames" in content
     assert '### Chapter 9 ("Lyn Armaal," area 23)' in content
     assert not any(
-        line.startswith('# Chapter 9 ("Lyn Armaal," area 23)')
-        for line in content.splitlines()
+        line.startswith('# Chapter 9 ("Lyn Armaal," area 23)') for line in content.splitlines()
     )
     assert metadata["matched_bookmarks"] == 1
 
 
 def test_pdf_normalization_uses_shallowest_structural_outline_depth() -> None:
     content, metadata, _warnings = build_structured_markdown(
-        [
-            "BOOK TITLE\n"
-            "CHAPTER 1: FIREBALL\n"
-            "Body.\n"
-            "CHAPTER 2: TROLLSKULL ALLEY\n"
-            "Body."
-        ],
+        ["BOOK TITLE\nCHAPTER 1: FIREBALL\nBody.\nCHAPTER 2: TROLLSKULL ALLEY\nBody."],
         [
             DocumentBookmark("Book Title", 1, 0),
             DocumentBookmark("Ch. 1: Fireball", 1, 1),
@@ -1570,16 +1570,13 @@ def test_pdf_normalization_does_not_anchor_bookmark_to_body_mention() -> None:
 
     assert "### By the time" not in content
     assert metadata["matched_bookmarks"] == 0
-    assert warnings == (
-        "text-bearing bookmark match rate is 0/1; expected at least 95%",
-    )
+    assert warnings == ("text-bearing bookmark match rate is 0/1; expected at least 95%",)
 
 
 def test_pdf_normalization_rejects_outline_paragraph_as_a_heading() -> None:
     paragraph = (
         "T VJ 7 w such as a city gate and a distant frontier. "
-        "Humans are famous for their adaptability across many diverse lands. "
-        * 8
+        "Humans are famous for their adaptability across many diverse lands. " * 8
     ).strip()
     assert len(paragraph) > 500
 
@@ -1984,9 +1981,7 @@ def test_continuity_commit_upserts_same_fact_key_on_a_sibling_branch(database) -
     assert alternate_fact["revision_id"] != main_fact["revision_id"]
     facts = MemoryService(database)
     assert facts.list(campaign.id, branch_id=main.id)[0].content.endswith("main branch.")
-    assert facts.list(campaign.id, branch_id=alternate.id)[0].content.endswith(
-        "alternate branch."
-    )
+    assert facts.list(campaign.id, branch_id=alternate.id)[0].content.endswith("alternate branch.")
 
 
 def test_continuity_commit_rolls_back_every_ledger_on_failure(database) -> None:
@@ -2425,9 +2420,7 @@ def test_actor_scoped_events_follow_visible_actor_knowledge(database) -> None:
 def test_actor_scoped_events_follow_explicit_participants_without_fake_knowledge(
     database,
 ) -> None:
-    campaign = CampaignService(database).create(
-        system_id="dnd5e", name="Private conversation"
-    )
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Private conversation")
     characters = CharacterService(database)
     speaker = characters.create(
         system_id="dnd5e", campaign_id=campaign.id, name="Speaker", character_type="npc"
@@ -2578,9 +2571,7 @@ def test_actor_event_authorization_is_not_limited_by_knowledge_top_n(database) -
         limit=1,
     )
 
-    assert [item["knowledge_key"] for item in context["actor_knowledge"]] == [
-        "decoy-query-match"
-    ]
+    assert [item["knowledge_key"] for item in context["actor_knowledge"]] == ["decoy-query-match"]
     assert [item["id"] for item in context["events"]] == [event.id]
 
 
@@ -2741,30 +2732,22 @@ def test_context_anchor_pins_exact_dm_module_evidence_without_encoding_behavior(
     ]
     assert context["facts"] == []
     assert context["module_evidence"][0]["pinned"] is True
-    assert context["module_evidence"][0]["context_role"] == (
-        "non_executable_module_evidence"
-    )
-    assert context["module_evidence"][0]["anchor_fact_keys"] == [
-        "context:actor:zaltember:ironslag"
-    ]
+    assert context["module_evidence"][0]["context_role"] == ("non_executable_module_evidence")
+    assert context["module_evidence"][0]["anchor_fact_keys"] == ["context:actor:zaltember:ironslag"]
     assert "purposes" not in context["module_evidence"][0]
     assert context["module_evidence"][0]["source_ref"] == source_ref
-    assert context["module_evidence"][0]["source_excerpt"].endswith(
-        "he flees to area 31."
-    )
-    assert context["retrieval"]["strategy"] == (
-        "lexical_structured_pinned_module_evidence_v3"
-    )
+    assert context["module_evidence"][0]["source_excerpt"].endswith("he flees to area 31.")
+    assert context["retrieval"]["strategy"] == ("lexical_structured_pinned_module_evidence_v3")
     assert context["retrieval"]["pinned_module_evidence_count"] == 1
-    assert restored["module_evidence"][0]["source_ref"] == (
-        context["module_evidence"][0]["source_ref"]
+    assert (
+        restored["module_evidence"][0]["source_ref"]
+        == (context["module_evidence"][0]["source_ref"])
     )
-    assert restored["module_evidence"][0]["source_excerpt"] == (
-        context["module_evidence"][0]["source_excerpt"]
+    assert (
+        restored["module_evidence"][0]["source_excerpt"]
+        == (context["module_evidence"][0]["source_excerpt"])
     )
-    assert restored["module_evidence"][0]["matched_refs"] == [
-        "quest:obtain-fire-giant-conch"
-    ]
+    assert restored["module_evidence"][0]["matched_refs"] == ["quest:obtain-fire-giant-conch"]
     assert restored["module_evidence"][0]["anchor_fact_keys"] == [
         "context:actor:zaltember:ironslag",
         "context:item:fire-giant-conch:ironslag",
@@ -2787,9 +2770,7 @@ def test_context_anchor_rejects_conditions_player_visibility_and_paraphrased_sou
         title="Strict",
         content="# Chapter\n## Scene\nThe guard retreats when wounded.\n",
     )
-    expanded = modules.expand(
-        modules.search(campaign_id=campaign.id, query="guard retreats")[0].id
-    )
+    expanded = modules.expand(modules.search(campaign_id=campaign.id, query="guard retreats")[0].id)
     metadata = {
         "schema_version": 1,
         "purpose": "Guard behavior source",
@@ -3222,9 +3203,7 @@ def test_branch_checkout_bulk_restores_large_revision_cursor(database) -> None:
     base = snapshots.create(campaign.id, label="Sixty revisions")
     copy_statements: list[str] = []
 
-    def record_copy_statement(
-        _conn, _cursor, statement, _parameters, _context, _many
-    ) -> None:
+    def record_copy_statement(_conn, _cursor, statement, _parameters, _context, _many) -> None:
         copy_statements.append(" ".join(statement.upper().split()))
 
     event.listen(database.engine, "before_cursor_execute", record_copy_statement)
@@ -3247,8 +3226,7 @@ def test_branch_checkout_bulk_restores_large_revision_cursor(database) -> None:
     ]
     assert revision_copy_selects
     assert all(
-        "STATE_REVISIONS.BEFORE" not in statement
-        and "STATE_REVISIONS.AFTER" not in statement
+        "STATE_REVISIONS.BEFORE" not in statement and "STATE_REVISIONS.AFTER" not in statement
         for statement in revision_copy_selects
     )
     with database.session_factory() as session:
@@ -3264,10 +3242,7 @@ def test_branch_checkout_bulk_restores_large_revision_cursor(database) -> None:
         )
         audit_rows = list(session.scalars(select(AuditLog)))
     assert len(cloned_revisions) == 60
-    assert all(
-        row.before is None and row.after is None
-        for row in cloned_revisions
-    )
+    assert all(row.before is None and row.after is None for row in cloned_revisions)
     assert audit_rows
     assert all(row.before is None and row.after is None for row in audit_rows)
     current = campaigns.get(campaign.id)
@@ -3295,9 +3270,7 @@ def test_branch_checkout_bulk_restores_large_revision_cursor(database) -> None:
     RevisionService(database).undo(campaign.id)
     assert campaigns.get(campaign.id).state == {"step": 58}
     revision_statements = [
-        statement
-        for statement in statements
-        if "state_revisions" in statement.casefold()
+        statement for statement in statements if "state_revisions" in statement.casefold()
     ]
     assert len(revision_statements) <= 12
 
@@ -3415,9 +3388,7 @@ def test_state_mutation_atomically_transfers_complete_actor_knowledge(database) 
     assert copied[0].subject_ref == known.subject_ref
     assert copied[0].cause == "body_thief"
     assert copied[0].disclosure_scope == "dm"
-    assert CampaignService(database).get(campaign.id).state == {
-        "phase": "body-taken"
-    }
+    assert CampaignService(database).get(campaign.id).state == {"phase": "body-taken"}
 
 
 def test_state_mutation_transfers_only_explicit_actor_knowledge_ids(database) -> None:
@@ -3562,10 +3533,7 @@ def test_state_mutation_persists_exact_replay_response_atomically(database) -> N
         operation="test.atomic-replay",
         idempotency_key="atomic-replay",
         idempotency_write=IdempotencyWrite(
-            scope=(
-                f"test-atomic-replay:{campaign.id}:"
-                f"{branch_id}:system:local"
-            ),
+            scope=(f"test-atomic-replay:{campaign.id}:{branch_id}:system:local"),
             payload=public_request,
             response=lambda committed: {
                 "status": "committed",
@@ -3770,9 +3738,7 @@ def test_snapshot_recap_query_is_pure_and_checkpoint_receipt_is_atomic(database)
                 response=fail_response,
             ),
         )
-    assert [item.id for item in BranchService(database).list(campaign.id)] == [
-        original_branch.id
-    ]
+    assert [item.id for item in BranchService(database).list(campaign.id)] == [original_branch.id]
     assert BranchService(database).current(campaign.id).id == original_branch.id
 
 

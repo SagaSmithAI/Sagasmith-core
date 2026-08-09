@@ -91,9 +91,7 @@ class RuleProfileService:
                 and row.edition
                 and row.edition != edition
                 and session.scalar(
-                    select(Character.id)
-                    .where(Character.campaign_id == campaign_id)
-                    .limit(1)
+                    select(Character.id).where(Character.campaign_id == campaign_id).limit(1)
                 )
                 is not None
             ):

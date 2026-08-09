@@ -95,4 +95,3 @@ class Database:
 
     def dispose(self) -> None:
         self.engine.dispose()
-

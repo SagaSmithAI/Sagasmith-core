@@ -24,9 +24,7 @@ from sagasmith_core.models import (
 
 PACK_ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)+$")
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
-MECHANIC_REF_RE = re.compile(
-    r"^[a-z][a-z0-9]*(?:[._:-][a-z0-9]+)+$"
-)
+MECHANIC_REF_RE = re.compile(r"^[a-z][a-z0-9]*(?:[._:-][a-z0-9]+)+$")
 
 
 class RulePackError(ValueError):
@@ -281,11 +279,11 @@ class RulePackService:
                 CampaignRuleActivation,
                 {"campaign_id": campaign_id, "branch_id": branch.id, "pack_id": pack_id},
             )
-            addon_owners = {
-                str(item)
-                for item in dict(row.options or {}).get("_addon_ids", [])
-                if str(item)
-            } if row is not None else set()
+            addon_owners = (
+                {str(item) for item in dict(row.options or {}).get("_addon_ids", []) if str(item)}
+                if row is not None
+                else set()
+            )
             if addon_owners:
                 raise RulePackError(
                     "rule-pack activation is owned by active addons; change the "
@@ -356,11 +354,11 @@ class RulePackService:
                     "pack_id": pack_id,
                 },
             )
-            addon_owners = {
-                str(item)
-                for item in dict(owned.options or {}).get("_addon_ids", [])
-                if str(item)
-            } if owned is not None else set()
+            addon_owners = (
+                {str(item) for item in dict(owned.options or {}).get("_addon_ids", []) if str(item)}
+                if owned is not None
+                else set()
+            )
             if addon_owners:
                 raise RulePackError(
                     "rule-pack activation is owned by active addons; change the "
@@ -535,21 +533,12 @@ class RulePackService:
             if dependency_checksum and not re.fullmatch(r"[0-9a-f]{64}", dependency_checksum):
                 errors.append(f"manifest.dependencies[{index}].checksum must be a SHA-256")
         native_mechanic_refs = {
-            str(item)
-            for item in manifest.get("native_mechanic_refs", [])
-            if isinstance(item, str)
+            str(item) for item in manifest.get("native_mechanic_refs", []) if isinstance(item, str)
         }
-        if (
-            len(native_mechanic_refs)
-            != len(manifest.get("native_mechanic_refs", []))
-            or any(
-                MECHANIC_REF_RE.fullmatch(item) is None
-                for item in native_mechanic_refs
-            )
+        if len(native_mechanic_refs) != len(manifest.get("native_mechanic_refs", [])) or any(
+            MECHANIC_REF_RE.fullmatch(item) is None for item in native_mechanic_refs
         ):
-            errors.append(
-                "manifest.native_mechanic_refs must contain unique stable ids"
-            )
+            errors.append("manifest.native_mechanic_refs must contain unique stable ids")
         ids: set[str] = set()
         declared_capabilities = {str(item) for item in manifest.get("capabilities", [])}
         for index, mechanic in enumerate(mechanics):
@@ -588,45 +577,32 @@ class RulePackService:
                 refs = []
             embedded = artifact.get("embedded_mechanic_refs", [])
             if not isinstance(embedded, list):
-                errors.append(
-                    f"artifacts[{index}].embedded_mechanic_refs must be a list"
-                )
+                errors.append(f"artifacts[{index}].embedded_mechanic_refs must be a list")
                 embedded = []
             normalized_embedded = [str(item) for item in embedded]
-            if (
-                len(normalized_embedded) != len(set(normalized_embedded))
-                or any(
-                    MECHANIC_REF_RE.fullmatch(item) is None
-                    or not item.startswith(f"{pack_id}.")
-                    for item in normalized_embedded
-                )
+            if len(normalized_embedded) != len(set(normalized_embedded)) or any(
+                MECHANIC_REF_RE.fullmatch(item) is None or not item.startswith(f"{pack_id}.")
+                for item in normalized_embedded
             ):
                 errors.append(
                     f"artifacts[{index}].embedded_mechanic_refs must contain "
                     "unique ids in the pack namespace"
                 )
-            duplicate_embedded = sorted(
-                set(normalized_embedded) & embedded_ids
-            )
+            duplicate_embedded = sorted(set(normalized_embedded) & embedded_ids)
             if duplicate_embedded:
                 errors.append(
                     "embedded mechanic ids must be unique across artifacts: "
                     + ", ".join(duplicate_embedded)
                 )
             embedded_ids.update(normalized_embedded)
-            missing_embedded_refs = sorted(
-                set(normalized_embedded) - {str(item) for item in refs}
-            )
+            missing_embedded_refs = sorted(set(normalized_embedded) - {str(item) for item in refs})
             if missing_embedded_refs:
                 errors.append(
                     f"artifacts[{index}].embedded_mechanic_refs are not present "
-                    "in mechanic_refs: "
-                    + ", ".join(missing_embedded_refs)
+                    "in mechanic_refs: " + ", ".join(missing_embedded_refs)
                 )
             known_refs = ids | native_mechanic_refs | set(normalized_embedded)
-            unknown_refs = sorted(
-                {str(item) for item in refs if str(item) not in known_refs}
-            )
+            unknown_refs = sorted({str(item) for item in refs if str(item) not in known_refs})
             if unknown_refs:
                 errors.append(
                     f"artifacts[{index}].mechanic_refs are unknown: {', '.join(unknown_refs)}"
@@ -697,11 +673,18 @@ class RulePackService:
                     )
                     or {}
                 )
+                content_definition = dict(
+                    (dependency.provenance if dependency is not None else {}).get(
+                        "content_definition"
+                    )
+                    or {}
+                )
                 accepted_checksums = {
                     str(value)
                     for value in (
                         dependency.checksum if dependency is not None else "",
                         portable_package.get("definition_checksum"),
+                        content_definition.get("definition_checksum"),
                     )
                     if value
                 }

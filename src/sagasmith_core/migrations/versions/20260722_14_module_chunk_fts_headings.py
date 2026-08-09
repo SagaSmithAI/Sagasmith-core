@@ -9,10 +9,14 @@ depends_on = None
 
 
 def _exists(name: str, kind: str) -> bool:
-    row = op.get_bind().exec_driver_sql(
-        "SELECT 1 FROM sqlite_master WHERE name = ? AND type = ?",
-        (name, kind),
-    ).first()
+    row = (
+        op.get_bind()
+        .exec_driver_sql(
+            "SELECT 1 FROM sqlite_master WHERE name = ? AND type = ?",
+            (name, kind),
+        )
+        .first()
+    )
     return row is not None
 
 

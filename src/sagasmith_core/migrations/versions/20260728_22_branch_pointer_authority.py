@@ -16,10 +16,7 @@ def upgrade() -> None:
     tables = set(inspector.get_table_names())
     if not {"campaigns", "campaign_branches"}.issubset(tables):
         return
-    columns = {
-        str(item["name"])
-        for item in inspector.get_columns("campaign_branches")
-    }
+    columns = {str(item["name"]) for item in inspector.get_columns("campaign_branches")}
     if "is_current" not in columns:
         return
     op.execute(
@@ -39,9 +36,7 @@ def upgrade() -> None:
         """
     )
     indexes = {
-        str(item["name"])
-        for item in inspector.get_indexes("campaign_branches")
-        if item.get("name")
+        str(item["name"]) for item in inspector.get_indexes("campaign_branches") if item.get("name")
     }
     with op.batch_alter_table("campaign_branches") as batch:
         if "ix_campaign_branch_current" in indexes:
@@ -53,10 +48,7 @@ def downgrade() -> None:
     inspector = sa.inspect(op.get_bind())
     if not inspector.has_table("campaign_branches"):
         return
-    columns = {
-        str(item["name"])
-        for item in inspector.get_columns("campaign_branches")
-    }
+    columns = {str(item["name"]) for item in inspector.get_columns("campaign_branches")}
     if "is_current" in columns:
         return
     with op.batch_alter_table("campaign_branches") as batch:

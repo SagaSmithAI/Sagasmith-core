@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
@@ -41,6 +43,8 @@ _TRANSITIONS = {
     "extracted": {"review_required", "failed"},
     # A source-bound Agent may add missed semantic entities before any approval.
     # Replacing the candidate set keeps the job in review and invalidates drafts.
+    # Candidate decisions remain editable until an explicit finalization call.
+    # Merely assigning accepted/rejected dispositions must not freeze a draft.
     "review_required": {"review_required", "reviewed", "failed"},
     "reviewed": {"compiled", "failed"},
     # A validated but not-yet-installed draft may be reopened when improved
@@ -49,7 +53,10 @@ _TRANSITIONS = {
     "compiled": {"extracted", "review_required", "installed", "failed"},
     "installed": {"activated", "failed"},
     "validated": {"imported", "failed"},
-    "imported": {"activated", "failed"},
+    # An inactive imported module remains an editable workspace until its
+    # portable package is explicitly finalized. Finalization records the
+    # immutable package and moves the job to the shared compiled state.
+    "imported": {"inspected", "imported", "compiled", "activated", "failed"},
     "activated": set(),
     "failed": {"inspected", "extracted", "validated", "compiled", "failed"},
 }
@@ -187,6 +194,9 @@ class ImportJobService:
             if status not in {"pending", "accepted", "rejected", "needs_revision"}:
                 raise ImportJobError(f"candidates[{index}].review_status is invalid")
             value["review_status"] = status
+            value.setdefault("original_fingerprint", self._candidate_fingerprint(value))
+            value.setdefault("edit_history", [])
+            value["draft_state"] = "editing"
             normalized.append(value)
         return self._update(
             job_id,
@@ -230,11 +240,12 @@ class ImportJobService:
                 if candidate_id not in by_id:
                     raise ImportJobError(f"unknown candidate: {candidate_id}")
                 status = str(decision.get("review_status") or "").strip()
-                if status not in {"accepted", "rejected", "needs_revision"}:
+                if status not in {"pending", "accepted", "rejected", "needs_revision"}:
                     raise ImportJobError(
-                        "review_status must be accepted, rejected, or needs_revision"
+                        "review_status must be pending, accepted, rejected, or needs_revision"
                     )
                 candidate = by_id[candidate_id]
+                before_fingerprint = self._candidate_fingerprint(candidate)
                 candidate["review_status"] = status
                 if "artifact" in decision:
                     artifact = decision["artifact"]
@@ -243,17 +254,118 @@ class ImportJobService:
                     candidate["artifact"] = dict(artifact)
                 if "note" in decision:
                     candidate["review_note"] = str(decision["note"])
+                if "draft_issues" in decision:
+                    issues = decision["draft_issues"]
+                    if not isinstance(issues, list) or any(
+                        not isinstance(item, dict) for item in issues
+                    ):
+                        raise ImportJobError("candidate draft_issues must be an array of objects")
+                    candidate["draft_issues"] = [dict(item) for item in issues]
+                if "disposition" in decision:
+                    disposition = str(decision["disposition"] or "")
+                    if disposition not in {"include", "exclude", "unresolved"}:
+                        raise ImportJobError(
+                            "candidate disposition must be include, exclude, or unresolved"
+                        )
+                    candidate["disposition"] = disposition
+                candidate["draft_state"] = "editing"
+                after_fingerprint = self._candidate_fingerprint(candidate)
+                history = list(candidate.get("edit_history") or [])
+                history.append(
+                    {
+                        "schema_version": 1,
+                        "revision": row.revision + 1,
+                        "editor": str(decision.get("editor") or "agent")[:200],
+                        "operation": str(decision.get("operation") or "edit")[:100],
+                        "note": str(decision.get("note") or "")[:2000],
+                        "before_fingerprint": before_fingerprint,
+                        "after_fingerprint": after_fingerprint,
+                    }
+                )
+                candidate["edit_history"] = history
             row.candidates = values
-            next_state = (
-                "reviewed"
-                if values
-                and all(item.get("review_status") in {"accepted", "rejected"} for item in values)
-                else "review_required"
-            )
+            # Accepted/rejected are editable draft dispositions. Only
+            # finalize_candidate_review may cross into the frozen reviewed state.
+            next_state = "review_required"
             self._require_transition(row.state, next_state)
             row.state = next_state
+            row.validation = {}
+            result_value = dict(row.result or {})
+            result_value.pop("review_finalization", None)
+            row.result = result_value
             row.revision += 1
             row.error = ""
+            session.flush()
+            result = self._info(row)
+            idempotency.remember_write_in_session(
+                session,
+                campaign_id=row.campaign_id,
+                key=idempotency_key,
+                write=idempotency_write,
+                result=result,
+            )
+            return result
+
+    def finalize_candidate_review(
+        self,
+        job_id: str,
+        *,
+        candidates: list[dict[str, Any]] | None = None,
+        confirmation: dict[str, Any],
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+        idempotency_write: IdempotencyWrite | None = None,
+    ) -> ImportJobInfo:
+        """Freeze one completely dispositioned candidate draft for compilation."""
+
+        if not isinstance(confirmation, dict) or not confirmation:
+            raise ImportJobError("candidate review finalization requires confirmation metadata")
+        with self.database.transaction() as session:
+            row = self._row(session, job_id)
+            idempotency = IdempotencyService(self.database)
+            idempotency.require_uncommitted_in_session(
+                session,
+                idempotency_key,
+                idempotency_write,
+            )
+            if expected_revision is not None and row.revision != expected_revision:
+                raise ImportJobError(
+                    "import job revision conflict: "
+                    f"expected {expected_revision}, found {row.revision}"
+                )
+            if row.state != "review_required":
+                raise ImportJobError("only an editable candidate review may be finalized")
+            values = [dict(item) for item in (candidates or row.candidates or [])]
+            current_ids = [str(item.get("id") or "") for item in row.candidates or []]
+            final_ids = [str(item.get("id") or "") for item in values]
+            if not values or final_ids != current_ids or len(set(final_ids)) != len(final_ids):
+                raise ImportJobError(
+                    "finalized candidates must preserve the complete ordered draft identity set"
+                )
+            incomplete = [
+                candidate_id
+                for candidate_id, value in zip(final_ids, values, strict=True)
+                if value.get("review_status") not in {"accepted", "rejected"}
+            ]
+            if incomplete:
+                raise ImportJobError(
+                    "candidate review cannot be finalized with unresolved dispositions: "
+                    + ", ".join(incomplete)
+                )
+            for value in values:
+                value["draft_state"] = "finalized"
+            self._require_transition(row.state, "reviewed")
+            row.candidates = values
+            row.state = "reviewed"
+            row.revision += 1
+            row.error = ""
+            result_value = dict(row.result or {})
+            result_value["review_finalization"] = {
+                **dict(confirmation),
+                "candidate_revision": row.revision,
+                "candidate_set_fingerprint": self._candidate_fingerprint(values),
+            }
+            row.result = result_value
             session.flush()
             result = self._info(row)
             idempotency.remember_write_in_session(
@@ -356,6 +468,10 @@ class ImportJobService:
             self._require_transition(row.state, state)
             for key, value in fields.items():
                 setattr(row, key, value)
+            if state == "review_required" and "result" not in fields:
+                result_value = dict(row.result or {})
+                result_value.pop("review_finalization", None)
+                row.result = result_value
             row.state = state
             row.revision += 1
             if state != "failed" and "error" not in fields:
@@ -383,9 +499,7 @@ class ImportJobService:
         if current == target:
             return
         if target not in _TRANSITIONS.get(current, set()):
-            raise ImportJobError(
-                f"invalid import job transition: {current} -> {target}"
-            )
+            raise ImportJobError(f"invalid import job transition: {current} -> {target}")
 
     @staticmethod
     def _info(row: ImportJob) -> ImportJobInfo:
@@ -409,3 +523,26 @@ class ImportJobService:
             error=row.error,
             revision=row.revision,
         )
+
+    @staticmethod
+    def _candidate_fingerprint(value: Any) -> str:
+        """Hash one draft value without recursively hashing its edit ledger."""
+
+        def semantic(item: Any) -> Any:
+            if isinstance(item, dict):
+                return {
+                    str(key): semantic(child)
+                    for key, child in item.items()
+                    if str(key) not in {"edit_history", "original_fingerprint"}
+                }
+            if isinstance(item, list):
+                return [semantic(child) for child in item]
+            return item
+
+        encoded = json.dumps(
+            semantic(value),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()

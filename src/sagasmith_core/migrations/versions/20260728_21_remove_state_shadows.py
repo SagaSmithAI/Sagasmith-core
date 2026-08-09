@@ -15,10 +15,7 @@ def upgrade() -> None:
     inspector = sa.inspect(op.get_bind())
     tables = set(inspector.get_table_names())
     if "campaign_snapshots" in tables:
-        columns = {
-            str(item["name"])
-            for item in inspector.get_columns("campaign_snapshots")
-        }
+        columns = {str(item["name"]) for item in inspector.get_columns("campaign_snapshots")}
         if "is_head" in columns:
             indexes = {
                 str(item["name"])
@@ -31,8 +28,7 @@ def upgrade() -> None:
                 batch.drop_column("is_head")
     if "module_chapters" in tables:
         op.execute(
-            "UPDATE module_chapters SET status = 'indexed' "
-            "WHERE status IN ('current', 'locked')"
+            "UPDATE module_chapters SET status = 'indexed' WHERE status IN ('current', 'locked')"
         )
 
 
@@ -40,10 +36,7 @@ def downgrade() -> None:
     inspector = sa.inspect(op.get_bind())
     if not inspector.has_table("campaign_snapshots"):
         return
-    columns = {
-        str(item["name"])
-        for item in inspector.get_columns("campaign_snapshots")
-    }
+    columns = {str(item["name"]) for item in inspector.get_columns("campaign_snapshots")}
     if "is_head" not in columns:
         with op.batch_alter_table("campaign_snapshots") as batch:
             batch.add_column(

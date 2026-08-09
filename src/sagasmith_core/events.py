@@ -70,9 +70,7 @@ class EventService:
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
             idempotency = IdempotencyService(self.database)
-            idempotency.require_uncommitted_in_session(
-                session, idempotency_key, idempotency_write
-            )
+            idempotency.require_uncommitted_in_session(session, idempotency_key, idempotency_write)
             branch = resolve_branch(session, campaign, branch_id)
             result = self._add_in_session(
                 session,
@@ -126,9 +124,7 @@ class EventService:
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
             idempotency = IdempotencyService(self.database)
-            idempotency.require_uncommitted_in_session(
-                session, idempotency_key, idempotency_write
-            )
+            idempotency.require_uncommitted_in_session(session, idempotency_key, idempotency_write)
             branch = resolve_branch(session, campaign, branch_id)
             actors = [session.get(Character, actor_id) for actor_id in normalized_actor_ids]
             if any(actor is None or actor.campaign_id != campaign_id for actor in actors):
@@ -148,9 +144,7 @@ class EventService:
                         {"branch_id": branch.id, "knowledge_id": knowledge.id},
                     )
                     if head is not None:
-                        raise ValueError(
-                            f"knowledge key already exists for actor: {knowledge_key}"
-                        )
+                        raise ValueError(f"knowledge key already exists for actor: {knowledge_key}")
                 else:
                     knowledge = ActorKnowledge(
                         id=str(uuid.uuid4()),
@@ -339,8 +333,7 @@ class EventService:
                             select(ActorKnowledgeRevision.source_event_id)
                             .join(
                                 BranchActorKnowledgeHead,
-                                BranchActorKnowledgeHead.revision_id
-                                == ActorKnowledgeRevision.id,
+                                BranchActorKnowledgeHead.revision_id == ActorKnowledgeRevision.id,
                             )
                             .join(
                                 ActorKnowledge,
@@ -452,9 +445,7 @@ class EventService:
             )
         )
         for row in rows:
-            result.setdefault(row.event_id, []).append(
-                {"actor_id": row.actor_id, "role": row.role}
-            )
+            result.setdefault(row.event_id, []).append({"actor_id": row.actor_id, "role": row.role})
         return result
 
     @staticmethod

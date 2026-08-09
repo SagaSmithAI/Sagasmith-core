@@ -73,9 +73,7 @@ def validate_subject_context_fact(*, kind: Any, subject_ref: Any) -> None:
         field=f"{normalized_kind} subject_ref",
     )
     if not normalized_ref.startswith(f"{expected_prefix}:"):
-        raise ValueError(
-            f"{normalized_kind} subject_ref must use {expected_prefix}:<id>"
-        )
+        raise ValueError(f"{normalized_kind} subject_ref must use {expected_prefix}:<id>")
 
 
 class MemoryService:
@@ -109,9 +107,7 @@ class MemoryService:
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
             idempotency = IdempotencyService(self.database)
-            idempotency.require_uncommitted_in_session(
-                session, idempotency_key, idempotency_write
-            )
+            idempotency.require_uncommitted_in_session(session, idempotency_key, idempotency_write)
             branch = resolve_branch(session, campaign, branch_id)
             result: MemoryInfo
             if fact_key is not None:
@@ -227,9 +223,7 @@ class MemoryService:
             if campaign is None:
                 raise CampaignNotFoundError(memory.campaign_id)
             idempotency = IdempotencyService(self.database)
-            idempotency.require_uncommitted_in_session(
-                session, idempotency_key, idempotency_write
-            )
+            idempotency.require_uncommitted_in_session(session, idempotency_key, idempotency_write)
             branch = resolve_branch(session, campaign, branch_id)
             result = self._revise_in_session(
                 session,
@@ -284,9 +278,7 @@ class MemoryService:
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
             idempotency = IdempotencyService(self.database)
-            idempotency.require_uncommitted_in_session(
-                session, idempotency_key, idempotency_write
-            )
+            idempotency.require_uncommitted_in_session(session, idempotency_key, idempotency_write)
             branch = resolve_branch(session, campaign, branch_id)
             memory = session.scalar(
                 select(CampaignMemory).where(
@@ -411,9 +403,7 @@ class MemoryService:
         branch_id: str | None = None,
         include_inactive: bool = False,
     ) -> list[MemoryInfo]:
-        values = self.list(
-            campaign_id, branch_id=branch_id, include_inactive=include_inactive
-        )
+        values = self.list(campaign_id, branch_id=branch_id, include_inactive=include_inactive)
         ranked = sorted(
             values,
             key=lambda item: (
@@ -472,9 +462,7 @@ class MemoryService:
                 .order_by(CampaignMemory.fact_key, CampaignMemory.id)
             )
             if normalized_predicates:
-                statement = statement.where(
-                    CampaignMemory.predicate.in_(normalized_predicates)
-                )
+                statement = statement.where(CampaignMemory.predicate.in_(normalized_predicates))
             if normalized_kinds:
                 statement = statement.where(CampaignMemory.kind.in_(normalized_kinds))
             if not include_inactive:

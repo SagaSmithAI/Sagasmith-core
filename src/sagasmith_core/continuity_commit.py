@@ -51,9 +51,7 @@ class ContinuityCommitService:
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
             idempotency = IdempotencyService(self.database)
-            idempotency.require_uncommitted_in_session(
-                session, idempotency_key, idempotency_write
-            )
+            idempotency.require_uncommitted_in_session(session, idempotency_key, idempotency_write)
             branch = resolve_branch(session, campaign, branch_id)
             event_info = self.events._add_in_session(
                 session,

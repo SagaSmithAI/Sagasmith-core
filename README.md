@@ -16,7 +16,7 @@
 - **事件与长期记忆** — 事件日志、事实身份、分支修订、continuity context 与 recap 数据面。
 - **规则包** — core/extension 包、profile 锁定、版本与来源、规则 receipt 和机械 IR。
 - **内容导入** — 可恢复 import job、内容寻址的标准化/页面缓存、PDFium 文本提取、选择性 OCR 质量门禁与页码索引。
-- **可移植内容** — 同一 actor-card schema 覆盖 PC/NPC/怪物；module、preset、source-bound rule pack 可独立迁移，并可用无权限语义的 release manifest 组合发布。
+- **统一内容包** — core rules、addon、module、preset 共用 v2 归档骨架，携带 v3 PC/NPC/怪物卡、标准化来源、内容寻址资产、严格校验及模块 Agent 定稿记录。
 - **检索** — 精确与词法检索、SQLite FTS5，以及可选的 ChromaDB + sentence-transformers。
 - **插件系统** — 通过 `sagasmith.systems` entry point 注册 D&D、CoC 或新的系统实现。
 
@@ -36,27 +36,22 @@ Core 不负责主持风格、MCP 工具暴露或具体规则裁决。Agent Skill
 
 ## 可分享内容格式
 
-`sagasmith.portable` v1 是系统无关的 JSON envelope，并使用 canonical JSON
-与 SHA-256 检测篡改：
+`sagasmith.content-package` v2 是唯一公开交换格式，文件扩展名为
+`.sagasmith-pack`。`addon`、`module`、`preset`、`core_rules` 共用同一归档骨架：
+校验和锁定的 manifest、结构化内容、actor cards、来源索引，以及
+`blobs/sha256/` 中的原始文档、标准化全文和图片。
+完整的 archive、证据、角色图与 kind 语义见
+[`docs/CONTENT_PACKAGES.md`](docs/CONTENT_PACKAGES.md)。
 
-- `actor_card`：PC、NPC 和怪物统一格式，`actor_type` 只表示角色类别。导入总是创建新的本地 identity；数据库 id、campaign、revision、权限和 ActorKnowledge 不会被导出。
-- `module_pack` v2：独立的 `.sagasmith-module` ZIP 归档。JSON 描述文件封装分类、适用版本、推荐人数/等级/升级方式、连续战役策略、精确依赖、标准化文档、签名 Scene Atlas、内容目录、叙事 dossier/关系/结局、审核记录、actor cards、组件锁和七维 readiness；大文件按 SHA-256 放入 `blobs/sha256/`。只有 `playable`/`complete` 可激活。它不封装进度、世界状态、记忆、随机流、分支或 Snapshot。旧 `sagasmith.module-pack.v1` 被直接拒绝，不提供兼容读取。
-- `preset_pack`：可复用 actor card 集合，例如某规则系统随附的标准怪物/NPC 卡库。
-- `actor_card` v2 必须内嵌一张带 checksum、媒体类型、许可、署名和来源引用的
-  PNG/JPEG/WebP/AVIF 角色图。图片属于便携卡，不导入运行时角色，也不进入 Snapshot。
-  旧 v1 卡被拒绝，不提供兼容读取。
-- `rule_pack`：封装规则 manifest、catalog artifacts、mechanic IR、来源 provenance 与完整检索 source/section/chunk。数据库 UUID 会替换为稳定 `source_key`/`chunk_key`，接收端再创建本地 id；`metadata.definition_checksum` 只锁定规则语义与依赖，不受本地 UUID 或 private/shareable 发布元数据影响。
-- `release_manifest`：只以精确版本与完整 envelope checksum 组合 `rule_pack`、`preset_pack`、`module_pack`；它不是安装、启用或权限载体。
+actor card 使用 `sagasmith.actor-card.v3`，统一表示 PC、NPC 与怪物。每张卡可引用
+一张带媒体类型、许可、署名及来源证据的角色图；图片留在卡和内容包中，不复制到
+运行时角色或 Snapshot。导入角色始终产生新的本地 identity，且绝不携带 campaign、
+revision、权限、ActorKnowledge、随机流或进度。
 
-`addon_pack` 不得内嵌或激活模组；扩展规则、预设与模组分别发布，并用精确依赖连接。
-
-Core 只校验通用 envelope 并通过公开服务重建内容。系统插件仍需校验
-sheet、edition 和规则依赖；应用/MCP 仍需负责授权和导入根目录。可使用
-`CharacterService.export_portable_card/import_portable_card`、
-`ModuleService.export_portable_pack/import_portable_pack` 与
-`ModuleService.bind_actor/list_actor_bindings`。规则来源通过
-`RuleService.export_portable_source/import_portable_source` 重建；规则包仍由
-`RulePackService` 独立完成 draft、install 与 campaign activation 生命周期。
+Core 校验统一归档并通过公开服务重建来源、角色与模组结构；系统插件继续校验
+sheet、edition、规则依赖和具体语义，应用/MCP 负责权限与导入根目录。规则包仍由
+`RulePackService` 完成 draft、install 和 campaign activation 生命周期。旧 portable、
+release manifest 与 `.sagasmith-module` 不是公开兼容协议。
 
 ## 核心领域
 
@@ -66,8 +61,8 @@ sheet、edition 和规则依赖；应用/MCP 仍需负责授权和导入根目�
 | Character | `CharacterService`, `StateMutationService` | revisioned sheet、受控状态写入、actor-card 导入/导出 |
 | Knowledge | `ActorKnowledgeService` | actor 视角隔离、分支有效性 |
 | Timeline | `SnapshotService`, `BranchService`, `ContinuityService` | DAG 祖先链、checkout、连续性上下文 |
-| Content | `ImportJobService`, `ModuleService`, `PdfDocumentConverter` | 可恢复导入、来源、结构、portable module/preset pack |
-| Rules | `RuleService`, `RulePackService`, `RuleProfileService`, `RuleReceiptService` | portable 来源、规则包版本、精确依赖、激活上下文和结算证据 |
+| Content | `ImportJobService`, `ModuleService`, `PdfDocumentConverter` | 可恢复导入、来源、结构、统一 content package |
+| Rules | `RuleService`, `RulePackService`, `RuleProfileService`, `RuleReceiptService` | 内容包来源、规则包版本、精确依赖、激活上下文和结算证据 |
 | Retrieval | `RuleService`, `VectorStore` | 检索可降级，权威状态不交给向量库 |
 
 ## 安装

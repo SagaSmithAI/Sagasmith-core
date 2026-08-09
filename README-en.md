@@ -14,7 +14,7 @@
 - **Events and long-term memory** — event logs, stable fact identity, branch revisions, recaps, and continuity context.
 - **Rule packs** — core/extension packages, profile locks, provenance, rule receipts, and mechanic IR.
 - **Content ingestion** — resumable import jobs, content-addressed normalization/page caches, PDFium text extraction, selective OCR quality gates, and page-aware indexes.
-- **Portable content** — one actor-card schema for PCs/NPCs/monsters; independently migratable module, preset, and source-bound rule packs; and authority-free release manifests.
+- **Unified content packages** — one v2 archive layout for core rules, addons, modules, and presets, with v3 PC/NPC/monster cards, normalized sources, content-addressed assets, strict validation, and explicit Agent finalization for modules.
 - **Retrieval** — exact and lexical search, SQLite FTS5, plus optional ChromaDB and sentence-transformers.
 - **System plugins** — D&D, CoC, and future systems register through the `sagasmith.systems` entry point.
 
@@ -34,44 +34,25 @@ Core does not decide GM style, MCP exposure, or system-specific rules. Skills ow
 
 ## Shareable content formats
 
-`sagasmith.portable` v1 is a system-neutral JSON envelope protected by
-canonical JSON and SHA-256 checksums:
+`sagasmith.content-package` v2 is the only public exchange format and uses the
+`.sagasmith-pack` extension. Addon, module, preset, and core-rules packages share
+one checksum-protected manifest, structured content, actor, source-index, and
+content-addressed `blobs/sha256/` layout. Original documents, normalized text,
+and images travel with their evidence instead of living in an unrelated store.
+The complete archive, evidence, actor-image, and kind contract is documented in
+[`docs/CONTENT_PACKAGES.md`](docs/CONTENT_PACKAGES.md).
 
-- `actor_card` is the shared PC/NPC/monster form; `actor_type` selects the role.
-  Version 2 requires one checksum-protected PNG/JPEG/WebP/AVIF portrait with
-  license, attribution, and source references. Import creates a fresh local
-  identity. Database ids, campaign ids, revisions, access grants, and
-  ActorKnowledge are never exported. Version 1 cards are rejected.
-- `module_pack` v2 is an independent `.sagasmith-module` ZIP archive. Its JSON
-  descriptor carries classification, edition compatibility, party/level/
-  advancement guidance, continuity policy, exact dependencies, normalized
-  source, signed Scene Atlas, catalogs, narrative dossiers/relationships/
-  endings, reviews, actor cards, component locks, and seven-dimensional
-  readiness. Large assets live under content-addressed `blobs/sha256/` paths.
-  Only `playable` or `complete` modules may activate. It excludes progress,
-  world state, memory, random streams, branches, and Snapshots. The removed
-  `sagasmith.module-pack.v1` schema is rejected; there is no compatibility reader.
-- `preset_pack` distributes a reusable actor-card library, such as a game
-  system's bundled standard creature cards.
-- `rule_pack` carries the rule manifest, catalog artifacts, mechanic IR,
-  provenance, and complete indexed sources/sections/chunks. Database UUIDs are
-  replaced by stable `source_key`/`chunk_key` locators and rebound locally. Its
-  `metadata.definition_checksum` pins rule semantics and dependencies without
-  depending on local UUIDs or private/shareable distribution metadata.
-- `release_manifest` composes exact rule, preset, and module package versions and
-  full envelope checksums. It grants no install, activation, or access authority.
+`sagasmith.actor-card.v3` is the shared PC/NPC/monster form. A card may reference
+one licensed, attributed, source-backed portrait owned by its package. Import
+creates a fresh local identity and never transfers database or campaign ids,
+revisions, access grants, ActorKnowledge, random streams, or Snapshot state.
 
-An `addon_pack` cannot embed or activate a module. Rules, presets, and modules
-remain independent distributions connected by exact dependencies.
-
-Core validates the generic envelope and rebuilds content through public service
-paths. System plugins still validate sheets, editions, and rule dependencies;
-applications/MCP servers still own authorization and import roots. See
-`CharacterService.export_portable_card/import_portable_card`,
-`ModuleService.export_portable_pack/import_portable_pack`, and
-`ModuleService.bind_actor/list_actor_bindings`. Rule sources use
-`RuleService.export_portable_source/import_portable_source`; `RulePackService`
-still owns the separate draft, install, and campaign-activation lifecycle.
+Core validates and rebuilds the common source, actor, and module structures.
+System plugins still validate sheets, editions, dependencies, and game semantics;
+applications/MCP servers own authorization and import roots. `RulePackService`
+retains the separate draft, install, and campaign-activation lifecycle. Legacy
+portable envelopes, release manifests, and `.sagasmith-module` files are not a
+public compatibility protocol.
 
 ## Domain services
 
@@ -81,8 +62,8 @@ still owns the separate draft, install, and campaign-activation lifecycle.
 | Character | `CharacterService`, `StateMutationService` | revisioned sheets, controlled mutation, actor-card import/export |
 | Knowledge | `ActorKnowledgeService` | actor viewpoints and branch validity |
 | Timeline | `SnapshotService`, `BranchService`, `ContinuityService` | ancestry, checkout, and continuity context |
-| Content | `ImportJobService`, `ModuleService`, `PdfDocumentConverter` | resumable imports, provenance, structure, portable module/preset packs |
-| Rules | `RuleService`, `RulePackService`, `RuleProfileService`, `RuleReceiptService` | portable sources, exact dependencies, versioned packs, active context, settlement evidence |
+| Content | `ImportJobService`, `ModuleService`, `PdfDocumentConverter` | resumable imports, provenance, structure, unified content packages |
+| Rules | `RuleService`, `RulePackService`, `RuleProfileService`, `RuleReceiptService` | package sources, exact dependencies, versioned packs, active context, settlement evidence |
 | Retrieval | `RuleService`, `VectorStore` | graceful degradation; vectors never own truth |
 
 ## Install

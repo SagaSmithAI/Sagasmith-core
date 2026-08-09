@@ -14,6 +14,7 @@ SUBJECT_CONTEXT_READ_KINDS = {
     "faction": frozenset({"faction_state", "faction_knowledge"}),
 }
 
+
 class SubjectContextService:
     """Read only the state/knowledge owned by one actor or faction subject."""
 
@@ -35,9 +36,7 @@ class SubjectContextService:
         subject_kind = normalized_ref.split(":", 1)[0]
         kinds = SUBJECT_CONTEXT_READ_KINDS.get(subject_kind)
         if kinds is None:
-            raise ValueError(
-                "subject decision context supports only actor:<id> or faction:<id>"
-            )
+            raise ValueError("subject decision context supports only actor:<id> or faction:<id>")
         return self.memory.list_for_subject_refs(
             campaign_id,
             subject_refs={normalized_ref},

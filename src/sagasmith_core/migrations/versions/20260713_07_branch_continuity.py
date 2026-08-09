@@ -33,6 +33,7 @@ def upgrade() -> None:
         sa.Column("audience_scope", sa.String(200), nullable=False, server_default="dm"),
     )
 
+
 def downgrade() -> None:
     # Branch and knowledge history is intentionally retained for user campaign safety.
     pass

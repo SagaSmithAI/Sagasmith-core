@@ -9,10 +9,14 @@ depends_on = None
 
 
 def _exists(name: str, kind: str) -> bool:
-    row = op.get_bind().exec_driver_sql(
-        "SELECT 1 FROM sqlite_master WHERE name = ? AND type = ?",
-        (name, kind),
-    ).first()
+    row = (
+        op.get_bind()
+        .exec_driver_sql(
+            "SELECT 1 FROM sqlite_master WHERE name = ? AND type = ?",
+            (name, kind),
+        )
+        .first()
+    )
     return row is not None
 
 
@@ -28,12 +32,10 @@ def _replace(
     op.get_bind().exec_driver_sql(f"DROP TRIGGER IF EXISTS {name}_au")
     delete_sql = f"DELETE FROM {fts_table} WHERE chunk_id = old.id"
     op.get_bind().exec_driver_sql(
-        f"CREATE TRIGGER {name}_ad AFTER DELETE ON {table} "
-        f"BEGIN {delete_sql}; END"
+        f"CREATE TRIGGER {name}_ad AFTER DELETE ON {table} BEGIN {delete_sql}; END"
     )
     op.get_bind().exec_driver_sql(
-        f"CREATE TRIGGER {name}_au AFTER UPDATE ON {table} BEGIN "
-        f"{delete_sql}; {update_insert}; END"
+        f"CREATE TRIGGER {name}_au AFTER UPDATE ON {table} BEGIN {delete_sql}; {update_insert}; END"
     )
 
 

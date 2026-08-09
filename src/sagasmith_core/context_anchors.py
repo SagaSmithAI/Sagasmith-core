@@ -30,9 +30,7 @@ MAX_CONTEXT_ANCHOR_RELATED_REFS = 64
 MAX_CONTEXT_SOURCE_EXCERPT_CHARS = 2_000
 MAX_PINNED_MODULE_EVIDENCE_CHARS = 100_000
 
-_ENTITY_REF = re.compile(
-    rf"^({'|'.join(sorted(CONTEXT_ENTITY_KINDS))}):([^\s:][^\s]{{0,279}})$"
-)
+_ENTITY_REF = re.compile(rf"^({'|'.join(sorted(CONTEXT_ENTITY_KINDS))}):([^\s:][^\s]{{0,279}})$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -41,9 +39,7 @@ def normalize_context_entity_ref(value: Any, *, field: str = "context_ref") -> s
 
     normalized = str(value or "").strip()
     if _ENTITY_REF.fullmatch(normalized) is None:
-        raise ValueError(
-            f"{field} must use <actor|faction|item|location|module|quest|scene>:<id>"
-        )
+        raise ValueError(f"{field} must use <actor|faction|item|location|module|quest|scene>:<id>")
     return normalized
 
 
@@ -67,13 +63,10 @@ def normalize_context_anchor_metadata(
     unknown = set(value) - allowed
     if unknown:
         raise ValueError(
-            "context_anchor metadata has unsupported fields: "
-            + ", ".join(sorted(unknown))
+            "context_anchor metadata has unsupported fields: " + ", ".join(sorted(unknown))
         )
     if int(value.get("schema_version", 0) or 0) != CONTEXT_ANCHOR_SCHEMA_VERSION:
-        raise ValueError(
-            f"context_anchor schema_version must be {CONTEXT_ANCHOR_SCHEMA_VERSION}"
-        )
+        raise ValueError(f"context_anchor schema_version must be {CONTEXT_ANCHOR_SCHEMA_VERSION}")
     if str(predicate or "").strip():
         raise ValueError("context_anchor cannot define a predicate or executable trigger")
     if disclosure_scope != "dm":
@@ -97,8 +90,7 @@ def normalize_context_anchor_metadata(
     related = list(dict.fromkeys([normalized_subject, *related]))
     if len(related) > MAX_CONTEXT_ANCHOR_RELATED_REFS:
         raise ValueError(
-            "context_anchor related_refs cannot exceed "
-            f"{MAX_CONTEXT_ANCHOR_RELATED_REFS} entries"
+            f"context_anchor related_refs cannot exceed {MAX_CONTEXT_ANCHOR_RELATED_REFS} entries"
         )
 
     raw_bindings = value.get("source_bindings")
@@ -106,8 +98,7 @@ def normalize_context_anchor_metadata(
         raise ValueError("context_anchor source_bindings must be a non-empty list")
     if len(raw_bindings) > MAX_CONTEXT_ANCHOR_BINDINGS:
         raise ValueError(
-            "context_anchor source_bindings cannot exceed "
-            f"{MAX_CONTEXT_ANCHOR_BINDINGS} entries"
+            f"context_anchor source_bindings cannot exceed {MAX_CONTEXT_ANCHOR_BINDINGS} entries"
         )
     bindings = [
         normalize_context_source_binding(item, field=f"source_bindings[{index}]")
@@ -140,8 +131,7 @@ def normalize_context_source_binding(
     unknown_source = set(source_ref) - set(EXACT_MODULE_SOURCE_FIELD_ORDER)
     if missing or unknown_source:
         raise ValueError(
-            f"{field}.source_ref must contain exactly "
-            + ", ".join(EXACT_MODULE_SOURCE_FIELD_ORDER)
+            f"{field}.source_ref must contain exactly " + ", ".join(EXACT_MODULE_SOURCE_FIELD_ORDER)
         )
     normalized_source = {
         "module_id": _required_text(source_ref.get("module_id"), f"{field}.module_id"),
@@ -192,10 +182,7 @@ def resolve_context_source_binding(
     expanded_ref = dict(expanded.get("source_ref") or {})
     if str(expanded.get("campaign_id") or "") != campaign_id:
         raise ValueError("context_anchor source chunk belongs to another campaign")
-    expected_ref = {
-        key: expanded_ref.get(key)
-        for key in EXACT_MODULE_SOURCE_FIELD_ORDER
-    }
+    expected_ref = {key: expanded_ref.get(key) for key in EXACT_MODULE_SOURCE_FIELD_ORDER}
     expected_ref["heading_path"] = list(
         canonical_heading_path(expected_ref.get("heading_path") or [])
     )

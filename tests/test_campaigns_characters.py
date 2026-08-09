@@ -90,10 +90,7 @@ def test_owned_campaign_initializes_rule_profile_and_replay_atomically(database)
     assert created.settings == {"table_name": "Friday group"}
     with database.transaction() as session:
         assert session.scalar(select(func.count()).select_from(Campaign)) == 1
-        assert (
-            session.scalar(select(func.count()).select_from(CampaignRuleProfile))
-            == 1
-        )
+        assert session.scalar(select(func.count()).select_from(CampaignRuleProfile)) == 1
 
 
 def test_owned_campaign_rejects_incomplete_profile_without_partial_rows(database) -> None:
@@ -108,4 +105,3 @@ def test_owned_campaign_rejects_incomplete_profile_without_partial_rows(database
 
     with database.transaction() as session:
         assert session.scalar(select(func.count()).select_from(Campaign)) == 0
-

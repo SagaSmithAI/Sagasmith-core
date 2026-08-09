@@ -89,8 +89,7 @@ def test_pdf_text_layout_character_grouping_separates_same_line_columns() -> Non
     values = []
     for text, start in (("LEFT CREATURE", 10.0), ("RIGHT CREATURE", 220.0)):
         values.extend(
-            (character, start + index * 5.0, 70.0)
-            for index, character in enumerate(text)
+            (character, start + index * 5.0, 70.0) for index, character in enumerate(text)
         )
 
     blocks = _pdf_text_layout_blocks(
@@ -116,22 +115,25 @@ def test_pdf_text_layout_restores_word_spaces_from_character_gaps() -> None:
     )
 
     assert [block.text for block in blocks] == ["Circle of Wildfire"]
-    assert _layout_repairs_missing_word_spaces(
-        "CircleofWildfire",
-        "Circle of Wildfire",
-    ) is True
-    assert _layout_repairs_missing_word_spaces(
-        "Circle of Wildfire",
-        "Circle of Wildfire",
-    ) is False
+    assert (
+        _layout_repairs_missing_word_spaces(
+            "CircleofWildfire",
+            "Circle of Wildfire",
+        )
+        is True
+    )
+    assert (
+        _layout_repairs_missing_word_spaces(
+            "Circle of Wildfire",
+            "Circle of Wildfire",
+        )
+        is False
+    )
 
 
 def test_pdf_text_layout_groups_a_long_flattened_line_without_quadratic_stats() -> None:
     text = "A" * 4000
-    values = [
-        (character, 10.0 + index * 5.0, 70.0)
-        for index, character in enumerate(text)
-    ]
+    values = [(character, 10.0 + index * 5.0, 70.0) for index, character in enumerate(text)]
 
     blocks = _pdf_text_layout_blocks(
         _PositionedTextPage(values),

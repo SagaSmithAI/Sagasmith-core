@@ -49,6 +49,5 @@ def downgrade() -> None:
         )
     if "status" in columns:
         op.execute(
-            "UPDATE memory_revisions SET active = "
-            "CASE WHEN status = 'active' THEN 1 ELSE 0 END"
+            "UPDATE memory_revisions SET active = CASE WHEN status = 'active' THEN 1 ELSE 0 END"
         )

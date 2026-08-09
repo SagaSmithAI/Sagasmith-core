@@ -28,9 +28,7 @@ def upgrade() -> None:
         "campaign_rule_profiles",
         sa.column("campaign_id", sa.String()),
     )
-    profile_campaign_ids = set(
-        connection.scalars(sa.select(profiles.c.campaign_id))
-    )
+    profile_campaign_ids = set(connection.scalars(sa.select(profiles.c.campaign_id)))
     for campaign_id, settings in connection.execute(
         sa.select(campaigns.c.id, campaigns.c.settings)
     ):
@@ -42,9 +40,7 @@ def upgrade() -> None:
         normalized.pop("locale", None)
         if changed:
             connection.execute(
-                campaigns.update()
-                .where(campaigns.c.id == campaign_id)
-                .values(settings=normalized)
+                campaigns.update().where(campaigns.c.id == campaign_id).values(settings=normalized)
             )
 
 

@@ -11,4 +11,3 @@ def database(tmp_path: Path) -> Database:
     value.create_schema()
     yield value
     value.dispose()
-

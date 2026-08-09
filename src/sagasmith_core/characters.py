@@ -10,6 +10,7 @@ from typing import Any
 from sqlalchemy import select
 
 from sagasmith_core.campaigns import CampaignNotFoundError
+from sagasmith_core.content_pack import ACTOR_CARD_SCHEMA
 from sagasmith_core.database import Database
 from sagasmith_core.idempotency import IdempotencyService
 from sagasmith_core.models import Campaign, Character
@@ -131,12 +132,44 @@ class CharacterService:
             "name": name if name is not None else payload["name"],
             "character_type": payload["actor_type"],
             "campaign_id": campaign_id,
-            "player_name": (
-                player_name if player_name is not None else payload["player_name"]
-            ),
+            "player_name": (player_name if player_name is not None else payload["player_name"]),
             "summary": payload["summary"],
             "sheet": copy.deepcopy(payload["sheet"]),
             "notes": copy.deepcopy(payload["notes"]),
+        }
+        if principal_id is None and idempotency_key is None:
+            return self.create(**arguments)
+        if principal_id is None or idempotency_key is None:
+            raise ValueError("principal_id and idempotency_key must be supplied together")
+        return self.create_idempotent(
+            **arguments,
+            principal_id=principal_id,
+            idempotency_key=idempotency_key,
+        )
+
+    def import_content_actor(
+        self,
+        actor: dict[str, Any],
+        *,
+        campaign_id: str | None = None,
+        player_name: str | None = None,
+        name: str | None = None,
+        principal_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> CharacterInfo:
+        """Create a fresh runtime actor from a v3 package-owned actor card."""
+
+        if actor.get("schema") != ACTOR_CARD_SCHEMA:
+            raise ValueError(f"actor.schema must be {ACTOR_CARD_SCHEMA!r}")
+        arguments = {
+            "system_id": str(actor["system_id"]),
+            "name": name if name is not None else str(actor["name"]),
+            "character_type": str(actor["actor_type"]),
+            "campaign_id": campaign_id,
+            "player_name": (player_name if player_name is not None else actor.get("player_name")),
+            "summary": str(actor.get("summary") or ""),
+            "sheet": copy.deepcopy(dict(actor["sheet"])),
+            "notes": copy.deepcopy(dict(actor["notes"])),
         }
         if principal_id is None and idempotency_key is None:
             return self.create(**arguments)
@@ -171,8 +204,10 @@ class CharacterService:
         system_id: str | None = None,
         character_type: str | None = None,
     ) -> list[CharacterInfo]:
-        statement = select(Character).where(Character.campaign_id.is_(None)).order_by(
-            Character.name, Character.id
+        statement = (
+            select(Character)
+            .where(Character.campaign_id.is_(None))
+            .order_by(Character.name, Character.id)
         )
         if system_id:
             statement = statement.where(Character.system_id == system_id)
@@ -206,9 +241,7 @@ class CharacterService:
                 template_id=template.id,
                 character_type=template.character_type,
                 name=name if name is not None else template.name,
-                player_name=(
-                    player_name if player_name is not None else template.player_name
-                ),
+                player_name=(player_name if player_name is not None else template.player_name),
                 summary=template.summary,
                 sheet=copy.deepcopy(template.sheet if sheet is None else sheet),
                 notes=copy.deepcopy(template.notes if notes is None else notes),
@@ -245,9 +278,7 @@ class CharacterService:
         scope = f"character-create:{campaign_id or 'library'}:{principal_id}"
         idempotency = IdempotencyService(self.database)
         with self.database.transaction() as session:
-            replay = idempotency.lookup_in_session(
-                session, scope, idempotency_key, payload
-            )
+            replay = idempotency.lookup_in_session(session, scope, idempotency_key, payload)
             if replay is not None and replay.response is not None:
                 return CharacterInfo(**replay.response)
             self._validate_campaign(session, system_id, campaign_id)
@@ -306,9 +337,7 @@ class CharacterService:
         idempotency = IdempotencyService(self.database)
         with self.database.transaction() as session:
             if scope is not None and idempotency_key is not None:
-                replay = idempotency.lookup_in_session(
-                    session, scope, idempotency_key, payload
-                )
+                replay = idempotency.lookup_in_session(session, scope, idempotency_key, payload)
                 if replay is not None and replay.response is not None:
                     return (
                         CharacterInfo(**replay.response["template"]),

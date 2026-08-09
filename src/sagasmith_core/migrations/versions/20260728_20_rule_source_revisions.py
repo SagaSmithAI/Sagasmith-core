@@ -32,10 +32,7 @@ def _drop_sqlite_rule_fts_triggers() -> bool:
     if bind.dialect.name != "sqlite":
         return False
     inspector = sa.inspect(bind)
-    if not (
-        inspector.has_table("rule_chunks")
-        and inspector.has_table("rule_fts")
-    ):
+    if not (inspector.has_table("rule_chunks") and inspector.has_table("rule_fts")):
         return False
     for suffix in ("ai", "ad", "au"):
         bind.exec_driver_sql(f"DROP TRIGGER IF EXISTS rule_fts_{suffix}")
@@ -56,8 +53,7 @@ def _restore_sqlite_rule_fts_triggers() -> None:
         "WHERE rsec.id = new.section_id"
     )
     bind.exec_driver_sql(
-        f"CREATE TRIGGER rule_fts_ai AFTER INSERT ON rule_chunks "
-        f"BEGIN {insert_sql}; END"
+        f"CREATE TRIGGER rule_fts_ai AFTER INSERT ON rule_chunks BEGIN {insert_sql}; END"
     )
     bind.exec_driver_sql(
         "CREATE TRIGGER rule_fts_ad AFTER DELETE ON rule_chunks "

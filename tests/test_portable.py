@@ -27,7 +27,7 @@ from sagasmith_core.portable import (
     portable_rule_definition_checksum,
     validate_actor_card,
     validate_addon_pack,
-    validate_addon_readiness,
+    validate_addon_validation,
     validate_module_pack,
     validate_release_manifest,
     validate_rule_pack,
@@ -59,7 +59,7 @@ def _card() -> dict:
     )
 
 
-def _complete_addon_readiness(item_count: int) -> dict:
+def _complete_addon_validation(item_count: int) -> dict:
     return {
         "schema_version": 1,
         "source": {
@@ -271,9 +271,7 @@ def test_rule_pack_round_trip_rehydrates_sources_and_uses_stable_chunk_keys(
     )
 
     assert validate_rule_pack(package)["checksum"] == package["checksum"]
-    assert portable_rule_definition_checksum(package) == package["metadata"][
-        "definition_checksum"
-    ]
+    assert portable_rule_definition_checksum(package) == package["metadata"]["definition_checksum"]
     redistributed = copy.deepcopy(package)
     redistributed["metadata"]["distribution"] = "shareable"
     redistributed["metadata"]["license"] = "Apache-2.0"
@@ -390,7 +388,6 @@ def test_addon_pack_embeds_exact_components_without_granting_authority() -> None
             "editions": ["2014"],
             "classification": "third_party",
             "content_summary": {"actor_card": 1},
-            "readiness": _complete_addon_readiness(1),
             "activation": {
                 "rule_policy": "none",
                 "preset_policy": "library",
@@ -418,9 +415,7 @@ def test_addon_pack_embeds_exact_components_without_granting_authority() -> None
     ]
 
     tampered = copy.deepcopy(addon)
-    tampered["payload"]["components"][0]["payload"]["cards"][0]["payload"][
-        "name"
-    ] = "Changed"
+    tampered["payload"]["components"][0]["payload"]["cards"][0]["payload"]["name"] = "Changed"
     from sagasmith_core.portable import portable_checksum
 
     tampered["checksum"] = portable_checksum(tampered)
@@ -446,8 +441,8 @@ def test_addon_pack_embeds_exact_components_without_granting_authority() -> None
         validate_addon_pack(self_conflict)
 
 
-def test_addon_readiness_is_strict_and_consistent() -> None:
-    readiness = {
+def test_addon_validation_is_strict_and_consistent() -> None:
+    validation = {
         "schema_version": 1,
         "source": {
             "item_count": 2,
@@ -477,27 +472,27 @@ def test_addon_readiness_is_strict_and_consistent() -> None:
         },
         "complete": True,
     }
-    assert validate_addon_readiness(readiness) == readiness
+    assert validate_addon_validation(validation) == validation
 
-    bad_total = copy.deepcopy(readiness)
+    bad_total = copy.deepcopy(validation)
     bad_total["complete"] = False
     with pytest.raises(PortableContentError, match="must equal all dimension"):
-        validate_addon_readiness(bad_total)
+        validate_addon_validation(bad_total)
 
-    bad_selection = copy.deepcopy(readiness)
+    bad_selection = copy.deepcopy(validation)
     bad_selection["selection"]["ready_count"] = 2
     with pytest.raises(PortableContentError, match="cannot exceed applicable_count"):
-        validate_addon_readiness(bad_selection)
+        validate_addon_validation(bad_selection)
 
-    bad_modes = copy.deepcopy(readiness)
+    bad_modes = copy.deepcopy(validation)
     bad_modes["runtime"]["modes"]["agent_ruling"] = 2
     with pytest.raises(PortableContentError, match="sum to resolved_count"):
-        validate_addon_readiness(bad_modes)
+        validate_addon_validation(bad_modes)
 
-    unsupported = copy.deepcopy(readiness)
+    unsupported = copy.deepcopy(validation)
     unsupported["catalog"]["confidence"] = 1.0
     with pytest.raises(PortableContentError, match="unsupported fields"):
-        validate_addon_readiness(unsupported)
+        validate_addon_validation(unsupported)
 
 
 def test_module_pack_round_trip_remaps_scenes_assets_reviews_and_actor_cards(
@@ -572,9 +567,7 @@ def test_module_pack_round_trip_remaps_scenes_assets_reviews_and_actor_cards(
         blob_sink=blobs.__setitem__,
     )
     assert "two wolves" in package["payload"]["scene_atlas"][0]["content"].casefold()
-    assert package["payload"]["scene_atlas"][0]["chunks"][0]["content"] == chunks[0][
-        "content"
-    ]
+    assert package["payload"]["scene_atlas"][0]["chunks"][0]["content"] == chunks[0]["content"]
 
     legacy = copy.deepcopy(package)
     legacy["payload"]["module_schema"] = "sagasmith.module-pack.v1"
@@ -591,15 +584,11 @@ def test_module_pack_round_trip_remaps_scenes_assets_reviews_and_actor_cards(
     with pytest.raises(PortableContentError, match="default_active must be false"):
         validate_module_pack(unsafe_default)
 
-    forged_playable = copy.deepcopy(package)
-    forged_playable["payload"]["readiness"]["level"] = "playable"
-    for dimension_name in ("play_profile", "runtime"):
-        dimension = forged_playable["payload"]["readiness"]["dimensions"][dimension_name]
-        dimension["complete"] = True
-        dimension["blockers"] = []
-    forged_playable["checksum"] = portable_checksum(forged_playable)
-    with pytest.raises(PortableContentError, match="requires sourced party"):
-        validate_module_pack(forged_playable)
+    forged_legacy_gate = copy.deepcopy(package)
+    forged_legacy_gate["payload"]["readiness"] = {"complete": True}
+    forged_legacy_gate["checksum"] = portable_checksum(forged_legacy_gate)
+    with pytest.raises(PortableContentError, match="unsupported fields: readiness"):
+        validate_module_pack(forged_legacy_gate)
 
     def write_asset(module_id: str, asset: dict, content: bytes) -> str:
         target = tmp_path / "imported" / module_id / asset["name"]
@@ -612,9 +601,10 @@ def test_module_pack_round_trip_remaps_scenes_assets_reviews_and_actor_cards(
     assert archived_package == package
 
     damaged = io.BytesIO()
-    with zipfile.ZipFile(io.BytesIO(archive)) as source_zip, zipfile.ZipFile(
-        damaged, "w"
-    ) as target_zip:
+    with (
+        zipfile.ZipFile(io.BytesIO(archive)) as source_zip,
+        zipfile.ZipFile(damaged, "w") as target_zip,
+    ):
         for name in source_zip.namelist():
             value = source_zip.read(name)
             if name.startswith("blobs/sha256/"):
@@ -642,9 +632,9 @@ def test_module_pack_round_trip_remaps_scenes_assets_reviews_and_actor_cards(
     target_reviews = modules.list_content_reviews(target_campaign.id, result["module_id"])
     assert target_reviews[0]["content_key"] == "gate.wolves"
     assert target_reviews[0]["evidence"]["confidence"] == "reviewed_text"
-    assert modules.list_assets(target_campaign.id, result["module_id"])[0][
-        "metadata"
-    ]["portable_asset_key"]
+    assert modules.list_assets(target_campaign.id, result["module_id"])[0]["metadata"][
+        "portable_asset_key"
+    ]
 
 
 def test_module_pack_export_derives_chunk_from_real_scene_content(database) -> None:
@@ -681,9 +671,7 @@ def test_module_pack_export_rejects_empty_scene_even_when_chunks_remain(database
         content="# Chapter\nIntro.\n## Indexed Text\nCurrent scene content.",
     )
     scene = modules.scene_index(campaign.id, module_id=imported.module_id)[0]
-    assert modules.list_chunks(
-        campaign.id, imported.module_id, scene_id=scene["scene_id"]
-    )
+    assert modules.list_chunks(campaign.id, imported.module_id, scene_id=scene["scene_id"])
     with database.transaction() as session:
         row = session.get(ModuleScene, scene["scene_id"])
         assert row is not None

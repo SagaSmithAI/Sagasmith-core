@@ -44,12 +44,7 @@ def test_markdown_parser_rejects_a_heading_longer_than_storage_contract() -> Non
 
 def test_markdown_parser_offsets_match_trimmed_source_and_exclude_next_page_marker() -> None:
     content = (
-        "<!-- page: 1 -->\n"
-        "# First\n\n"
-        "  Exact text.  \n"
-        "<!-- page: 2 -->\n"
-        "# Second\n"
-        "Next text.\n"
+        "<!-- page: 1 -->\n# First\n\n  Exact text.  \n<!-- page: 2 -->\n# Second\nNext text.\n"
     )
     parsed = MarkdownHierarchyParser().parse(content)
 

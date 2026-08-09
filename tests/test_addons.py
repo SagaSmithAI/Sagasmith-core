@@ -11,11 +11,12 @@ from sagasmith_core import (
     RuleProfileService,
     RuleService,
     SnapshotService,
-    build_addon_pack,
-    build_rule_pack,
+    build_content_package,
+    build_source_bundle,
 )
 from sagasmith_core.branches import BranchService
 from sagasmith_core.models import CampaignAddonActivation
+from sagasmith_core.portable import build_rule_pack
 from sagasmith_core.rule_packs import RulePackError
 
 
@@ -76,57 +77,89 @@ def _addon(
     version: str = "1.0.0",
     conflicts: list[str] | None = None,
 ) -> dict:
-    readiness = {
-        "schema_version": 1,
-        "source": {
-            "item_count": 1,
-            "verified_count": 1,
-            "complete": True,
-            "blockers": [],
+    raw_source = component["payload"]["sources"][0]
+    section = raw_source["sections"][0]
+    text = section["content"]
+    source, asset, _blob = build_source_bundle(
+        source_key=raw_source["source_key"],
+        title=raw_source["title"],
+        normalized_text=text,
+        edition=raw_source["edition"],
+        sections=[
+            {
+                "ordinal": 0,
+                "parent_ordinal": None,
+                "level": 1,
+                "title": section["title"],
+                "path": section["path"],
+                "start_offset": 0,
+                "end_offset": len(text),
+                "chunks": [
+                    {
+                        "key": section["chunks"][0]["key"],
+                        "ordinal": 0,
+                        "heading_path": section["chunks"][0]["heading_path"],
+                        "start_offset": 0,
+                        "end_offset": len(text),
+                        "token_count": len(text.split()),
+                        "page_start": None,
+                        "page_end": None,
+                        "metadata": {},
+                    }
+                ],
+            }
+        ],
+        license="user-supplied",
+        attribution="test",
+    )
+    manifest = {
+        "id": addon_id,
+        "version": version,
+        "system_id": "dnd5e",
+        "title": "Example Addon",
+        "editions": ["2014"],
+        "classification": "third_party",
+        "content_summary": {"feature": 1},
+        "conflicts": list(conflicts or []),
+        "activation": {
+            "rule_policy": "branch",
+            "preset_policy": "none",
+            "module_policy": "none",
         },
-        "catalog": {
-            "item_count": 1,
-            "reviewed_count": 1,
-            "complete": True,
-            "blockers": [],
-        },
-        "selection": {
-            "applicable_count": 1,
-            "ready_count": 1,
-            "not_applicable_count": 0,
-            "complete": True,
-            "blockers": [],
-        },
-        "runtime": {
-            "item_count": 1,
-            "resolved_count": 1,
-            "modes": {"kernel_mechanic": 1},
-            "complete": True,
-            "blockers": [],
-        },
-        "complete": True,
     }
-    return build_addon_pack(
-        portable_id=addon_id,
+    return build_content_package(
+        kind="addon",
+        package_id=addon_id,
         version=version,
         system_id="dnd5e",
-        manifest={
-            "id": addon_id,
-            "version": version,
-            "system_id": "dnd5e",
-            "title": "Example Addon",
-            "editions": ["2014"],
+        manifest=manifest,
+        sources=[source],
+        assets=[asset],
+        content_reviews=[],
+        actors=[],
+        content={
             "classification": "third_party",
-            "content_summary": {"feature": 1},
-            "readiness": readiness,
-            "conflicts": list(conflicts or []),
-            "activation": {
-                "rule_policy": "branch",
-                "preset_policy": "none",
-                "module_policy": "none",
-            },
+            "editions": ["2014"],
+            "activation": manifest["activation"],
+            "conflicts": manifest["conflicts"],
+            "rule_definitions": [
+                {
+                    "id": component["id"],
+                    "version": component["version"],
+                    "definition_checksum": component["metadata"]["definition_checksum"],
+                    "manifest": component["payload"]["manifest"],
+                }
+            ],
+            "artifacts": [
+                {
+                    **component["payload"]["artifacts"][0],
+                    "rule_definition_id": component["id"],
+                }
+            ],
+            "mechanics": [],
+            "selection_rules": [],
+            "resolutions": [],
         },
-        components=[component],
         metadata={"distribution": "private", "license": "user-supplied"},
     )
 
@@ -140,7 +173,9 @@ def _install_rule_component(database, component: dict) -> None:
         mechanics=payload["mechanics"],
         provenance={
             **dict(payload["provenance"]),
-            "portable_package": {"checksum": component["checksum"]},
+            "content_definition": {
+                "definition_checksum": component["metadata"]["definition_checksum"]
+            },
         },
     )
     assert draft.status == "validated"
@@ -225,12 +260,12 @@ def test_addon_accepts_exact_plugin_proven_local_component_equivalence(database)
         kind="rule_pack",
         component_id=component["id"],
         component_version=component["version"],
-        checksum=component["checksum"],
+        checksum=component["metadata"]["definition_checksum"],
         basis="portable_definition_checksum",
         proof_checksum=component["metadata"]["definition_checksum"],
     )
 
-    assert proof["checksum"] == component["checksum"]
+    assert proof["checksum"] == component["metadata"]["definition_checksum"]
     assert (
         addons.component_status(imported.addon_id, imported.version)[0]["checksum_status"]
         == "match"

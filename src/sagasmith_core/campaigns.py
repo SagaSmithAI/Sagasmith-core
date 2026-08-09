@@ -126,9 +126,7 @@ class CampaignService:
         scope = f"campaign-create:{principal_id}"
         idempotency = IdempotencyService(self.database)
         with self.database.transaction() as session:
-            replay = idempotency.lookup_in_session(
-                session, scope, idempotency_key, payload
-            )
+            replay = idempotency.lookup_in_session(session, scope, idempotency_key, payload)
             if replay is not None and replay.response is not None:
                 return CampaignInfo(**replay.response)
             principal = session.get(Principal, principal_id)

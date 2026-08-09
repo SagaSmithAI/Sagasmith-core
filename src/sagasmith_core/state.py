@@ -94,12 +94,8 @@ class StateMutationService:
         if idempotency_request_hash is not None:
             if not idempotency_key:
                 raise ValueError("idempotency_request_hash requires an idempotency_key")
-            if (
-                len(idempotency_request_hash) != 64
-                or any(
-                    character not in "0123456789abcdef"
-                    for character in idempotency_request_hash
-                )
+            if len(idempotency_request_hash) != 64 or any(
+                character not in "0123456789abcdef" for character in idempotency_request_hash
             ):
                 raise ValueError("idempotency_request_hash must be a SHA-256 hex digest")
         if idempotency_write is not None:
@@ -171,8 +167,7 @@ class StateMutationService:
                 rows.append((row, update))
 
             transfer_pairs = [
-                (item.source_actor_id, item.destination_actor_id)
-                for item in knowledge_transfers
+                (item.source_actor_id, item.destination_actor_id) for item in knowledge_transfers
             ]
             if len(transfer_pairs) != len(set(transfer_pairs)):
                 raise ValueError("actor knowledge transfers must not duplicate actor pairs")
@@ -186,14 +181,10 @@ class StateMutationService:
                     raise ValueError(
                         "actor knowledge transfer requires distinct actors and a key prefix"
                     )
-                if (
-                    any(not str(item).strip() for item in transfer.knowledge_ids)
-                    or len(transfer.knowledge_ids)
-                    != len(set(transfer.knowledge_ids))
-                ):
-                    raise ValueError(
-                        "actor knowledge transfer ids must be non-empty and unique"
-                    )
+                if any(not str(item).strip() for item in transfer.knowledge_ids) or len(
+                    transfer.knowledge_ids
+                ) != len(set(transfer.knowledge_ids)):
+                    raise ValueError("actor knowledge transfer ids must be non-empty and unique")
                 for actor_id in (
                     transfer.source_actor_id,
                     transfer.destination_actor_id,
@@ -210,33 +201,28 @@ class StateMutationService:
             for transfer in knowledge_transfers:
                 statement = (
                     select(ActorKnowledge, ActorKnowledgeRevision)
-                        .join(
-                            BranchActorKnowledgeHead,
-                            BranchActorKnowledgeHead.knowledge_id
-                            == ActorKnowledge.id,
-                        )
-                        .join(
-                            ActorKnowledgeRevision,
-                            ActorKnowledgeRevision.id
-                            == BranchActorKnowledgeHead.revision_id,
-                        )
-                        .where(
-                            BranchActorKnowledgeHead.branch_id == branch.id,
-                            ActorKnowledge.actor_id == transfer.source_actor_id,
-                            ActorKnowledgeRevision.epistemic_status.not_in(
-                                INACTIVE_ACTOR_KNOWLEDGE_STATUSES
-                            ),
-                        )
-                        .order_by(ActorKnowledge.knowledge_key)
+                    .join(
+                        BranchActorKnowledgeHead,
+                        BranchActorKnowledgeHead.knowledge_id == ActorKnowledge.id,
+                    )
+                    .join(
+                        ActorKnowledgeRevision,
+                        ActorKnowledgeRevision.id == BranchActorKnowledgeHead.revision_id,
+                    )
+                    .where(
+                        BranchActorKnowledgeHead.branch_id == branch.id,
+                        ActorKnowledge.actor_id == transfer.source_actor_id,
+                        ActorKnowledgeRevision.epistemic_status.not_in(
+                            INACTIVE_ACTOR_KNOWLEDGE_STATUSES
+                        ),
+                    )
+                    .order_by(ActorKnowledge.knowledge_key)
                 )
                 if transfer.knowledge_ids:
-                    statement = statement.where(
-                        ActorKnowledge.id.in_(transfer.knowledge_ids)
-                    )
+                    statement = statement.where(ActorKnowledge.id.in_(transfer.knowledge_ids))
                 source_rows = list(session.execute(statement))
                 if transfer.knowledge_ids and {
-                    source_knowledge.id
-                    for source_knowledge, _source_revision in source_rows
+                    source_knowledge.id for source_knowledge, _source_revision in source_rows
                 } != set(transfer.knowledge_ids):
                     raise ValueError(
                         "actor knowledge transfer ids must identify current active "
@@ -249,9 +235,7 @@ class StateMutationService:
                         branch.id,
                         branch.head_snapshot_id,
                         actor_id=transfer.destination_actor_id,
-                        knowledge_key=(
-                            f"{transfer.knowledge_key_prefix}.{source_knowledge.id}"
-                        ),
+                        knowledge_key=(f"{transfer.knowledge_key_prefix}.{source_knowledge.id}"),
                         proposition=source_revision.proposition,
                         subject_ref=source_knowledge.subject_ref,
                         epistemic_status=source_revision.epistemic_status,
@@ -335,9 +319,7 @@ class StateMutationService:
                             }
                             for item in updates
                         ],
-                        "actor_knowledge_transfers": [
-                            asdict(item) for item in knowledge_transfers
-                        ],
+                        "actor_knowledge_transfers": [asdict(item) for item in knowledge_transfers],
                     }
                 )
                 if idempotency_key

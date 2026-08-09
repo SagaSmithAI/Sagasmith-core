@@ -16,10 +16,11 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as package_version
 from pathlib import Path
 from statistics import median
+from threading import RLock
 from typing import Any, Protocol
 from uuid import uuid4
 
-DOCUMENT_NORMALIZER_VERSION = "35"
+DOCUMENT_NORMALIZER_VERSION = "37"
 _MAX_STRUCTURAL_HEADING_CHARS = 200
 DOCUMENT_SOURCE_SUFFIXES = frozenset({".md", ".markdown", ".pdf", ".txt"})
 _DOCUMENT_CACHE_SCHEMA = 1
@@ -27,6 +28,8 @@ _PDF_EXTRACTION_CACHE_SCHEMA = 6
 _PDF_TEXT_EXTRACTOR_VERSION = "11"
 _OCR_PAGE_CACHE_SCHEMA = 1
 _BOOKMARK_OCR_MAX_NON_WHITESPACE = 800
+_RAPIDOCR_ENGINES: dict[str, tuple[Any, RLock]] = {}
+_RAPIDOCR_ENGINES_LOCK = RLock()
 
 
 class DocumentQualityError(RuntimeError):
@@ -170,9 +173,7 @@ def apply_document_page_revisions(
             raise ValueError(f"page revisions[{index}].reviewer is required")
         review_method = str(revision.get("review_method") or "").strip()
         if review_method not in {"agent", "human"}:
-            raise ValueError(
-                f"page revisions[{index}].review_method must be agent or human"
-            )
+            raise ValueError(f"page revisions[{index}].review_method must be agent or human")
         rationale = str(revision.get("rationale") or "").strip()
         if not 1 <= len(rationale) <= 2000:
             raise ValueError(f"page revisions[{index}].rationale is required")
@@ -197,9 +198,7 @@ def apply_document_page_revisions(
             raise ValueError(f"page revisions[{index}] base text checksum does not match")
         raw_replacements = revision.get("replacements")
         if not isinstance(raw_replacements, list) or not 1 <= len(raw_replacements) <= 128:
-            raise ValueError(
-                f"page revisions[{index}].replacements must contain 1 to 128 entries"
-            )
+            raise ValueError(f"page revisions[{index}].replacements must contain 1 to 128 entries")
         revised_page = page_text
         replacements: list[dict[str, str]] = []
         empty_page_recovery = (
@@ -215,8 +214,7 @@ def apply_document_page_revisions(
         for replacement_index, raw_replacement in enumerate(raw_replacements):
             if not isinstance(raw_replacement, Mapping):
                 raise ValueError(
-                    f"page revisions[{index}].replacements[{replacement_index}] "
-                    "must be an object"
+                    f"page revisions[{index}].replacements[{replacement_index}] must be an object"
                 )
             replacement = dict(raw_replacement)
             if set(replacement) != {"old", "new"}:
@@ -267,9 +265,7 @@ def apply_document_page_revisions(
             {
                 "page_number": page_number,
                 "base_text_sha256": base_checksum,
-                "revised_text_sha256": hashlib.sha256(
-                    revised_page.encode("utf-8")
-                ).hexdigest(),
+                "revised_text_sha256": hashlib.sha256(revised_page.encode("utf-8")).hexdigest(),
                 "reviewer": reviewer,
                 "review_method": review_method,
                 "rationale": rationale,
@@ -278,9 +274,7 @@ def apply_document_page_revisions(
             }
         )
     revision_checksum = hashlib.sha256(
-        json.dumps(audit, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
-            "utf-8"
-        )
+        json.dumps(audit, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
     return NormalizedDocument(
         content=content,
@@ -414,8 +408,7 @@ class PageLocator:
 
     def __init__(self, content: str) -> None:
         markers = [
-            (match.start(), int(match.group(1)))
-            for match in _PAGE_MARKER_SCAN_RE.finditer(content)
+            (match.start(), int(match.group(1))) for match in _PAGE_MARKER_SCAN_RE.finditer(content)
         ]
         self._offsets = [item[0] for item in markers]
         self._pages = [item[1] for item in markers]
@@ -509,9 +502,7 @@ def _split_room_heading(value: str) -> tuple[str, str]:
     if not separator:
         label, separator, body = title.partition(" --- ")
         delimiter = ""
-    if separator and _looks_like_room_heading(
-        f"{code}. {label}"
-    ):
+    if separator and _looks_like_room_heading(f"{code}. {label}"):
         return f"{code}. {label}{delimiter}".rstrip("."), body.strip()
     words = re.findall(r"[A-Za-z]+", title)
     if (
@@ -540,11 +531,7 @@ def _looks_like_letter_spaced_heading(value: str) -> bool:
     words = re.findall(r"[A-Za-z]+", value)
     singles = sum(len(word) == 1 for word in words)
     long_words = sum(len(word) > 3 for word in words)
-    return bool(
-        singles >= 3
-        and singles / max(len(words), 1) >= 0.55
-        and long_words <= 1
-    )
+    return bool(singles >= 3 and singles / max(len(words), 1) >= 0.55 and long_words <= 1)
 
 
 def _bookmark_title(value: str) -> str:
@@ -578,8 +565,7 @@ def _prefer_bookmark_title(raw: str, bookmark: str, *, trusted: bool = False) ->
             )
             or (
                 _CHAPTER_RE.match(canonical)
-                and SequenceMatcher(None, raw_normalized, canonical_normalized).ratio()
-                >= 0.88
+                and SequenceMatcher(None, raw_normalized, canonical_normalized).ratio() >= 0.88
             )
         )
     )
@@ -588,20 +574,14 @@ def _prefer_bookmark_title(raw: str, bookmark: str, *, trusted: bool = False) ->
 def _chapter_identity(value: str) -> str:
     """Compare abbreviated and full chapter labels as the same boundary."""
     text = value.strip()
-    text = re.sub(
-        r"^Ch(?:apter)?\s*\.?\s*", "chapter ", text, flags=re.IGNORECASE
-    )
-    text = re.sub(
-        r"^App(?:endix)?\s*\.?\s*", "appendix ", text, flags=re.IGNORECASE
-    )
+    text = re.sub(r"^Ch(?:apter)?\s*\.?\s*", "chapter ", text, flags=re.IGNORECASE)
+    text = re.sub(r"^App(?:endix)?\s*\.?\s*", "appendix ", text, flags=re.IGNORECASE)
     return _normalize(text)
 
 
 def _chapter_label(value: str) -> str | None:
     identity = _chapter_identity(value)
-    matched = re.match(
-        r"^(chapter|appendix|part|episodes?)(\d+(?:and\d+)?|[a-z])", identity
-    )
+    matched = re.match(r"^(chapter|appendix|part|episodes?)(\d+(?:and\d+)?|[a-z])", identity)
     if not matched:
         return None
     kind = "episode" if matched.group(1).startswith("episode") else matched.group(1)
@@ -692,9 +672,7 @@ def _match_bookmarks(
             ):
                 continue
             if target in candidate or candidate in target:
-                score = min(len(target), len(candidate)) / max(
-                    len(target), len(candidate)
-                )
+                score = min(len(target), len(candidate)) / max(len(target), len(candidate))
             else:
                 score = SequenceMatcher(None, target, candidate).ratio()
             if score > best_score:
@@ -709,10 +687,7 @@ def _match_bookmarks(
                 and bookmark.depth == structural_depth
                 and _CHAPTER_RE.match(bookmark.title.strip())
             )
-            nonempty_before = sum(
-                bool(line)
-                for line in pages[bookmark.page - 1][:best_index]
-            )
+            nonempty_before = sum(bool(line) for line in pages[bookmark.page - 1][:best_index])
             if trusted_chapter and nonempty_before > 8:
                 title = _bookmark_title(bookmark.title)
                 page_titles = synthetic_chapters.setdefault(bookmark.page, [])
@@ -725,9 +700,7 @@ def _match_bookmarks(
             if trusted_chapter:
                 trusted_chapters.add(key)
             raw_title = pages[bookmark.page - 1][best_index]
-            if _prefer_bookmark_title(
-                raw_title, bookmark.title, trusted=trusted_chapter
-            ):
+            if _prefer_bookmark_title(raw_title, bookmark.title, trusted=trusted_chapter):
                 canonical_titles[key] = _bookmark_title(bookmark.title)
             matched += 1
         elif (
@@ -737,9 +710,7 @@ def _match_bookmarks(
         ):
             title = _bookmark_title(bookmark.title)
             page_titles = synthetic_chapters.setdefault(bookmark.page, [])
-            if _chapter_identity(title) not in {
-                _chapter_identity(item) for item in page_titles
-            }:
+            if _chapter_identity(title) not in {_chapter_identity(item) for item in page_titles}:
                 page_titles.append(title)
     return levels, matched, trusted_chapters, canonical_titles, synthetic_chapters
 
@@ -798,10 +769,7 @@ def _looks_like_all_caps_heading(value: str) -> bool:
         and 1 <= len(text.split()) <= 12
         and letters
         and not uncased_letters
-        and (
-            uppercase_ratio >= 0.85
-            or _looks_like_letter_spaced_heading(text)
-        )
+        and (uppercase_ratio >= 0.85 or _looks_like_letter_spaced_heading(text))
         and not _TERMINAL_RE.search(text)
     )
 
@@ -881,9 +849,7 @@ def _reflow_page(
         output.extend((f"# {title}", ""))
     heading_count = len(synthetic_chapters)
     room_count = 0
-    last_heading_identity = (
-        _normalize(synthetic_chapters[-1]) if synthetic_chapters else ""
-    )
+    last_heading_identity = _normalize(synthetic_chapters[-1]) if synthetic_chapters else ""
     body_since_heading = False
 
     def flush() -> None:
@@ -922,9 +888,7 @@ def _reflow_page(
         if index in margins and _PAGE_NUMBER_RE.fullmatch(line):
             continue
         key = (page_number, index)
-        display_line = _strip_decorative_heading_leader(
-            canonical_titles.get(key, line)
-        )
+        display_line = _strip_decorative_heading_leader(canonical_titles.get(key, line))
         room_body = ""
         level = heading_levels.get(key) if structural_headings else None
         next_line = next((value for value in lines[index + 1 :] if value), "")
@@ -945,9 +909,7 @@ def _reflow_page(
         duplicate_trusted_chapter = any(
             identity == trusted
             or (
-                len(trusted) >= 12
-                and len(identity) > len(trusted)
-                and identity.startswith(trusted)
+                len(trusted) >= 12 and len(identity) > len(trusted) and identity.startswith(trusted)
             )
             or (
                 len(identity) >= 12
@@ -969,22 +931,22 @@ def _reflow_page(
             # point it back at that same paragraph. Such a match is not document
             # structure and must remain searchable prose.
             level = None
-        if (
-            not trusted_top_level
-            and _CHAPTER_RE.match(display_line)
-            and duplicate_trusted_chapter
-        ):
+        if not trusted_top_level and _CHAPTER_RE.match(display_line) and duplicate_trusted_chapter:
             # Drop duplicated running headers or visual recovery of a boundary
             # already anchored by an outline entry elsewhere in the document.
             continue
-        if structural_headings and _CHAPTER_RE.match(display_line) and (
-            trusted_top_level
-            or (
-                _looks_like_automatic_chapter_heading(display_line)
-                and (
-                    level is not None
-                    or chapter_confirmation
-                    or (index in top_lines and chapter_lines == 1)
+        if (
+            structural_headings
+            and _CHAPTER_RE.match(display_line)
+            and (
+                trusted_top_level
+                or (
+                    _looks_like_automatic_chapter_heading(display_line)
+                    and (
+                        level is not None
+                        or chapter_confirmation
+                        or (index in top_lines and chapter_lines == 1)
+                    )
                 )
             )
         ):
@@ -1065,9 +1027,7 @@ def build_structured_markdown(
         for key in trusted_chapters
     }
     trusted_chapter_titles.update(
-        _chapter_identity(title)
-        for titles in synthetic_chapters.values()
-        for title in titles
+        _chapter_identity(title) for titles in synthetic_chapters.values() for title in titles
     )
     visual_levels, matched_visual = _match_visual_headings(pages, visual_headings or {})
     for key, level in visual_levels.items():
@@ -1134,16 +1094,9 @@ def _page_quality(text: str) -> dict[str, Any]:
     # rate so URLs, identifiers, tables, and ordinary German compounds do not
     # force OCR by themselves.
     whitespace_per_alpha = whitespace / max(alphabetic, 1)
-    fused_text = (
-        alphabetic >= 200
-        and whitespace_per_alpha < 0.08
-        and long_alphabetic_runs >= 3
-    )
+    fused_text = alphabetic >= 200 and whitespace_per_alpha < 0.08 and long_alphabetic_runs >= 3
     private_use = sum(unicodedata.category(char) == "Co" for char in text)
-    control = sum(
-        unicodedata.category(char) == "Cc" and char not in "\t\r\n"
-        for char in text
-    )
+    control = sum(unicodedata.category(char) == "Cc" and char not in "\t\r\n" for char in text)
     replacement = text.count("\ufffd")
     ascii_words = re.findall(r"[A-Za-z]+", text)
     isolated_fragments = re.findall(
@@ -1202,19 +1155,12 @@ def _document_quality(page_texts: Sequence[str]) -> dict[str, Any]:
     denominator = max(characters, 1)
     sparse_pages = [index for index, item in enumerate(page_stats, start=1) if item["sparse"]]
     corrupt_pages = [index for index, item in enumerate(page_stats, start=1) if item["corrupt"]]
-    fused_pages = [
-        index for index, item in enumerate(page_stats, start=1) if item["fused_text"]
-    ]
+    fused_pages = [index for index, item in enumerate(page_stats, start=1) if item["fused_text"]]
     lexical_damage_pages = [
-        index
-        for index, item in enumerate(page_stats, start=1)
-        if item["lexically_damaged"]
+        index for index, item in enumerate(page_stats, start=1) if item["lexically_damaged"]
     ]
     suspect_pages = sorted(
-        set(sparse_pages)
-        | set(corrupt_pages)
-        | set(fused_pages)
-        | set(lexical_damage_pages)
+        set(sparse_pages) | set(corrupt_pages) | set(fused_pages) | set(lexical_damage_pages)
     )
     return {
         "character_count": characters,
@@ -1240,6 +1186,22 @@ def _document_quality(page_texts: Sequence[str]) -> dict[str, Any]:
             (len(page_stats) - len(sparse_pages)) / max(len(page_stats), 1), 6
         ),
     }
+
+
+def _repair_pdf_word_break_noncharacters(
+    page_texts: Sequence[str],
+) -> tuple[list[str], int]:
+    """Remove pypdfium2's U+FFFE discretionary word-break sentinel."""
+
+    count = sum(str(page).count("\ufffe") for page in page_texts)
+    return [re.sub(r"\ufffe[ \t\r\n]*", "", str(page)) for page in page_texts], count
+
+
+def _repair_pdf_control_artifacts(page_texts: Sequence[str]) -> tuple[list[str], int]:
+    """Remove the U+0002 glyph-position marker emitted by damaged PDF font maps."""
+
+    count = sum(str(page).count("\x02") for page in page_texts)
+    return [str(page).replace("\x02", "") for page in page_texts], count
 
 
 def _ocr_page_cache_path(
@@ -1314,7 +1276,8 @@ def _read_ocr_page_cache(
     try:
         value = json.loads(target.read_text(encoding="utf-8"))
         if (
-            set(value) != {
+            set(value)
+            != {
                 "schema",
                 "source_checksum",
                 "profile",
@@ -1399,6 +1362,33 @@ def _read_ocr_page_cache(
         return None
 
 
+def _new_rapidocr_engine(model_name: str) -> Any:
+    try:
+        from rapidocr import (
+            EngineType,
+            LangDet,
+            LangRec,
+            ModelType,
+            OCRVersion,
+            RapidOCR,
+        )
+    except ImportError as exc:
+        raise RuntimeError("OCR requires `pip install sagasmith-core[documents,ocr]`") from exc
+    model_type = ModelType.MEDIUM if model_name == "medium" else ModelType.SMALL
+    return RapidOCR(
+        params={
+            "Det.engine_type": EngineType.ONNXRUNTIME,
+            "Det.lang_type": LangDet.EN,
+            "Det.model_type": model_type,
+            "Det.ocr_version": OCRVersion.PPOCRV6,
+            "Rec.engine_type": EngineType.ONNXRUNTIME,
+            "Rec.lang_type": LangRec.EN,
+            "Rec.model_type": model_type,
+            "Rec.ocr_version": OCRVersion.PPOCRV6,
+        }
+    )
+
+
 class RapidOcrProvider:
     """Lazy local OCR for pages whose PDF text layer is empty or corrupt."""
 
@@ -1417,14 +1407,11 @@ class RapidOcrProvider:
             raise ValueError("OCR model_type must be small or medium")
         self.scale = float(scale)
         self.model_type = model_type
-        self.cache_dir = (
-            Path(cache_dir).expanduser().resolve()
-            if cache_dir is not None
-            else None
-        )
+        self.cache_dir = Path(cache_dir).expanduser().resolve() if cache_dir is not None else None
         self.cache_hits = 0
         self.cache_misses = 0
         self._engine: Any | None = None
+        self._engine_lock: RLock | None = None
 
     @property
     def cache_profile(self) -> str:
@@ -1438,35 +1425,13 @@ class RapidOcrProvider:
         )
 
     def _load_engine(self) -> Any:
-        try:
-            from rapidocr import (
-                EngineType,
-                LangDet,
-                LangRec,
-                ModelType,
-                OCRVersion,
-                RapidOCR,
-            )
-        except ImportError as exc:
-            raise RuntimeError(
-                "OCR requires `pip install sagasmith-core[documents,ocr]`"
-            ) from exc
         if self._engine is None:
-            model_type = (
-                ModelType.MEDIUM if self.model_type == "medium" else ModelType.SMALL
-            )
-            self._engine = RapidOCR(
-                params={
-                    "Det.engine_type": EngineType.ONNXRUNTIME,
-                    "Det.lang_type": LangDet.EN,
-                    "Det.model_type": model_type,
-                    "Det.ocr_version": OCRVersion.PPOCRV6,
-                    "Rec.engine_type": EngineType.ONNXRUNTIME,
-                    "Rec.lang_type": LangRec.EN,
-                    "Rec.model_type": model_type,
-                    "Rec.ocr_version": OCRVersion.PPOCRV6,
-                }
-            )
+            with _RAPIDOCR_ENGINES_LOCK:
+                cached = _RAPIDOCR_ENGINES.get(self.model_type)
+                if cached is None:
+                    cached = (_new_rapidocr_engine(self.model_type), RLock())
+                    _RAPIDOCR_ENGINES[self.model_type] = cached
+                self._engine, self._engine_lock = cached
         return self._engine
 
     def extract(
@@ -1498,9 +1463,7 @@ class RapidOcrProvider:
         source = Path(path).expanduser().resolve()
         selected = list(page_numbers) if page_numbers is not None else None
         if selected is None:
-            source_checksum = (
-                file_sha256(source) if self.cache_dir is not None else ""
-            )
+            source_checksum = file_sha256(source) if self.cache_dir is not None else ""
 
             def persist_all(layout: OcrPageLayout) -> None:
                 if self.cache_dir is not None:
@@ -1521,9 +1484,7 @@ class RapidOcrProvider:
         if not selected:
             return []
         if any(
-            isinstance(page_number, bool)
-            or not isinstance(page_number, int)
-            or page_number < 1
+            isinstance(page_number, bool) or not isinstance(page_number, int) or page_number < 1
             for page_number in selected
         ):
             raise ValueError("OCR page numbers must be positive integers")
@@ -1548,6 +1509,7 @@ class RapidOcrProvider:
                 layouts_by_page[page_number] = cached
                 self.cache_hits += 1
         if missing:
+
             def persist_recovered(layout: OcrPageLayout) -> None:
                 layouts_by_page[layout.page_number] = layout
                 _write_ocr_page_cache(
@@ -1588,15 +1550,11 @@ class RapidOcrProvider:
         try:
             import pypdfium2 as pdfium
         except ImportError as exc:
-            raise RuntimeError(
-                "OCR requires `pip install sagasmith-core[documents,ocr]`"
-            ) from exc
+            raise RuntimeError("OCR requires `pip install sagasmith-core[documents,ocr]`") from exc
         engine = self._load_engine()
         document = pdfium.PdfDocument(str(source))
         try:
-            selected = list(
-                range(1, len(document) + 1) if page_numbers is None else page_numbers
-            )
+            selected = list(range(1, len(document) + 1) if page_numbers is None else page_numbers)
             if any(not 1 <= page_number <= len(document) for page_number in selected):
                 raise ValueError("OCR page number is outside the PDF")
             pages: list[OcrPageLayout] = []
@@ -1606,7 +1564,9 @@ class RapidOcrProvider:
                     bitmap = page.render(scale=self.scale)
                     try:
                         image = bitmap.to_numpy()
-                        output = engine(image)
+                        assert self._engine_lock is not None
+                        with self._engine_lock:
+                            output = engine(image)
                     finally:
                         bitmap.close()
                 finally:
@@ -1650,9 +1610,8 @@ class CascadingOcrProvider:
             )
             for provider in self.providers
         ]
-        return (
-            f"{self.name}:min-confidence={self.minimum_layout_confidence:.3f}:"
-            + "=>".join(profiles)
+        return f"{self.name}:min-confidence={self.minimum_layout_confidence:.3f}:" + "=>".join(
+            profiles
         )
 
     def extract(
@@ -1670,10 +1629,7 @@ class CascadingOcrProvider:
             provider_pages = (
                 None
                 if selected is None and requested is None
-                else [
-                    (selected_pages or [])[index]
-                    for index in pending_indexes
-                ]
+                else [(selected_pages or [])[index] for index in pending_indexes]
                 if selected is not None
                 else requested
             )
@@ -1695,9 +1651,7 @@ class CascadingOcrProvider:
                     if _ocr_text_score(str(candidate)) > _ocr_text_score(selected[index]):
                         selected[index] = str(candidate)
             pending_indexes = [
-                index
-                for index, text in enumerate(selected)
-                if _ocr_text_needs_fallback(text)
+                index for index, text in enumerate(selected) if _ocr_text_needs_fallback(text)
             ]
             if not pending_indexes:
                 break
@@ -1725,10 +1679,7 @@ class CascadingOcrProvider:
             provider_pages = (
                 None
                 if selected is None and requested is None
-                else [
-                    (selected_pages or [])[index]
-                    for index in pending_indexes
-                ]
+                else [(selected_pages or [])[index] for index in pending_indexes]
                 if selected is not None
                 else requested
             )
@@ -1863,9 +1814,7 @@ class PdfTextLayoutProvider:
         source = Path(path).expanduser().resolve()
         document = pdfium.PdfDocument(str(source))
         try:
-            selected = list(
-                range(1, len(document) + 1) if page_numbers is None else page_numbers
-            )
+            selected = list(range(1, len(document) + 1) if page_numbers is None else page_numbers)
             if any(not 1 <= page_number <= len(document) for page_number in selected):
                 raise ValueError("PDF text-layout page number is outside the PDF")
             pages: list[OcrPageLayout] = []
@@ -1954,9 +1903,7 @@ def _pdf_text_layout_blocks(text_page: Any, *, page_height: float) -> list[OcrTe
         candidate["height_sum"] += float(character["height"])
         candidate["character_count"] += 1
         candidate["cy"] = candidate["cy_sum"] / candidate["character_count"]
-        candidate["height"] = (
-            candidate["height_sum"] / candidate["character_count"]
-        )
+        candidate["height"] = candidate["height_sum"] / candidate["character_count"]
 
     blocks: list[OcrTextBlock] = []
     for line in sorted(lines, key=lambda item: (item["cy"], item["characters"][0]["x0"])):
@@ -1991,11 +1938,7 @@ def _pdf_text_layout_blocks(text_page: Any, *, page_height: float) -> list[OcrTe
             text = " ".join(raw_text.split())
             if not text:
                 continue
-            bad = sum(
-                1
-                for character in text
-                if unicodedata.category(character) in {"Co", "Cc"}
-            )
+            bad = sum(1 for character in text if unicodedata.category(character) in {"Co", "Cc"})
             confidence = max(0.4, 1.0 - bad / max(len(text), 1))
             blocks.append(
                 OcrTextBlock(
@@ -2040,9 +1983,7 @@ def _layout_reading_order_text(layout: OcrPageLayout) -> tuple[str, bool]:
     blocks = [
         block
         for block in layout.blocks
-        if block.text.strip()
-        and block.x1 > block.x0
-        and block.y1 > block.y0
+        if block.text.strip() and block.x1 > block.x0 and block.y1 > block.y0
     ]
     if not blocks:
         return "", False
@@ -2055,9 +1996,7 @@ def _layout_reading_order_text(layout: OcrPageLayout) -> tuple[str, bool]:
     # ignore tiny folio marks so a page number cannot drag that rectangle back
     # to the media-box origin.
     extent_blocks = [
-        block
-        for block in blocks
-        if block.x1 - block.x0 >= max(24.0, width * 0.08)
+        block for block in blocks if block.x1 - block.x0 >= max(24.0, width * 0.08)
     ] or blocks
     horizontal_start = min(block.x0 for block in extent_blocks)
     horizontal_end = max(block.x1 for block in extent_blocks)
@@ -2096,8 +2035,7 @@ def _layout_reading_order_text(layout: OcrPageLayout) -> tuple[str, bool]:
         for column_count in (4, 3, 2):
             column_width = usable_width / column_count
             boundaries = [
-                horizontal_start + column_width * index
-                for index in range(1, column_count)
+                horizontal_start + column_width * index for index in range(1, column_count)
             ]
             columns: list[list[OcrTextBlock]] = [[] for _ in range(column_count)]
             spanning: list[OcrTextBlock] = []
@@ -2109,14 +2047,12 @@ def _layout_reading_order_text(layout: OcrPageLayout) -> tuple[str, bool]:
                     for boundary in boundaries
                 )
                 has_row_peer = any(
-                    other is not block
-                    and min(block.y1, other.y1) - max(block.y0, other.y0) > 0
+                    other is not block and min(block.y1, other.y1) - max(block.y0, other.y0) > 0
                     for other in values
                 )
                 top_centered_display = (
                     block.y0 <= band_top + max(24.0, height * 0.04)
-                    and abs(center - (horizontal_start + usable_width / 2))
-                    <= usable_width * 0.12
+                    and abs(center - (horizontal_start + usable_width / 2)) <= usable_width * 0.12
                     and block_width >= usable_width * 0.08
                     and not has_row_peer
                 )
@@ -2140,9 +2076,7 @@ def _layout_reading_order_text(layout: OcrPageLayout) -> tuple[str, bool]:
             if any(len(column) < 4 for column in columns):
                 continue
             extents = [vertical_extent(column) for column in columns]
-            overlap = min(end for _start, end in extents) - max(
-                start for start, _end in extents
-            )
+            overlap = min(end for _start, end in extents) - max(start for start, _end in extents)
             if overlap < max(36.0, height * 0.1):
                 continue
             separated = all(
@@ -2162,11 +2096,7 @@ def _layout_reading_order_text(layout: OcrPageLayout) -> tuple[str, bool]:
         remaining = [block for column in columns for block in column]
         for divider in sorted(spanning, key=lambda block: (block.y0, block.x0)):
             divider_center = (divider.y0 + divider.y1) / 2
-            prior = [
-                block
-                for block in remaining
-                if (block.y0 + block.y1) / 2 < divider_center
-            ]
+            prior = [block for block in remaining if (block.y0 + block.y1) / 2 < divider_center]
             remaining = [block for block in remaining if block not in prior]
             for column in columns:
                 column_ids = {id(block) for block in column}
@@ -2222,9 +2152,7 @@ def _ocr_page_layout(
     raw_texts = tuple(output_texts) if output_texts is not None else ()
     raw_scores = tuple(output_scores) if output_scores is not None else ()
     blocks: list[OcrTextBlock] = []
-    for index, (raw_box, raw_text) in enumerate(
-        zip(raw_boxes, raw_texts, strict=False)
-    ):
+    for index, (raw_box, raw_text) in enumerate(zip(raw_boxes, raw_texts, strict=False)):
         text = str(raw_text).strip()
         if not text:
             continue
@@ -2268,9 +2196,7 @@ def _visual_headings(
     styled: list[tuple[str, float, int, str]] = []
 
     def character_style(text_index: int) -> tuple[float, int, str] | None:
-        char_index = pdfium_c.FPDFText_GetCharIndexFromTextIndex(
-            text_page.raw, text_index
-        )
+        char_index = pdfium_c.FPDFText_GetCharIndexFromTextIndex(text_page.raw, text_index)
         if char_index < 0:
             return None
         try:
@@ -2329,12 +2255,14 @@ def _visual_headings(
     body_weight = Counter(
         weight for line, _height, weight, _font in eligible if len(line) >= 20
     ).most_common(1)
-    common_weight = body_weight[0][0] if body_weight else Counter(
-        weight for _line, _height, weight, _font in eligible
-    ).most_common(1)[0][0]
-    weights_informative = bool(common_weight) and len(
-        {weight for _line, _height, weight, _font in eligible}
-    ) > 1
+    common_weight = (
+        body_weight[0][0]
+        if body_weight
+        else Counter(weight for _line, _height, weight, _font in eligible).most_common(1)[0][0]
+    )
+    weights_informative = (
+        bool(common_weight) and len({weight for _line, _height, weight, _font in eligible}) > 1
+    )
     result: list[tuple[str, int]] = []
     for line, height, weight, font in eligible:
         if _TERMINAL_RE.search(line) or _LIST_RE.match(line):
@@ -2347,9 +2275,7 @@ def _visual_headings(
         strong_size = height >= 8.0 and ratio >= 1.35
         small_caps = "smallcaps" in font.casefold() and height >= 7.0
         bold_display = (
-            "bold" in font.casefold()
-            and height >= 6.5
-            and _looks_like_letter_spaced_heading(line)
+            "bold" in font.casefold() and height >= 6.5 and _looks_like_letter_spaced_heading(line)
         )
         distinct_weight = weights_informative and weight != common_weight and height >= 7.0
         if not (strong_size or small_caps or bold_display or distinct_weight):
@@ -2535,12 +2461,9 @@ def _pdf_extraction_profile(
     ocr_provider: OcrProvider | None,
     layout_profile: DocumentLayoutProfile,
 ) -> str:
-    ocr = getattr(ocr_provider, "cache_profile", None) or getattr(
-        ocr_provider, "name", "none"
-    )
+    ocr = getattr(ocr_provider, "cache_profile", None) or getattr(ocr_provider, "name", "none")
     return (
-        f"pypdfium2:{_PDF_TEXT_EXTRACTOR_VERSION}:ocr={ocr}:"
-        f"layout={layout_profile.cache_identity}"
+        f"pypdfium2:{_PDF_TEXT_EXTRACTOR_VERSION}:ocr={ocr}:layout={layout_profile.cache_identity}"
     )
 
 
@@ -2681,18 +2604,9 @@ class PdfDocumentConverter:
                         },
                         dict(cached["initial_quality"]),
                         [int(item) for item in cached.get("ocr_pages", [])],
-                        [
-                            int(item)
-                            for item in cached.get("layout_ordered_pages", [])
-                        ],
-                        [
-                            int(item)
-                            for item in cached.get("bookmark_ocr_pages", [])
-                        ],
-                        [
-                            int(item)
-                            for item in cached.get("ocr_rejected_pages", [])
-                        ],
+                        [int(item) for item in cached.get("layout_ordered_pages", [])],
+                        [int(item) for item in cached.get("bookmark_ocr_pages", [])],
+                        [int(item) for item in cached.get("ocr_rejected_pages", [])],
                     )
             except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                 pass
@@ -2717,11 +2631,7 @@ class PdfDocumentConverter:
                 | set(fused_pages)
                 | set(lexical_damage_pages)
                 | set(bookmark_ocr_pages)
-                | (
-                    set(sparse_pages)
-                    if pages and len(sparse_pages) / len(pages) >= 0.8
-                    else set()
-                )
+                | (set(sparse_pages) if pages and len(sparse_pages) / len(pages) >= 0.8 else set())
             )
             ocr_pages: list[int] = []
             ocr_rejected_pages: list[int] = []
@@ -2758,9 +2668,7 @@ class PdfDocumentConverter:
                         # interleaving those columns, so an outline-only gain is
                         # not sufficient evidence to replace the stronger text.
                         page_bookmarks = [
-                            bookmark
-                            for bookmark in bookmarks
-                            if bookmark.page == page_number
+                            bookmark for bookmark in bookmarks if bookmark.page == page_number
                         ]
                         before = _match_bookmarks(
                             [[_clean_line(line) for line in text.splitlines()] for text in pages],
@@ -2780,8 +2688,7 @@ class PdfDocumentConverter:
                     else:
                         ocr_rejected_pages.append(page_number)
                 layout_ordered_pages = sorted(
-                    set(layout_ordered_pages)
-                    | (set(ocr_layout_pages) & set(ocr_pages))
+                    set(layout_ordered_pages) | (set(ocr_layout_pages) & set(ocr_pages))
                 )
                 for page_number in ocr_pages:
                     visual_headings.pop(page_number, None)
@@ -2816,6 +2723,8 @@ class PdfDocumentConverter:
                 bookmark_ocr_pages,
                 ocr_rejected_pages,
             ) = extracted
+        pages, pdf_word_break_repair_count = _repair_pdf_word_break_noncharacters(pages)
+        pages, pdf_control_artifact_repair_count = _repair_pdf_control_artifacts(pages)
         quality = _document_quality(pages)
         if pages and quality["suspect_page_count"] / len(pages) >= 0.8:
             if self.ocr_provider is None:
@@ -2838,8 +2747,7 @@ class PdfDocumentConverter:
         unresolved_corrupt = list(quality["corrupt_text_pages"])
         if unresolved_corrupt:
             warnings.append(
-                "text layer remains corrupt on "
-                f"{len(unresolved_corrupt)}/{len(pages)} pages"
+                f"text layer remains corrupt on {len(unresolved_corrupt)}/{len(pages)} pages"
             )
         unresolved_lexical_damage = list(quality["lexical_damage_pages"])
         if unresolved_lexical_damage:
@@ -2849,8 +2757,7 @@ class PdfDocumentConverter:
             )
         if quality["text_page_coverage"] < 0.9:
             warnings.append(
-                "usable text covers only "
-                f"{quality['text_page_count']}/{len(pages)} pages"
+                f"usable text covers only {quality['text_page_count']}/{len(pages)} pages"
             )
         return NormalizedDocument(
             content=content,
@@ -2870,10 +2777,7 @@ class PdfDocumentConverter:
                 **form_metadata,
                 "ocr_provider": self.ocr_provider.name if ocr_pages else None,
                 "ocr_profile": (
-                    str(
-                        getattr(self.ocr_provider, "cache_profile", None)
-                        or self.ocr_provider.name
-                    )
+                    str(getattr(self.ocr_provider, "cache_profile", None) or self.ocr_provider.name)
                     if ocr_pages and self.ocr_provider is not None
                     else None
                 ),
@@ -2881,6 +2785,8 @@ class PdfDocumentConverter:
                 "bookmark_ocr_pages": bookmark_ocr_pages,
                 "ocr_rejected_pages": ocr_rejected_pages,
                 "layout_ordered_pages": layout_ordered_pages,
+                "pdf_word_break_repair_count": pdf_word_break_repair_count,
+                "pdf_control_artifact_repair_count": pdf_control_artifact_repair_count,
                 "extraction_cache_hit": extraction_cache_hit,
                 "initial_quality": initial_quality,
                 "quality": quality,
@@ -2968,9 +2874,7 @@ def normalize_document(
                     checksum=checksum,
                     page_count=int(value.get("page_count", 1)),
                     bookmarks=tuple(
-                        DocumentBookmark(
-                            str(item["title"]), int(item["page"]), int(item["depth"])
-                        )
+                        DocumentBookmark(str(item["title"]), int(item["page"]), int(item["depth"]))
                         for item in value.get("bookmarks", [])
                     ),
                     warnings=tuple(str(item) for item in value.get("warnings", [])),

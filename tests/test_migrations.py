@@ -22,43 +22,28 @@ def test_bundled_migration_builds_schema(tmp_path: Path) -> None:
         assert "template_id" in {column["name"] for column in inspector.get_columns("characters")}
         assert "rule_pack_versions" in inspector.get_table_names()
         assert "provenance" in {
-            column["name"]
-            for column in inspector.get_columns("rule_pack_versions")
+            column["name"] for column in inspector.get_columns("rule_pack_versions")
         }
         assert "campaign_rule_activations" in inspector.get_table_names()
         assert "rule_resolution_receipts" in inspector.get_table_names()
-        assert "revision" in {
-            column["name"] for column in inspector.get_columns("import_jobs")
-        }
+        assert "revision" in {column["name"] for column in inspector.get_columns("import_jobs")}
         assert any(
             constraint["name"] == "uq_mutation_group_branch_idempotency"
-            and constraint["column_names"]
-            == ["campaign_id", "branch_id", "idempotency_key"]
+            and constraint["column_names"] == ["campaign_id", "branch_id", "idempotency_key"]
             for constraint in inspector.get_unique_constraints("mutation_groups")
         )
-        assert "event_sequence" in {
-            column["name"] for column in inspector.get_columns("campaigns")
-        }
+        assert "event_sequence" in {column["name"] for column in inspector.get_columns("campaigns")}
         assert "campaign_event_participants" in inspector.get_table_names()
         assert {"event_id", "actor_id", "role"} == {
-            column["name"]
-            for column in inspector.get_columns("campaign_event_participants")
+            column["name"] for column in inspector.get_columns("campaign_event_participants")
         }
-        memory_columns = {
-            column["name"] for column in inspector.get_columns("campaign_memories")
-        }
-        revision_columns = {
-            column["name"] for column in inspector.get_columns("memory_revisions")
-        }
-        rule_source_columns = {
-            column["name"] for column in inspector.get_columns("rule_sources")
-        }
+        memory_columns = {column["name"] for column in inspector.get_columns("campaign_memories")}
+        revision_columns = {column["name"] for column in inspector.get_columns("memory_revisions")}
+        rule_source_columns = {column["name"] for column in inspector.get_columns("rule_sources")}
         snapshot_columns = {
             column["name"] for column in inspector.get_columns("campaign_snapshots")
         }
-        branch_columns = {
-            column["name"] for column in inspector.get_columns("campaign_branches")
-        }
+        branch_columns = {column["name"] for column in inspector.get_columns("campaign_branches")}
         assert {"fact_key", "subject_ref", "predicate"}.issubset(memory_columns)
         assert {
             "status",
@@ -264,7 +249,7 @@ def test_rule_profile_authority_removes_legacy_campaign_setting_copies(
             "(id, system_id, slug, name, status, description, settings, state, revision, "
             "created_at, updated_at) VALUES "
             "('campaign-1', 'dnd5e', 'authority', 'Authority', 'active', '', "
-            "'{\"edition\":\"2014\",\"locale\":\"zh\",\"table_name\":\"Friday\"}', "
+            '\'{"edition":"2014","locale":"zh","table_name":"Friday"}\', '
             "'{}', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
         )
         connection.exec_driver_sql(
@@ -297,8 +282,7 @@ def test_rule_source_revision_migration_preserves_sqlite_fts_triggers(
     command.upgrade(config, "20260728_19")
     with database.engine.begin() as connection:
         if "active" in {
-            column["name"]
-            for column in inspect(connection).get_columns("rule_sources")
+            column["name"] for column in inspect(connection).get_columns("rule_sources")
         }:
             connection.exec_driver_sql("ALTER TABLE rule_sources DROP COLUMN active")
 
@@ -306,9 +290,7 @@ def test_rule_source_revision_migration_preserves_sqlite_fts_triggers(
 
     try:
         inspector = inspect(database.engine)
-        assert "active" in {
-            column["name"] for column in inspector.get_columns("rule_sources")
-        }
+        assert "active" in {column["name"] for column in inspector.get_columns("rule_sources")}
         with database.engine.begin() as connection:
             trigger_names = {
                 row[0]
@@ -357,8 +339,7 @@ def test_rule_source_revision_migration_recovers_interrupted_sqlite_batch(
     command.upgrade(config, "20260728_19")
     with database.engine.begin() as connection:
         if "active" in {
-            column["name"]
-            for column in inspect(connection).get_columns("rule_sources")
+            column["name"] for column in inspect(connection).get_columns("rule_sources")
         }:
             connection.exec_driver_sql("ALTER TABLE rule_sources DROP COLUMN active")
         connection.exec_driver_sql(
@@ -370,9 +351,7 @@ def test_rule_source_revision_migration_recovers_interrupted_sqlite_batch(
     try:
         inspector = inspect(database.engine)
         assert "_alembic_tmp_rule_sources" not in inspector.get_table_names()
-        assert "active" in {
-            column["name"] for column in inspector.get_columns("rule_sources")
-        }
+        assert "active" in {column["name"] for column in inspector.get_columns("rule_sources")}
     finally:
         database.dispose()
 

@@ -203,9 +203,7 @@ def upgrade() -> None:
     )
 
     if "module_chunks" in tables:
-        existing = op.get_bind().exec_driver_sql(
-            "SELECT COUNT(*) FROM module_chunks"
-        ).scalar()
+        existing = op.get_bind().exec_driver_sql("SELECT COUNT(*) FROM module_chunks").scalar()
         if existing and existing > 0:
             op.get_bind().exec_driver_sql(
                 f"INSERT INTO module_fts({_cols_dml(_MODULE_FTS_COLS)}) "
@@ -226,9 +224,7 @@ def upgrade() -> None:
     )
 
     if "rule_chunks" in tables:
-        existing = op.get_bind().exec_driver_sql(
-            "SELECT COUNT(*) FROM rule_chunks"
-        ).scalar()
+        existing = op.get_bind().exec_driver_sql("SELECT COUNT(*) FROM rule_chunks").scalar()
         if existing and existing > 0:
             op.get_bind().exec_driver_sql(
                 f"INSERT INTO rule_fts({_cols_dml(_RULE_FTS_COLS)}) "

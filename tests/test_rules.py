@@ -62,12 +62,8 @@ def test_rule_search_can_be_bound_to_exact_sources(database) -> None:
         publication_id="b",
     )
 
-    by_id = service.search(
-        system_id="dnd5e", query="Shared", source_ids=[first.source_id]
-    )
-    by_key = service.search(
-        system_id="dnd5e", query="Shared", source_keys=["book-b"]
-    )
+    by_id = service.search(system_id="dnd5e", query="Shared", source_ids=[first.source_id])
+    by_key = service.search(system_id="dnd5e", query="Shared", source_keys=["book-b"])
 
     assert {hit.source_id for hit in by_id} == {first.source_id}
     assert {hit.metadata["source_key"] for hit in by_key} == {"book-b"}
@@ -214,8 +210,11 @@ def test_rule_ingest_persists_exact_receipt_and_rolls_back_failed_response(
                 response=fail_response,
             ),
         )
-    assert rules.search(
-        system_id="dnd5e",
-        query="This source must not commit",
-        source_keys=["must-roll-back"],
-    ) == []
+    assert (
+        rules.search(
+            system_id="dnd5e",
+            query="This source must not commit",
+            source_keys=["must-roll-back"],
+        )
+        == []
+    )

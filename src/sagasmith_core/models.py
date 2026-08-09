@@ -395,9 +395,7 @@ class CampaignAddonActivation(TimestampMixin, Base):
 
     __tablename__ = "campaign_addon_activations"
     __table_args__ = (
-        UniqueConstraint(
-            "campaign_id", "branch_id", "addon_id", name="uq_campaign_branch_addon"
-        ),
+        UniqueConstraint("campaign_id", "branch_id", "addon_id", name="uq_campaign_branch_addon"),
     )
 
     campaign_id: Mapped[str] = mapped_column(
@@ -675,9 +673,7 @@ class AuditLog(Base):
 
 class CampaignSnapshot(Base):
     __tablename__ = "campaign_snapshots"
-    __table_args__ = (
-        UniqueConstraint("campaign_id", "slot", name="uq_campaign_snapshot_slot"),
-    )
+    __table_args__ = (UniqueConstraint("campaign_id", "slot", name="uq_campaign_snapshot_slot"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     campaign_id: Mapped[str] = mapped_column(
@@ -754,9 +750,7 @@ class CampaignBranch(TimestampMixin, Base):
     """A playable campaign timeline; branches are refs, never destructive restores."""
 
     __tablename__ = "campaign_branches"
-    __table_args__ = (
-        UniqueConstraint("campaign_id", "name", name="uq_campaign_branch_name"),
-    )
+    __table_args__ = (UniqueConstraint("campaign_id", "name", name="uq_campaign_branch_name"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     campaign_id: Mapped[str] = mapped_column(

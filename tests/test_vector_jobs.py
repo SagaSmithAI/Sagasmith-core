@@ -14,10 +14,7 @@ class FakeEmbedder:
     profile = None
 
     def encode(self, texts):
-        return [
-            [1.0, 0.0] if "grapple" in text.casefold() else [0.0, 1.0]
-            for text in texts
-        ]
+        return [[1.0, 0.0] if "grapple" in text.casefold() else [0.0, 1.0] for text in texts]
 
 
 class FakeVectorStore:
@@ -68,9 +65,7 @@ class FakeVectorStore:
                 "profile": profile,
             }
         )
-        indexed_ids = [
-            item_id for call in self.upserts for item_id in call["ids"]
-        ]
+        indexed_ids = [item_id for call in self.upserts for item_id in call["ids"]]
         return [(item_id, 1.0) for item_id in indexed_ids]
 
 

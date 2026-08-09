@@ -50,9 +50,7 @@ class SystemRegistry:
             candidate = entry_point.load()
             definition = candidate() if callable(candidate) else candidate
             if not isinstance(definition, SystemDefinition):
-                raise TypeError(
-                    f"{entry_point.name} did not provide a SystemDefinition"
-                )
+                raise TypeError(f"{entry_point.name} did not provide a SystemDefinition")
             if definition.id not in self._systems:
                 self.register(definition)
                 loaded.append(definition)

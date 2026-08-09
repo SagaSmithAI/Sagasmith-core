@@ -29,12 +29,16 @@ def test_module_source_evidence_contract_has_one_canonical_normalizer() -> None:
         "chunk_id",
         "content_sha256",
     }
-    assert clean_source_evidence_text(
-        "\x02The dragon\u2019s \u00adhoard\u2014HERE."
-    ) == "The dragon's hoard-HERE."
-    assert normalize_source_evidence_text(
-        "\x02The dragon\u2019s \u00adhoard\u2014HERE."
-    ) == "the dragon's hoard-here."
+    assert (
+        clean_source_evidence_text("\x02The dragon\u2019s \u00adhoard\u2014trans￾ formed HERE.")
+        == "The dragon's hoard-transformed HERE."
+    )
+    assert (
+        normalize_source_evidence_text(
+            "\x02The dragon\u2019s \u00adhoard\u2014trans￾ formed HERE."
+        )
+        == "the dragon's hoard-transformed here."
+    )
 
 
 def test_module_ingest_search_and_progress(database) -> None:
@@ -71,9 +75,10 @@ def test_module_ingest_search_and_progress(database) -> None:
     assert hits[0].title == "Broken Gate"
     assert hits[0].metadata["scene_type"] == "section"
     assert hits[0].metadata["visibility"] == "keeper"
-    assert expanded["content_sha256"] == hashlib.sha256(
-        expanded["content"].encode("utf-8")
-    ).hexdigest()
+    assert (
+        expanded["content_sha256"]
+        == hashlib.sha256(expanded["content"].encode("utf-8")).hexdigest()
+    )
     assert expanded["source_ref"] == {
         "module_id": result.module_id,
         "scene_id": hits[0].metadata["scene_id"],
@@ -177,9 +182,7 @@ def test_module_chunks_can_be_listed_in_source_order(database) -> None:
 
     chunks = service.list_chunks(campaign.id, imported.module_id, scene_id=scene_id)
 
-    assert [item["ordinal"] for item in chunks] == sorted(
-        item["ordinal"] for item in chunks
-    )
+    assert [item["ordinal"] for item in chunks] == sorted(item["ordinal"] for item in chunks)
     assert all(item["module_id"] == imported.module_id for item in chunks)
     assert all(item["scene_id"] == scene_id for item in chunks)
     assert any(item["heading_path"][-1] == "Goblin" for item in chunks)
@@ -202,18 +205,14 @@ def test_module_parser_preserves_front_matter_before_first_chapter() -> None:
 
 def test_module_heading_paths_have_one_canonical_representation() -> None:
     chapters = MarkdownModuleParser().parse(
-        "# Episode 2: Raiders' Camp\n"
-        "## Episode 2: Raiders' Camp\n"
-        "The trail is easy to spot.\n"
+        "# Episode 2: Raiders' Camp\n## Episode 2: Raiders' Camp\nThe trail is easy to spot.\n"
     )
 
     assert chapters[0].scenes[0].heading_path == ("Episode 2: Raiders' Camp",)
-    assert chapters[0].scenes[0].chunks[0].heading_path == (
+    assert chapters[0].scenes[0].chunks[0].heading_path == ("Episode 2: Raiders' Camp",)
+    assert canonical_heading_path(("Episode 2: Raiders' Camp", "episode 2: raiders' camp")) == (
         "Episode 2: Raiders' Camp",
     )
-    assert canonical_heading_path(
-        ("Episode 2: Raiders' Camp", "episode 2: raiders' camp")
-    ) == ("Episode 2: Raiders' Camp",)
 
 
 def test_module_parser_uses_global_page_offsets_for_same_page_chapters() -> None:
@@ -242,12 +241,7 @@ def test_module_parser_excludes_page_marker_before_next_heading_from_chunk() -> 
         "Medium humanoid.\n"
     )
 
-    chunks = [
-        chunk
-        for chapter in chapters
-        for scene in chapter.scenes
-        for chunk in scene.chunks
-    ]
+    chunks = [chunk for chapter in chapters for scene in chapter.scenes for chunk in scene.chunks]
     eye_rays = next(chunk for chunk in chunks if "Eye Rays" in chunk.content)
     hlam = next(chunk for chunk in chunks if "Medium humanoid" in chunk.content)
 
@@ -586,9 +580,7 @@ def test_module_candidate_activation_rolls_back_when_receipt_fails(database) -> 
             idempotency_write=IdempotencyWrite(
                 scope=f"module-activation:{campaign.id}",
                 payload={"module_id": result.module_id},
-                response=lambda _value: (_ for _ in ()).throw(
-                    RuntimeError("receipt failed")
-                ),
+                response=lambda _value: (_ for _ in ()).throw(RuntimeError("receipt failed")),
             ),
         )
 
@@ -948,9 +940,12 @@ def test_image_only_module_content_can_be_reviewed_with_page_evidence(database, 
     assert replay["id"] == reviewed["id"]
     assert reviewed["evidence"]["asset_checksum"] == "b" * 64
     assert modules.get_content_review(campaign.id, reviewed["id"])["normalized_content"] == markdown
-    assert [item["id"] for item in modules.list_content_reviews(
-        campaign.id, imported.module_id, content_kind="dnd5e_2014_statblock"
-    )] == [reviewed["id"]]
+    assert [
+        item["id"]
+        for item in modules.list_content_reviews(
+            campaign.id, imported.module_id, content_kind="dnd5e_2014_statblock"
+        )
+    ] == [reviewed["id"]]
 
 
 def test_text_module_content_review_keeps_exact_chunk_evidence(database) -> None:
@@ -967,9 +962,7 @@ def test_text_module_content_review_keeps_exact_chunk_evidence(database) -> None
         ),
     )
     scene = modules.scene_index(campaign.id)[0]
-    chunks = modules.list_chunks(
-        campaign.id, imported.module_id, scene_id=scene["scene_id"]
-    )
+    chunks = modules.list_chunks(campaign.id, imported.module_id, scene_id=scene["scene_id"])
 
     reviewed = modules.review_content(
         campaign_id=campaign.id,
@@ -984,9 +977,7 @@ def test_text_module_content_review_keeps_exact_chunk_evidence(database) -> None
     )
 
     assert reviewed["evidence"]["confidence"] == "reviewed_text"
-    assert reviewed["evidence"]["source_chunk_ids"] == [
-        item["id"] for item in chunks
-    ]
+    assert reviewed["evidence"]["source_chunk_ids"] == [item["id"] for item in chunks]
     assert reviewed["evidence"]["page_start"] == 8
     assert reviewed["evidence"]["page_end"] == 8
 

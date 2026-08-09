@@ -23,4 +23,3 @@ def test_general_schema_contains_domain_tables(tmp_path: Path) -> None:
         "module_chunks",
         "scene_progress",
     } <= tables
-

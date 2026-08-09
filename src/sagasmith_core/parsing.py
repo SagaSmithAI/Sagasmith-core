@@ -78,8 +78,7 @@ class MarkdownHierarchyParser:
         if overlong is not None:
             line = content.count("\n", 0, overlong.start()) + 1
             raise ValueError(
-                "Markdown heading exceeds "
-                f"{MAX_RULE_SECTION_TITLE_CHARS} characters at line {line}"
+                f"Markdown heading exceeds {MAX_RULE_SECTION_TITLE_CHARS} characters at line {line}"
             )
         if not matches:
             body, start, end = _trimmed_body(content, 0, len(content))
@@ -95,11 +94,7 @@ class MarkdownHierarchyParser:
             heading_stack.append((level, title))
             path = tuple(item[1] for item in heading_stack)
             start = match.end()
-            end = (
-                structural_starts[ordinal + 1]
-                if ordinal + 1 < len(matches)
-                else len(content)
-            )
+            end = structural_starts[ordinal + 1] if ordinal + 1 < len(matches) else len(content)
             body, start, end = _trimmed_body(content, start, end)
             sections.append(
                 self._section(

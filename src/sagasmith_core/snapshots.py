@@ -95,9 +95,7 @@ class SnapshotService:
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
             idempotency = IdempotencyService(self.database)
-            idempotency.require_uncommitted_in_session(
-                session, idempotency_key, idempotency_write
-            )
+            idempotency.require_uncommitted_in_session(session, idempotency_key, idempotency_write)
             result = self._create_in_session(
                 session,
                 campaign,
@@ -145,9 +143,7 @@ class SnapshotService:
         )
         canonical_recap = self._build_recap(parent_payload, payload)
         recap = (
-            canonical_recap
-            if recap is None
-            else self._attach_presentation(canonical_recap, recap)
+            canonical_recap if recap is None else self._attach_presentation(canonical_recap, recap)
         )
         row = CampaignSnapshot(
             id=str(uuid.uuid4()),
@@ -230,9 +226,7 @@ class SnapshotService:
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
             idempotency = IdempotencyService(self.database)
-            idempotency.require_uncommitted_in_session(
-                session, idempotency_key, idempotency_write
-            )
+            idempotency.require_uncommitted_in_session(session, idempotency_key, idempotency_write)
             target = self._row(session, campaign_id, slot)
             self._assert_integrity(session, target)
             self._create_in_session(session, campaign, label=f"Before restore to slot {slot}")
@@ -1153,9 +1147,7 @@ class SnapshotService:
                     or memory.subject_ref != item.get("subject_ref")
                     or memory.predicate != item.get("predicate")
                     or revision.status != revision_item.get("status")
-                    or (
-                        revision.valid_from.isoformat() if revision.valid_from else None
-                    )
+                    or (revision.valid_from.isoformat() if revision.valid_from else None)
                     != revision_item.get("valid_from")
                     or (revision.valid_to.isoformat() if revision.valid_to else None)
                     != revision_item.get("valid_to")
@@ -1257,9 +1249,7 @@ class SnapshotService:
             ):
                 raise SnapshotIntegrityError("snapshot event ledger differs from its full payload")
 
-        revision_ids = [
-            str(item.get("id") or "") for item in payload.get("revision_cursor", [])
-        ]
+        revision_ids = [str(item.get("id") or "") for item in payload.get("revision_cursor", [])]
         if not all(revision_ids) or len(revision_ids) != len(set(revision_ids)):
             raise SnapshotIntegrityError("snapshot revision cursor is incomplete")
         actual_revision_ids = set(
@@ -1320,9 +1310,7 @@ class SnapshotService:
             raise SnapshotIntegrityError("snapshot module activations are malformed")
         selected_ids = {str(item) for item in explicit_ids}
         rows = list(
-            session.scalars(
-                select(ModuleSource).where(ModuleSource.campaign_id == campaign_id)
-            )
+            session.scalars(select(ModuleSource).where(ModuleSource.campaign_id == campaign_id))
         )
         available_ids = {row.id for row in rows}
         if not selected_ids.issubset(available_ids):

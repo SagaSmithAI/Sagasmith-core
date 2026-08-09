@@ -26,9 +26,7 @@ def upgrade() -> None:
             normalized = dict(source_metadata)
             normalized.pop("import_state", None)
             bind.execute(
-                sa.update(table)
-                .where(table.c.id == source_id)
-                .values(metadata_json=normalized)
+                sa.update(table).where(table.c.id == source_id).values(metadata_json=normalized)
             )
 
 

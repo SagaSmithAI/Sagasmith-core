@@ -250,10 +250,7 @@ def reciprocal_rank_fusion(
             scores[item_id] = scores.get(item_id, 0.0) + weight / (rank_constant + rank)
             sources.setdefault(item_id, []).append(name)
     return sorted(
-        (
-            (item_id, score, tuple(sources[item_id]))
-            for item_id, score in scores.items()
-        ),
+        ((item_id, score, tuple(sources[item_id])) for item_id, score in scores.items()),
         key=lambda item: (-item[1], item[0]),
     )
 

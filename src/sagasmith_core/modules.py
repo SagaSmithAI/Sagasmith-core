@@ -13,6 +13,7 @@ from typing import Any, Protocol
 from sqlalchemy import select
 
 from sagasmith_core.campaigns import CampaignNotFoundError
+from sagasmith_core.content_pack import validate_content_package
 from sagasmith_core.database import Database
 from sagasmith_core.documents import (
     GENERIC_DOCUMENT_LAYOUT_PROFILE,
@@ -58,9 +59,7 @@ from sagasmith_core.vector import VectorStore
 from sagasmith_core.vector_jobs import VectorIndexJobService
 from sagasmith_core.visibility import MODULE_VISIBILITY_SCOPES
 
-MANAGED_MODULE_SOURCE_FIELDS = frozenset(
-    {"module_id", "scene_id", "chunk_id", "content_sha256"}
-)
+MANAGED_MODULE_SOURCE_FIELDS = frozenset({"module_id", "scene_id", "chunk_id", "content_sha256"})
 EXACT_MODULE_SOURCE_FIELD_ORDER = (
     "module_id",
     "scene_id",
@@ -132,78 +131,11 @@ def _portable_scene_chunks(
     ]
 
 
-def _indexed_module_readiness(
-    *, source_key: str, scene_count: int, asset_count: int
-) -> dict[str, Any]:
-    def blocker(code: str, message: str) -> dict[str, Any]:
-        return {"code": code, "message": message, "source_refs": []}
-
-    dimensions = {
-        "source": {"complete": True, "item_count": 1, "blockers": []},
-        "structure": {
-            "complete": True,
-            "item_count": scene_count,
-            "blockers": [],
-        },
-        "play_profile": {
-            "complete": False,
-            "item_count": 0,
-            "blockers": [
-                blocker(
-                    "play_profile_unreviewed",
-                    "Recommended party size, levels, advancement, and "
-                    "pregenerated characters require review.",
-                )
-            ],
-        },
-        "catalog": {
-            "complete": False,
-            "item_count": 0,
-            "blockers": [
-                blocker(
-                    "catalog_unreviewed",
-                    "Module actors, encounters, items, hazards, and handouts require review.",
-                )
-            ],
-        },
-        "narrative": {
-            "complete": False,
-            "item_count": 0,
-            "blockers": [
-                blocker(
-                    "narrative_unreviewed",
-                    "Narrative dossiers, relationships, contingencies, and endings require review.",
-                )
-            ],
-        },
-        "runtime": {
-            "complete": False,
-            "item_count": 0,
-            "blockers": [
-                blocker(
-                    "runtime_unreviewed",
-                    "Runtime dependencies and campaign activation require review.",
-                )
-            ],
-        },
-        "portability": {
-            "complete": True,
-            "item_count": asset_count,
-            "blockers": [],
-        },
-    }
-    return {
-        "schema_version": 1,
-        "level": "indexed",
-        "dimensions": dimensions,
-        "complete": False,
-    }
-
-
 def clean_source_evidence_text(value: Any) -> str:
     """Remove PDF artifacts and normalize typography while preserving letter case."""
 
     text = str(value or "").replace("\x02", "").replace("\u00ad", "")
+    text = re.sub(r"\ufffe[ \t\r\n]*", "", text)
     return " ".join(text.translate(_SOURCE_EVIDENCE_TRANSLATION).split())
 
 
@@ -397,11 +329,7 @@ class MarkdownModuleParser:
             cursor -= 1
         line_start = content.rfind("\n", 0, cursor) + 1
         candidate = content[line_start:cursor]
-        return (
-            line_start
-            if re.fullmatch(r"<!-- page: \d+ -->", candidate)
-            else heading.start()
-        )
+        return line_start if re.fullmatch(r"<!-- page: \d+ -->", candidate) else heading.start()
 
     @staticmethod
     def _last_content_offset(content: str, start: int, end: int) -> int:
@@ -588,9 +516,7 @@ class _PortableModuleParser:
                         chunks=tuple(
                             ParsedChunk(
                                 ordinal=int(chunk["ordinal"]),
-                                heading_path=tuple(
-                                    str(value) for value in chunk["heading_path"]
-                                ),
+                                heading_path=tuple(str(value) for value in chunk["heading_path"]),
                                 content=str(chunk["content"]),
                                 start_offset=int(chunk["start_offset"]),
                                 end_offset=int(chunk["end_offset"]),
@@ -611,6 +537,90 @@ class _PortableModuleParser:
                     ordinal=chapter_ordinal,
                     title=str(scene_rows[0]["chapter"]),
                     content="\n\n".join(scene["content"] for scene in scene_rows),
+                    scenes=tuple(parsed_scenes),
+                    metadata={},
+                )
+            )
+        return parsed
+
+
+class _ContentModuleParser:
+    """Replay a unified module's stored source spans and Scene Atlas."""
+
+    def __init__(self, package: dict[str, Any], documents: Mapping[str, str]) -> None:
+        self.package = package
+        self.documents = dict(documents)
+        self.profile = _PortableModuleProfile(name="content-package", version="1")
+
+    def document_metadata(self, _content: str) -> dict[str, Any]:
+        return {}
+
+    def parse(self, content: str) -> list[ParsedChapter]:
+        scenes = list(self.package["content"]["scene_atlas"])
+        sources = {str(source["source_key"]): source for source in self.package["sources"]}
+        chapters: dict[int, list[dict[str, Any]]] = {}
+        for scene in scenes:
+            chapters.setdefault(int(scene["chapter_ordinal"]), []).append(scene)
+        parsed = []
+        for chapter_ordinal in sorted(chapters):
+            rows = sorted(chapters[chapter_ordinal], key=lambda item: int(item["scene_ordinal"]))
+            parsed_scenes = []
+            for scene in rows:
+                span = dict(scene["source_span"])
+                source_key = str(span["source_key"])
+                document = self.documents[source_key]
+                start = int(span["start_offset"])
+                end = int(span["end_offset"])
+                scene_content = document[start:end]
+                source = sources[source_key]
+                chunks = [
+                    chunk
+                    for section in source["sections"]
+                    if int(section["start_offset"]) >= start and int(section["end_offset"]) <= end
+                    for chunk in section["chunks"]
+                ]
+                metadata = {
+                    **dict(scene.get("metadata") or {}),
+                    "stable_key": scene["stable_key"],
+                    "scene_type": scene["scene_type"],
+                    "page_start": scene.get("page_start"),
+                    "page_end": scene.get("page_end"),
+                    "headings": list(scene.get("headings") or []),
+                    "keywords": list(scene.get("keywords") or []),
+                }
+                parsed_scenes.append(
+                    ParsedScene(
+                        ordinal=int(scene["scene_ordinal"]),
+                        title=str(scene["title"]),
+                        content=scene_content,
+                        heading_path=tuple(str(item) for item in scene.get("headings") or []),
+                        chunks=tuple(
+                            ParsedChunk(
+                                ordinal=int(chunk["ordinal"]),
+                                heading_path=tuple(str(item) for item in chunk["heading_path"]),
+                                content=document[
+                                    int(chunk["start_offset"]) : int(chunk["end_offset"])
+                                ],
+                                start_offset=int(chunk["start_offset"]),
+                                end_offset=int(chunk["end_offset"]),
+                                metadata={
+                                    **dict(chunk.get("metadata") or {}),
+                                    "page_start": chunk.get("page_start"),
+                                    "page_end": chunk.get("page_end"),
+                                    "content_hash": chunk["content_hash"],
+                                    "portable_chunk_key": chunk["key"],
+                                },
+                            )
+                            for chunk in chunks
+                        ),
+                        metadata=metadata,
+                    )
+                )
+            parsed.append(
+                ParsedChapter(
+                    ordinal=chapter_ordinal,
+                    title=str(rows[0]["chapter"]),
+                    content="\n\n".join(scene.content for scene in parsed_scenes),
                     scenes=tuple(parsed_scenes),
                     metadata={},
                 )
@@ -664,10 +674,7 @@ class ModuleService:
         stored_source_key = (
             source_key
             if activate
-            else (
-                f"{logical_key}--staged-{checksum[:12]}-"
-                f"{parser_profile}-{parser_version}"
-            )
+            else (f"{logical_key}--staged-{checksum[:12]}-{parser_profile}-{parser_version}")
         )
         with self.database.transaction() as session:
             idempotency = IdempotencyService(self.database)
@@ -1013,9 +1020,7 @@ class ModuleService:
                 metadata = dict(scene.metadata)
                 visibility = str(metadata.get("visibility", "keeper"))
                 if visibility not in MODULE_VISIBILITY_SCOPES:
-                    errors.append(
-                        f"scene {stable_key} has invalid visibility {visibility!r}"
-                    )
+                    errors.append(f"scene {stable_key} has invalid visibility {visibility!r}")
                 spatial = dict(metadata.get("spatial") or {})
                 locations = list(spatial.get("locations") or [])
                 location_keys = [str(item.get("key") or "") for item in locations]
@@ -1030,8 +1035,7 @@ class ModuleService:
                         errors.append(f"scene {stable_key} has no PDF page range")
                     elif not (1 <= int(page_start) <= int(page_end) <= document.page_count):
                         errors.append(
-                            f"scene {stable_key} has invalid PDF page range "
-                            f"{page_start}-{page_end}"
+                            f"scene {stable_key} has invalid PDF page range {page_start}-{page_end}"
                         )
                 scenes.append(
                     {
@@ -1184,12 +1188,8 @@ class ModuleService:
                     "parser_profile": row.parser_profile,
                     "parser_version": row.parser_version,
                     "warnings": list(row.warnings),
-                    "runtime_manifest": dict(row.metadata_json or {}).get(
-                        "runtime_manifest"
-                    ),
-                    "portable_package": dict(row.metadata_json or {}).get(
-                        "portable_package"
-                    ),
+                    "runtime_manifest": dict(row.metadata_json or {}).get("runtime_manifest"),
+                    "portable_package": dict(row.metadata_json or {}).get("portable_package"),
                     "chapters": self._counts(session, row.id)[0],
                     "scenes": self._counts(session, row.id)[1],
                     "chunks": self._counts(session, row.id)[2],
@@ -1212,7 +1212,6 @@ class ModuleService:
         manifest: dict[str, Any] | None = None,
         catalogs: dict[str, Any] | None = None,
         narrative: dict[str, Any] | None = None,
-        readiness: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Export one immutable module revision as a self-contained package.
 
@@ -1253,11 +1252,7 @@ class ModuleService:
                 chunks_by_scene.setdefault(chunk.scene_id, []).append(chunk)
             for scene_chunks in chunks_by_scene.values():
                 scene_chunks.sort(key=lambda item: (item.ordinal, item.id))
-            scenes = [
-                (scene, chapter)
-                for scene, chapter in scenes
-                if scene.content.strip()
-            ]
+            scenes = [(scene, chapter) for scene, chapter in scenes if scene.content.strip()]
             if not scenes:
                 raise ValueError("cannot export a module without content-bearing scenes")
             scene_keys = {
@@ -1368,8 +1363,7 @@ class ModuleService:
                 asset.normalized_content
                 for asset in assets
                 if asset.normalized_content
-                and asset.media_type
-                in {"application/pdf", "text/markdown", "text/plain"}
+                and asset.media_type in {"application/pdf", "text/markdown", "text/plain"}
             ]
             document_content = (
                 normalized_documents[0]
@@ -1407,9 +1401,7 @@ class ModuleService:
                         for key, value in dict(scene.metadata_json or {}).items()
                         if key not in {"stable_key", "content_checksum"}
                     },
-                    "content_checksum": hashlib.sha256(
-                        scene.content.encode("utf-8")
-                    ).hexdigest(),
+                    "content_checksum": hashlib.sha256(scene.content.encode("utf-8")).hexdigest(),
                 }
                 for scene, chapter in scenes
             ]
@@ -1446,9 +1438,7 @@ class ModuleService:
                         provenance=dict(bindings[0].metadata_json or {}).get(
                             "portable_provenance", {}
                         ),
-                        metadata=dict(bindings[0].metadata_json or {}).get(
-                            "portable_metadata", {}
-                        ),
+                        metadata=dict(bindings[0].metadata_json or {}).get("portable_metadata", {}),
                         dependencies=dict(bindings[0].metadata_json or {}).get(
                             "portable_dependencies", []
                         ),
@@ -1456,33 +1446,24 @@ class ModuleService:
                             {
                                 "kind": "module_scene" if binding.scene_key else "module",
                                 "module_key": source_key,
-                                **(
-                                    {"scene_key": binding.scene_key}
-                                    if binding.scene_key
-                                    else {}
-                                ),
+                                **({"scene_key": binding.scene_key} if binding.scene_key else {}),
                                 "binding_kind": binding.binding_kind,
                                 "role": binding.role,
                                 "metadata": {
                                     key: value
-                                    for key, value in dict(
-                                        binding.metadata_json or {}
-                                    ).items()
+                                    for key, value in dict(binding.metadata_json or {}).items()
                                     if not key.startswith("portable_")
                                 },
                             }
                             for binding in bindings
-                            if not binding.scene_key
-                            or binding.scene_key in exported_scene_keys
+                            if not binding.scene_key or binding.scene_key in exported_scene_keys
                         ],
                     )
                     for portable_actor_id, (character, bindings) in grouped.items()
                 ]
             module_manifest = manifest or {
                 "title": source.title,
-                "classification": str(
-                    source_metadata.get("module_classification") or "adventure"
-                ),
+                "classification": str(source_metadata.get("module_classification") or "adventure"),
                 "compatibility": {
                     "editions": list(source_metadata.get("editions") or []),
                     "required_capabilities": ["module_pack_v2"],
@@ -1511,11 +1492,6 @@ class ModuleService:
                 "activation": {"mode": "campaign_attach", "default_active": False},
                 "content_summary": {},
             }
-            module_readiness = readiness or _indexed_module_readiness(
-                source_key=source_key,
-                scene_count=len(scene_atlas),
-                asset_count=len(asset_payload),
-            )
             return build_module_pack(
                 portable_id=portable_id,
                 version=version,
@@ -1539,7 +1515,6 @@ class ModuleService:
                 actors=actors,
                 catalogs=catalogs,
                 narrative=narrative,
-                readiness=module_readiness,
                 metadata=metadata,
                 dependencies=dependencies,
             )
@@ -1591,9 +1566,7 @@ class ModuleService:
         )
         scene_rows = self.scene_index(campaign_id, module_id=ingest_result.module_id)
         scene_map = {str(scene["stable_key"]): str(scene["scene_id"]) for scene in scene_rows}
-        expected_scene_keys = {
-            str(scene["stable_key"]) for scene in payload["scene_atlas"]
-        }
+        expected_scene_keys = {str(scene["stable_key"]) for scene in payload["scene_atlas"]}
         if set(scene_map) != expected_scene_keys:
             raise ValueError(
                 "imported module scene atlas does not match the portable package; "
@@ -1638,9 +1611,10 @@ class ModuleService:
             )
             if scene is None:
                 continue
-            content_hash = str(chunk.get("content_hash") or "") or hashlib.sha256(
-                chunk["content"].encode("utf-8")
-            ).hexdigest()
+            content_hash = (
+                str(chunk.get("content_hash") or "")
+                or hashlib.sha256(chunk["content"].encode("utf-8")).hexdigest()
+            )
             chunks_by_scene_and_hash.setdefault((scene, content_hash), []).append(chunk["id"])
 
         imported_reviews = []
@@ -1654,9 +1628,7 @@ class ModuleService:
                 "content_kind": review["content_kind"],
                 "normalized_content": review["normalized_content"],
                 "reviewer": str(evidence.get("reviewer") or "portable-package"),
-                "observation": str(
-                    evidence.get("observation") or "Imported source-backed review"
-                ),
+                "observation": str(evidence.get("observation") or "Imported source-backed review"),
                 "metadata": dict(review["metadata"]),
             }
             if evidence.get("asset_key") is not None:
@@ -1694,7 +1666,178 @@ class ModuleService:
             "content_review_ids": imported_reviews,
             "actor_cards": list(payload["actors"]),
             "manifest": dict(payload["manifest"]),
-            "readiness": dict(payload["readiness"]),
+        }
+
+    def import_content_package(
+        self,
+        campaign_id: str,
+        package: dict[str, Any],
+        blobs: Mapping[str, bytes],
+        *,
+        embedder: Embedder | None = None,
+        vector_store: VectorStore | None = None,
+        activate: bool = False,
+        asset_writer: Callable[[str, dict[str, Any], bytes], str] | None = None,
+    ) -> dict[str, Any]:
+        """Import a unified module and remap only stable logical references."""
+
+        value = validate_content_package(package)
+        if value["kind"] != "module":
+            raise ValueError("content package kind must be module")
+        with self.database.transaction() as session:
+            campaign = session.get(Campaign, campaign_id)
+            if campaign is None:
+                raise CampaignNotFoundError(campaign_id)
+            if campaign.system_id != value["system_id"]:
+                raise ValueError("content package and campaign must use the same system_id")
+        assets_by_key = {asset["asset_key"]: asset for asset in value["assets"]}
+        documents: dict[str, str] = {}
+        for source in value["sources"]:
+            asset = assets_by_key[source["normalized_document_asset_key"]]
+            documents[source["source_key"]] = blobs[asset["checksum"]].decode("utf-8")
+        primary = value["sources"][0]
+        document = documents[primary["source_key"]]
+        result = self.ingest(
+            campaign_id=campaign_id,
+            source_key=primary["source_key"],
+            logical_source_key=primary["source_key"],
+            title=primary["title"],
+            content=document,
+            metadata={
+                **dict(primary.get("metadata") or {}),
+                "content_package": {
+                    "id": value["id"],
+                    "version": value["version"],
+                    "checksum": value["checksum"],
+                },
+            },
+            parser=_ContentModuleParser(value, documents),
+            embedder=embedder,
+            vector_store=vector_store,
+            activate=activate,
+        )
+        scene_rows = self.scene_index(campaign_id, module_id=result.module_id)
+        scene_map = {str(scene["stable_key"]): str(scene["scene_id"]) for scene in scene_rows}
+        asset_map: dict[str, str] = {}
+        for asset in value["assets"]:
+            if asset["kind"] == "normalized_document":
+                continue
+            if asset_writer is None:
+                raise ValueError("asset_writer is required for package assets")
+            content = blobs[asset["checksum"]]
+            path = asset_writer(result.module_id, dict(asset), content)
+            registered = self.register_asset(
+                campaign_id=campaign_id,
+                module_id=result.module_id,
+                source_path=path,
+                media_type=asset["media_type"],
+                checksum=asset["checksum"],
+                metadata={
+                    **dict(asset["metadata"]),
+                    "content_asset_key": asset["asset_key"],
+                    "asset_kind": asset["kind"],
+                },
+            )
+            asset_map[asset["asset_key"]] = registered["id"]
+        chunks = self.list_chunks(campaign_id, result.module_id)
+        chunk_map = {
+            str(dict(chunk.get("metadata") or {}).get("portable_chunk_key") or ""): chunk["id"]
+            for chunk in chunks
+            if str(dict(chunk.get("metadata") or {}).get("portable_chunk_key") or "")
+        }
+        packaged_chunks: dict[str, tuple[str, dict[str, Any]]] = {}
+        for scene in value["content"]["scene_atlas"]:
+            scene_key = str(scene["stable_key"])
+            referenced_keys = {str(ref["chunk_key"]) for ref in scene.get("source_refs") or []}
+            for source in value["sources"]:
+                for section in source["sections"]:
+                    for descriptor in section["chunks"]:
+                        key = str(descriptor["key"])
+                        if key in referenced_keys:
+                            packaged_chunks[key] = (scene_key, dict(descriptor))
+
+        chunks_by_scene_and_hash: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for chunk in chunks:
+            content_hash = (
+                str(chunk.get("content_hash") or "")
+                or hashlib.sha256(str(chunk["content"]).encode("utf-8")).hexdigest()
+            )
+            chunks_by_scene_and_hash.setdefault((str(chunk["scene_id"]), content_hash), []).append(
+                chunk
+            )
+
+        def imported_chunk_id(chunk_key: str) -> str:
+            direct = chunk_map.get(chunk_key)
+            if direct is not None:
+                return str(direct)
+            target = packaged_chunks.get(chunk_key)
+            if target is None:
+                raise ValueError("content review chunk evidence does not resolve inside the Pack")
+            scene_key, descriptor = target
+            candidates = chunks_by_scene_and_hash.get(
+                (
+                    scene_map[scene_key],
+                    str(descriptor["content_hash"]),
+                ),
+                [],
+            )
+            ordinal = int(descriptor["ordinal"])
+            matching = [chunk for chunk in candidates if int(chunk.get("ordinal", -1)) == ordinal]
+            resolved = matching[0] if matching else (candidates[0] if candidates else None)
+            if resolved is None:
+                raise ValueError(
+                    "content review chunk evidence could not be remapped from the Pack"
+                )
+            return str(resolved["id"])
+
+        review_ids = []
+        for review in value["content_reviews"]:
+            target = dict(review["target"])
+            common = {
+                "campaign_id": campaign_id,
+                "module_id": result.module_id,
+                "scene_id": scene_map[str(target["scene_key"])],
+                "content_key": str(target["content_key"]),
+                "content_kind": str(review["kind"]),
+                "normalized_content": str(review["normalized_content"]),
+                "reviewer": str(
+                    dict(review.get("review") or {}).get("reviewer") or "content-package"
+                ),
+                "observation": str(
+                    dict(review.get("review") or {}).get("observation")
+                    or "Imported source-backed review"
+                ),
+                "metadata": dict(review.get("metadata") or {}),
+            }
+            evidence = dict(review.get("evidence") or {})
+            if evidence.get("asset_key"):
+                imported = self.review_content(
+                    **common,
+                    source_asset_id=asset_map[str(evidence["asset_key"])],
+                    page_number=int(evidence["page"]),
+                )
+            else:
+                source_chunk_ids = [
+                    imported_chunk_id(str(ref["chunk_key"])) for ref in review["source_refs"]
+                ]
+                imported = self.review_content(
+                    **common,
+                    source_chunk_ids=source_chunk_ids,
+                )
+            review_ids.append(imported["id"])
+        return {
+            "module_id": result.module_id,
+            "skipped": result.skipped,
+            "package": {
+                "id": value["id"],
+                "version": value["version"],
+                "checksum": value["checksum"],
+            },
+            "scene_map": scene_map,
+            "asset_map": asset_map,
+            "content_review_ids": review_ids,
+            "actors": list(value["actors"]),
+            "manifest": dict(value["manifest"]),
         }
 
     def bind_actor(
@@ -1985,9 +2128,7 @@ class ModuleService:
                 if media_type == "application/pdf":
                     page_count = int(asset_metadata.get("page_count") or 0)
                     if page_count and page_number > page_count:
-                        raise ValueError(
-                            f"content review page exceeds PDF page count {page_count}"
-                        )
+                        raise ValueError(f"content review page exceeds PDF page count {page_count}")
                 else:
                     source_page = int(asset_metadata.get("source_page") or 0)
                     if source_page and source_page != page_number:
@@ -2011,21 +2152,16 @@ class ModuleService:
                     raise ValueError("content review source chunks were not all found")
                 ordered_chunks = [chunks_by_id[chunk_id] for chunk_id in chunk_ids]
                 if any(
-                    row.module_id != module_id or row.scene_id != scene_id
-                    for row in ordered_chunks
+                    row.module_id != module_id or row.scene_id != scene_id for row in ordered_chunks
                 ):
-                    raise ValueError(
-                        "content review source chunks must belong to the module scene"
-                    )
+                    raise ValueError("content review source chunks must belong to the module scene")
                 page_starts = [
                     row.page_start for row in ordered_chunks if row.page_start is not None
                 ]
                 page_ends = [row.page_end for row in ordered_chunks if row.page_end is not None]
                 evidence = {
                     "source_chunk_ids": chunk_ids,
-                    "source_chunk_checksums": {
-                        row.id: row.content_hash for row in ordered_chunks
-                    },
+                    "source_chunk_checksums": {row.id: row.content_hash for row in ordered_chunks},
                     "page_start": min(page_starts) if page_starts else None,
                     "page_end": max(page_ends) if page_ends else None,
                     "reviewer": reviewer_value,
@@ -2116,9 +2252,7 @@ class ModuleService:
                 .where(ModuleChunk.id == chunk_id)
             ).one()
             heading_path = list(canonical_heading_path(row.ModuleChunk.heading_path))
-            content_sha256 = hashlib.sha256(
-                row.ModuleChunk.content.encode("utf-8")
-            ).hexdigest()
+            content_sha256 = hashlib.sha256(row.ModuleChunk.content.encode("utf-8")).hexdigest()
             source_ref = {
                 "module_id": row.ModuleSource.id,
                 "scene_id": row.ModuleScene.id,
@@ -2182,9 +2316,7 @@ class ModuleService:
                     "scene_id": row.ModuleChunk.scene_id,
                     "scene_title": row.ModuleScene.title,
                     "ordinal": row.ModuleChunk.ordinal,
-                    "heading_path": list(
-                        canonical_heading_path(row.ModuleChunk.heading_path)
-                    ),
+                    "heading_path": list(canonical_heading_path(row.ModuleChunk.heading_path)),
                     "content": row.ModuleChunk.content,
                     "content_hash": row.ModuleChunk.content_hash,
                     "chunk_type": row.ModuleChunk.chunk_type,
@@ -2469,9 +2601,7 @@ class ModuleService:
     ) -> dict[str, Any]:
         """Apply the sole module-activation policy inside an existing transaction."""
 
-        logical_key = str(
-            dict(row.metadata_json or {}).get("logical_source_key") or row.source_key
-        )
+        logical_key = str(dict(row.metadata_json or {}).get("logical_source_key") or row.source_key)
         replaced: list[str] = []
         for candidate in session.scalars(
             select(ModuleSource).where(ModuleSource.campaign_id == campaign_id)
@@ -2516,9 +2646,7 @@ class ModuleService:
         """Move scene progress to one newly authoritative module revision."""
 
         target_scenes = list(
-            session.scalars(
-                select(ModuleScene).where(ModuleScene.module_id == target_module_id)
-            )
+            session.scalars(select(ModuleScene).where(ModuleScene.module_id == target_module_id))
         )
         target_by_id = {scene.id: scene for scene in target_scenes}
         target_by_stable_key = {
@@ -2540,9 +2668,7 @@ class ModuleService:
                 )
             )
             for progress, source_scene in progress_rows:
-                stable_key = str(
-                    dict(source_scene.metadata_json or {}).get("stable_key") or ""
-                )
+                stable_key = str(dict(source_scene.metadata_json or {}).get("stable_key") or "")
                 target_scene = target_by_stable_key.get(stable_key)
                 mode = "stable_key"
                 if source_scene.id in explicit_remaps:
@@ -2593,9 +2719,7 @@ class ModuleService:
         for chapter in parsed:
             for scene in chapter.scenes:
                 supplied = str(dict(scene.metadata or {}).get("stable_key") or "").strip()
-                base = supplied or ModuleService._scene_stable_key(
-                    scene.heading_path, scene.title
-                )
+                base = supplied or ModuleService._scene_stable_key(scene.heading_path, scene.title)
                 occurrences[base] = occurrences.get(base, 0) + 1
                 occurrence = occurrences[base]
                 result[(chapter.ordinal, scene.ordinal)] = (
@@ -2639,9 +2763,7 @@ class ModuleService:
         query_hints: dict[str, Sequence[str]] | None = None,
     ) -> list[SearchHit]:
         enriched = enrich_query(query, extra_terms=query_hints)
-        selected_module_ids = tuple(
-            dict.fromkeys(str(item).strip() for item in (module_ids or ()))
-        )
+        selected_module_ids = tuple(dict.fromkeys(str(item).strip() for item in (module_ids or ())))
         if module_ids is not None and (
             not selected_module_ids or any(not item for item in selected_module_ids)
         ):
@@ -2827,9 +2949,7 @@ class ModuleService:
             if source is None or source.campaign_id != campaign_id:
                 raise ValueError("scene does not belong to campaign")
             idempotency = IdempotencyService(self.database)
-            idempotency.require_uncommitted_in_session(
-                session, idempotency_key, idempotency_write
-            )
+            idempotency.require_uncommitted_in_session(session, idempotency_key, idempotency_write)
             row = session.scalar(
                 select(SceneProgress).where(
                     SceneProgress.campaign_id == campaign_id,
@@ -2857,9 +2977,7 @@ class ModuleService:
             effective_status = status or row.status or "current"
             if effective_status == "current":
                 if not source.active:
-                    raise ValueError(
-                        "a scene from a retired module revision cannot become current"
-                    )
+                    raise ValueError("a scene from a retired module revision cannot become current")
                 for other in session.scalars(
                     select(SceneProgress).where(
                         SceneProgress.campaign_id == campaign_id,

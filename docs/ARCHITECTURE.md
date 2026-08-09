@@ -27,16 +27,16 @@ System packages own game semantics:
 - rule terminology and parser enrichments;
 - agent tools, skills, identity, and presentation.
 
-Portable content follows the same boundary. Core owns checksum-protected
-`actor_card` and `preset_pack` envelopes plus the v2 `.sagasmith-module` archive
-contract and stable module actor bindings. A system plugin validates each card's
-sheet and exact rule/module dependencies. The descriptor locks source, Scene
-Atlas, catalogs, narrative, actors, assets and readiness independently; asset
-bytes use content-addressed archive paths. A portable module is authoring/source
-state, not runtime campaign state: ActorKnowledge, progress, events, branches,
-random position, and Snapshots remain in their authoritative ledgers. Imports
-replay stable structure even when the receiving parser has changed. The removed
-module-pack v1 shape is not accepted. Addons cannot own module activation.
+Shared content follows the same boundary. Core owns the checksum-protected
+`sagasmith.content-package` v2 archive and `sagasmith.actor-card.v3` records.
+`addon`, `module`, `preset`, and `core_rules` packages share one manifest,
+source-document, actor, asset, and content-addressed blob layout. A system plugin
+validates each sheet and exact rule/module dependency. A package is immutable
+authoring/source state, not runtime campaign state: ActorKnowledge, progress,
+events, branches, random position, and Snapshots stay in their authoritative
+ledgers. Imports replay stable structure even if the receiving parser changes.
+Legacy portable envelopes and `.sagasmith-module` archives are not public
+compatibility formats. Addons cannot own module activation.
 
 ## Extension policy
 

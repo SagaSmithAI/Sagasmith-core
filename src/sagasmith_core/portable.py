@@ -33,14 +33,11 @@ PORTABLE_KINDS = frozenset(
     }
 )
 ADDON_PACK_SCHEMA = "sagasmith.addon-pack.v1"
-ADDON_READINESS_SCHEMA_VERSION = 1
+ADDON_VALIDATION_SCHEMA_VERSION = 1
 ACTOR_CARD_SCHEMA = "sagasmith.actor-card.v2"
-ACTOR_CARD_IMAGE_MEDIA_TYPES = frozenset(
-    {"image/avif", "image/jpeg", "image/png", "image/webp"}
-)
+ACTOR_CARD_IMAGE_MEDIA_TYPES = frozenset({"image/avif", "image/jpeg", "image/png", "image/webp"})
 MAX_ACTOR_CARD_IMAGE_BYTES = 8 * 1024 * 1024
 MODULE_PACK_SCHEMA = "sagasmith.module-pack.v2"
-MODULE_READINESS_SCHEMA_VERSION = 1
 MODULE_COMPONENT_NAMES = (
     "source",
     "document",
@@ -62,16 +59,6 @@ MODULE_CLASSIFICATIONS = frozenset(
         "map_pack",
         "pregenerated_character_pack",
     }
-)
-MODULE_READINESS_LEVELS = ("draft", "indexed", "playable", "complete")
-MODULE_READINESS_DIMENSIONS = (
-    "source",
-    "structure",
-    "play_profile",
-    "catalog",
-    "narrative",
-    "runtime",
-    "portability",
 )
 PRESET_PACK_SCHEMA = "sagasmith.preset-pack.v1"
 RELEASE_MANIFEST_SCHEMA = "sagasmith.release-manifest.v1"
@@ -144,9 +131,7 @@ def validate_portable_envelope(
     }
     unknown = sorted(set(value) - allowed)
     if unknown:
-        raise PortableContentError(
-            "portable content has unsupported fields: " + ", ".join(unknown)
-        )
+        raise PortableContentError("portable content has unsupported fields: " + ", ".join(unknown))
     required = allowed
     missing = sorted(required - set(value))
     if missing:
@@ -154,16 +139,12 @@ def validate_portable_envelope(
     if value["format"] != PORTABLE_FORMAT:
         raise PortableContentError(f"portable format must be {PORTABLE_FORMAT!r}")
     if value["schema_version"] != PORTABLE_SCHEMA_VERSION:
-        raise PortableContentError(
-            f"portable schema_version must be {PORTABLE_SCHEMA_VERSION}"
-        )
+        raise PortableContentError(f"portable schema_version must be {PORTABLE_SCHEMA_VERSION}")
     kind = _required_text(value["kind"], "portable.kind", maximum=50)
     if kind not in PORTABLE_KINDS:
         raise PortableContentError(f"unsupported portable kind: {kind}")
     if expected_kind is not None and kind != expected_kind:
-        raise PortableContentError(
-            f"portable kind must be {expected_kind!r}, received {kind!r}"
-        )
+        raise PortableContentError(f"portable kind must be {expected_kind!r}, received {kind!r}")
     portable_id = _required_text(value["id"], "portable.id", maximum=200)
     if not _PORTABLE_ID_RE.fullmatch(portable_id):
         raise PortableContentError(
@@ -177,8 +158,7 @@ def validate_portable_envelope(
     if not isinstance(value["dependencies"], list):
         raise PortableContentError("portable.dependencies must be an array")
     value["dependencies"] = [
-        _validate_dependency(item, index)
-        for index, item in enumerate(value["dependencies"])
+        _validate_dependency(item, index) for index, item in enumerate(value["dependencies"])
     ]
     if not isinstance(value["payload"], dict):
         raise PortableContentError("portable.payload must be an object")
@@ -248,9 +228,7 @@ def validate_actor_card(
 
     value = validate_portable_envelope(envelope, expected_kind="actor_card")
     if expected_system_id is not None and value["system_id"] != expected_system_id:
-        raise PortableContentError(
-            f"actor card system_id must be {expected_system_id!r}"
-        )
+        raise PortableContentError(f"actor card system_id must be {expected_system_id!r}")
     payload = value["payload"]
     allowed = {
         "card_schema",
@@ -336,9 +314,7 @@ def validate_actor_card(
             )
         binding_metadata = binding.get("metadata")
         if binding_metadata is not None and not isinstance(binding_metadata, dict):
-            raise PortableContentError(
-                f"actor_card.bindings[{index}].metadata must be an object"
-            )
+            raise PortableContentError(f"actor_card.bindings[{index}].metadata must be an object")
     return value
 
 
@@ -360,9 +336,7 @@ def _validate_actor_card_image(image: Any) -> None:
         "source_ref",
     }
     _exact_fields(image, fields, "actor_card.image")
-    media_type = _required_text(
-        image["media_type"], "actor_card.image.media_type", maximum=50
-    )
+    media_type = _required_text(image["media_type"], "actor_card.image.media_type", maximum=50)
     if media_type not in ACTOR_CARD_IMAGE_MEDIA_TYPES:
         raise PortableContentError(
             "actor_card.image.media_type must be image/avif, image/jpeg, image/png, or image/webp"
@@ -390,9 +364,7 @@ def _validate_actor_card_image(image: Any) -> None:
         )
     if image["size"] != len(raw):
         raise PortableContentError("actor_card.image.size does not match decoded bytes")
-    checksum = _required_text(
-        image["checksum"], "actor_card.image.checksum", maximum=64
-    )
+    checksum = _required_text(image["checksum"], "actor_card.image.checksum", maximum=64)
     if not _SHA256_RE.fullmatch(checksum) or hashlib.sha256(raw).hexdigest() != checksum:
         raise PortableContentError("actor_card.image.checksum does not match decoded bytes")
     for field, maximum in (
@@ -447,9 +419,7 @@ def _validate_module_source_refs(value: Any, field: str) -> list[dict[str, Any]]
         )
         _required_text(item["source_key"], f"{item_field}.source_key", maximum=200)
         page = item["page"]
-        if page is not None and (
-            isinstance(page, bool) or not isinstance(page, int) or page < 1
-        ):
+        if page is not None and (isinstance(page, bool) or not isinstance(page, int) or page < 1):
             raise PortableContentError(f"{item_field}.page must be null or positive")
         chunk_hash = item["chunk_hash"]
         if chunk_hash is not None and (
@@ -586,9 +556,7 @@ def _validate_module_manifest(value: Any) -> dict[str, Any]:
     )
     pregenerated = profile["pregenerated_characters"]
     if not isinstance(pregenerated, dict):
-        raise PortableContentError(
-            "module play_profile.pregenerated_characters must be an object"
-        )
+        raise PortableContentError("module play_profile.pregenerated_characters must be an object")
     _exact_fields(
         pregenerated,
         {"available", "applicability", "source_refs"},
@@ -614,9 +582,7 @@ def _validate_module_manifest(value: Any) -> dict[str, Any]:
         if continuity[field] is not None:
             _required_text(continuity[field], f"module continuity.{field}", maximum=200)
     order = continuity["order"]
-    if order is not None and (
-        isinstance(order, bool) or not isinstance(order, int) or order < 1
-    ):
+    if order is not None and (isinstance(order, bool) or not isinstance(order, int) or order < 1):
         raise PortableContentError("module continuity.order must be null or positive")
     if not isinstance(continuity["state_policy"], dict):
         raise PortableContentError("module continuity.state_policy must be an object")
@@ -655,77 +621,6 @@ def _validate_module_manifest(value: Any) -> dict[str, Any]:
     return result
 
 
-def validate_module_readiness(value: Mapping[str, Any]) -> dict[str, Any]:
-    """Validate the seven-dimensional module publication gate."""
-
-    if not isinstance(value, Mapping):
-        raise PortableContentError("module readiness must be an object")
-    result = copy.deepcopy(dict(value))
-    _exact_fields(
-        result,
-        {"schema_version", "level", "dimensions", "complete"},
-        "module readiness",
-    )
-    if result["schema_version"] != MODULE_READINESS_SCHEMA_VERSION:
-        raise PortableContentError("module readiness.schema_version is unsupported")
-    if result["level"] not in MODULE_READINESS_LEVELS:
-        raise PortableContentError("module readiness.level is unsupported")
-    dimensions = result["dimensions"]
-    if not isinstance(dimensions, dict):
-        raise PortableContentError("module readiness.dimensions must be an object")
-    _exact_fields(dimensions, set(MODULE_READINESS_DIMENSIONS), "module readiness.dimensions")
-    all_complete = True
-    for name in MODULE_READINESS_DIMENSIONS:
-        dimension = dimensions[name]
-        field = f"module readiness.dimensions.{name}"
-        if not isinstance(dimension, dict):
-            raise PortableContentError(f"{field} must be an object")
-        _exact_fields(dimension, {"complete", "item_count", "blockers"}, field)
-        if not isinstance(dimension["complete"], bool):
-            raise PortableContentError(f"{field}.complete must be a boolean")
-        if (
-            isinstance(dimension["item_count"], bool)
-            or not isinstance(dimension["item_count"], int)
-            or dimension["item_count"] < 0
-        ):
-            raise PortableContentError(f"{field}.item_count is invalid")
-        blockers = dimension["blockers"]
-        if not isinstance(blockers, list):
-            raise PortableContentError(f"{field}.blockers must be an array")
-        for index, blocker in enumerate(blockers):
-            blocker_field = f"{field}.blockers[{index}]"
-            if not isinstance(blocker, dict):
-                raise PortableContentError(f"{blocker_field} must be an object")
-            _exact_fields(
-                blocker,
-                {"code", "message", "source_refs"},
-                blocker_field,
-            )
-            _required_text(blocker["code"], f"{blocker_field}.code", maximum=100)
-            _required_text(blocker["message"], f"{blocker_field}.message", maximum=2000)
-            _validate_module_source_refs(
-                blocker["source_refs"], f"{blocker_field}.source_refs"
-            )
-        if dimension["complete"] != (not blockers):
-            raise PortableContentError(
-                f"{field}.complete must equal whether blockers are empty"
-            )
-        all_complete = all_complete and dimension["complete"]
-    if not isinstance(result["complete"], bool):
-        raise PortableContentError("module readiness.complete must be a boolean")
-    if result["complete"] != all_complete:
-        raise PortableContentError("module readiness.complete must equal all dimensions")
-    if result["level"] == "complete" and not result["complete"]:
-        raise PortableContentError("complete module readiness cannot have blockers")
-    if result["level"] in {"playable", "complete"}:
-        for required in ("source", "structure", "play_profile", "runtime", "portability"):
-            if not dimensions[required]["complete"]:
-                raise PortableContentError(
-                    f"{result['level']} module requires complete {required} readiness"
-                )
-    return result
-
-
 def build_module_pack(
     *,
     portable_id: str,
@@ -740,7 +635,6 @@ def build_module_pack(
     actors: Sequence[Mapping[str, Any]] | None = None,
     catalogs: Mapping[str, Any] | None = None,
     narrative: Mapping[str, Any] | None = None,
-    readiness: Mapping[str, Any],
     metadata: Mapping[str, Any] | None = None,
     dependencies: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -778,7 +672,6 @@ def build_module_pack(
             "manifest": normalized_manifest,
             "component_locks": component_locks,
             **component_values,
-            "readiness": copy.deepcopy(dict(readiness)),
         },
         metadata=metadata,
         dependencies=dependencies,
@@ -906,18 +799,14 @@ def validate_module_pack(
 
     value = validate_portable_envelope(envelope, expected_kind="module_pack")
     if expected_system_id is not None and value["system_id"] != expected_system_id:
-        raise PortableContentError(
-            f"module pack system_id must be {expected_system_id!r}"
-        )
+        raise PortableContentError(f"module pack system_id must be {expected_system_id!r}")
     for index, dependency in enumerate(value["dependencies"]):
         if dependency["kind"] not in {"rule_pack", "module_pack"}:
             raise PortableContentError(
                 f"module dependency {index} must be a rule_pack or module_pack"
             )
         if not dependency.get("checksum"):
-            raise PortableContentError(
-                f"module dependency {index} requires an exact checksum"
-            )
+            raise PortableContentError(f"module dependency {index} requires an exact checksum")
     payload = value["payload"]
     allowed = {
         "module_schema",
@@ -931,16 +820,15 @@ def validate_module_pack(
         "actors",
         "catalogs",
         "narrative",
-        "readiness",
     }
     _exact_fields(payload, allowed, "module pack payload")
     if payload["module_schema"] != MODULE_PACK_SCHEMA:
         raise PortableContentError(f"module_schema must be {MODULE_PACK_SCHEMA!r}")
     manifest = _validate_module_manifest(payload["manifest"])
+    if manifest["activation"]["default_active"]:
+        raise PortableContentError("module activation.default_active must be false")
     component_locks = payload["component_locks"]
-    if not isinstance(component_locks, list) or len(component_locks) != len(
-        MODULE_COMPONENT_NAMES
-    ):
+    if not isinstance(component_locks, list) or len(component_locks) != len(MODULE_COMPONENT_NAMES):
         raise PortableContentError("module_pack.component_locks is incomplete")
     lock_values: dict[str, str] = {}
     for index, lock in enumerate(component_locks):
@@ -1096,9 +984,7 @@ def validate_module_pack(
                 raise PortableContentError(f"{chunk_field}.metadata must be an object")
             chunk_hash = hashlib.sha256(chunk_content.encode("utf-8")).hexdigest()
             if raw_chunk["content_hash"] != chunk_hash:
-                raise PortableContentError(
-                    f"{chunk_field}.content_hash does not match content"
-                )
+                raise PortableContentError(f"{chunk_field}.content_hash does not match content")
             scene_chunk_hashes[key].add(chunk_hash)
 
     all_chunk_hashes = {
@@ -1174,9 +1060,7 @@ def validate_module_pack(
                 )
         else:
             if not isinstance(chunk_hashes, list) or not chunk_hashes:
-                raise PortableContentError(
-                    f"{field}.evidence requires asset_key or chunk_hashes"
-                )
+                raise PortableContentError(f"{field}.evidence requires asset_key or chunk_hashes")
             if len(set(chunk_hashes)) != len(chunk_hashes) or any(
                 not isinstance(chunk_hash, str)
                 or not _SHA256_RE.fullmatch(chunk_hash)
@@ -1211,7 +1095,6 @@ def validate_module_pack(
                 )
     catalogs = _validate_module_catalogs(payload["catalogs"], scene_keys)
     narrative = _validate_module_narrative(payload["narrative"], scene_keys, actor_ids)
-    readiness = validate_module_readiness(payload["readiness"])
     profile = manifest["play_profile"]
     profile_ref_fields = (
         (profile["party_size"]["source_refs"], "module play_profile.party_size.source_refs"),
@@ -1252,37 +1135,6 @@ def validate_module_pack(
                 source_key=source["source_key"],
                 chunk_hashes=all_chunk_hashes,
             )
-    for dimension_name, dimension in readiness["dimensions"].items():
-        for index, blocker in enumerate(dimension["blockers"]):
-            _validate_module_ref_targets(
-                blocker["source_refs"],
-                field=(
-                    f"module readiness.dimensions.{dimension_name}.blockers[{index}].source_refs"
-                ),
-                source_key=source["source_key"],
-                chunk_hashes=all_chunk_hashes,
-            )
-    if readiness["dimensions"]["play_profile"]["complete"]:
-        if (
-            profile["party_size"]["minimum"] is None
-            or profile["party_size"]["maximum"] is None
-            or profile["starting_level"]["value"] is None
-            or profile["expected_end_level"]["value"] is None
-            or profile["advancement"]["recommended"] in {None, "unknown"}
-            or "unknown" in profile["advancement"]["modes"]
-            or any(not refs for refs, _field in profile_ref_fields)
-        ):
-            raise PortableContentError(
-                "complete module play_profile requires sourced party, level, "
-                "advancement, and pregenerated-character review"
-            )
-    if (
-        manifest["activation"]["default_active"]
-        and readiness["level"] not in {"playable", "complete"}
-    ):
-        raise PortableContentError(
-            "draft or indexed module activation.default_active must be false"
-        )
     components = {
         "source": source,
         "document": document,
@@ -1294,17 +1146,11 @@ def validate_module_pack(
         "narrative": narrative,
     }
     for component in MODULE_COMPONENT_NAMES:
-        checksum = hashlib.sha256(
-            canonical_json(components[component]).encode("utf-8")
-        ).hexdigest()
+        checksum = hashlib.sha256(canonical_json(components[component]).encode("utf-8")).hexdigest()
         if lock_values[component] != checksum:
-            raise PortableContentError(
-                f"module component lock mismatch for {component}"
-            )
+            raise PortableContentError(f"module component lock mismatch for {component}")
     if manifest["content_summary"] != _module_content_summary(components):
         raise PortableContentError("module manifest.content_summary does not match components")
-    if readiness["level"] == "complete" and not narrative["endings"]:
-        raise PortableContentError("complete campaign module requires at least one ending")
     return value
 
 
@@ -1339,9 +1185,7 @@ def validate_preset_pack(
 ) -> dict[str, Any]:
     value = validate_portable_envelope(envelope, expected_kind="preset_pack")
     if expected_system_id is not None and value["system_id"] != expected_system_id:
-        raise PortableContentError(
-            f"preset pack system_id must be {expected_system_id!r}"
-        )
+        raise PortableContentError(f"preset pack system_id must be {expected_system_id!r}")
     payload = value["payload"]
     _exact_fields(payload, {"preset_schema", "cards"}, "preset pack payload")
     if payload["preset_schema"] != PRESET_PACK_SCHEMA:
@@ -1711,12 +1555,9 @@ def build_addon_pack(
     """
 
     normalized_components = [
-        _validate_addon_component(component, index)
-        for index, component in enumerate(components)
+        _validate_addon_component(component, index) for index, component in enumerate(components)
     ]
-    normalized_components.sort(
-        key=lambda item: (item["kind"], item["id"], item["version"])
-    )
+    normalized_components.sort(key=lambda item: (item["kind"], item["id"], item["version"]))
     locks = [
         {
             "kind": component["kind"],
@@ -1745,27 +1586,20 @@ def build_addon_pack(
     return validate_addon_pack(envelope)
 
 
-def validate_addon_readiness(readiness: Mapping[str, Any]) -> dict[str, Any]:
-    """Validate the system-neutral addon readiness summary.
+def validate_addon_validation(report: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate a system-neutral addon release validation report."""
 
-    Readiness is evidence, not authority.  System plugins must recompute the
-    report from embedded content before they rely on it for import or
-    activation.  Core only guarantees that a published report is complete,
-    internally consistent, and portable across runtimes.
-    """
-
-    if not isinstance(readiness, Mapping):
-        raise PortableContentError("addon readiness must be an object")
-    value = copy.deepcopy(dict(readiness))
+    if not isinstance(report, Mapping):
+        raise PortableContentError("addon validation must be an object")
+    value = copy.deepcopy(dict(report))
     _exact_fields(
         value,
         {"schema_version", "source", "catalog", "selection", "runtime", "complete"},
-        "addon readiness",
+        "addon validation",
     )
-    if value["schema_version"] != ADDON_READINESS_SCHEMA_VERSION:
+    if value["schema_version"] != ADDON_VALIDATION_SCHEMA_VERSION:
         raise PortableContentError(
-            "addon readiness.schema_version must be "
-            f"{ADDON_READINESS_SCHEMA_VERSION}"
+            f"addon validation.schema_version must be {ADDON_VALIDATION_SCHEMA_VERSION}"
         )
 
     dimensions = {
@@ -1778,33 +1612,28 @@ def validate_addon_readiness(readiness: Mapping[str, Any]) -> dict[str, Any]:
     for dimension, count_fields in dimensions.items():
         raw = value[dimension]
         if not isinstance(raw, Mapping):
-            raise PortableContentError(f"addon readiness.{dimension} must be an object")
+            raise PortableContentError(f"addon validation.{dimension} must be an object")
         item = copy.deepcopy(dict(raw))
         _exact_fields(
             item,
             {"complete", "blockers", *count_fields},
-            f"addon readiness.{dimension}",
+            f"addon validation.{dimension}",
         )
         if not isinstance(item["complete"], bool):
-            raise PortableContentError(
-                f"addon readiness.{dimension}.complete must be a boolean"
-            )
+            raise PortableContentError(f"addon validation.{dimension}.complete must be a boolean")
         for count_field in count_fields:
             if count_field == "modes":
                 continue
             count = item[count_field]
             if isinstance(count, bool) or not isinstance(count, int) or count < 0:
                 raise PortableContentError(
-                    f"addon readiness.{dimension}.{count_field} "
-                    "must be a non-negative integer"
+                    f"addon validation.{dimension}.{count_field} must be a non-negative integer"
                 )
         blockers = item["blockers"]
         if not isinstance(blockers, list):
-            raise PortableContentError(
-                f"addon readiness.{dimension}.blockers must be an array"
-            )
+            raise PortableContentError(f"addon validation.{dimension}.blockers must be an array")
         for index, blocker in enumerate(blockers):
-            field = f"addon readiness.{dimension}.blockers[{index}]"
+            field = f"addon validation.{dimension}.blockers[{index}]"
             if not isinstance(blocker, Mapping):
                 raise PortableContentError(f"{field} must be an object")
             _exact_fields(
@@ -1821,19 +1650,19 @@ def validate_addon_readiness(readiness: Mapping[str, Any]) -> dict[str, Any]:
         if dimension == "source":
             if item["verified_count"] > item["item_count"]:
                 raise PortableContentError(
-                    "addon readiness.source.verified_count cannot exceed item_count"
+                    "addon validation.source.verified_count cannot exceed item_count"
                 )
             dimension_complete = item["verified_count"] == item["item_count"]
         elif dimension == "catalog":
             if item["reviewed_count"] > item["item_count"]:
                 raise PortableContentError(
-                    "addon readiness.catalog.reviewed_count cannot exceed item_count"
+                    "addon validation.catalog.reviewed_count cannot exceed item_count"
                 )
             dimension_complete = item["reviewed_count"] == item["item_count"]
         elif dimension == "selection":
             if item["ready_count"] > item["applicable_count"]:
                 raise PortableContentError(
-                    "addon readiness.selection.ready_count cannot exceed applicable_count"
+                    "addon validation.selection.ready_count cannot exceed applicable_count"
                 )
             dimension_complete = item["ready_count"] == item["applicable_count"]
         else:
@@ -1847,33 +1676,32 @@ def validate_addon_readiness(readiness: Mapping[str, Any]) -> dict[str, Any]:
                 for mode, count in modes.items()
             ):
                 raise PortableContentError(
-                    "addon readiness.runtime.modes must map non-empty mode names "
+                    "addon validation.runtime.modes must map non-empty mode names "
                     "to non-negative integers"
                 )
             if sum(modes.values()) != item["resolved_count"]:
                 raise PortableContentError(
-                    "addon readiness.runtime.modes must sum to resolved_count"
+                    "addon validation.runtime.modes must sum to resolved_count"
                 )
             if item["resolved_count"] > item["item_count"]:
                 raise PortableContentError(
-                    "addon readiness.runtime.resolved_count cannot exceed item_count"
+                    "addon validation.runtime.resolved_count cannot exceed item_count"
                 )
             dimension_complete = item["resolved_count"] == item["item_count"]
 
         dimension_complete = dimension_complete and not blockers
         if item["complete"] != dimension_complete:
             raise PortableContentError(
-                f"addon readiness.{dimension}.complete does not match its counts "
-                "and blockers"
+                f"addon validation.{dimension}.complete does not match its counts and blockers"
             )
         normalized[dimension] = item
 
     if not isinstance(value["complete"], bool):
-        raise PortableContentError("addon readiness.complete must be a boolean")
+        raise PortableContentError("addon validation.complete must be a boolean")
     expected_complete = all(item["complete"] for item in normalized.values())
     if value["complete"] != expected_complete:
         raise PortableContentError(
-            "addon readiness.complete must equal all dimension completion states"
+            "addon validation.complete must equal all dimension completion states"
         )
     value.update(normalized)
     return value
@@ -1904,17 +1732,15 @@ def validate_addon_pack(
         ("system_id", value["system_id"]),
     ):
         if manifest.get(field) != expected:
-            raise PortableContentError(
-                f"addon_pack.manifest.{field} must match portable.{field}"
-            )
+            raise PortableContentError(f"addon_pack.manifest.{field} must match portable.{field}")
     _required_text(manifest.get("title"), "addon_pack.manifest.title", maximum=300)
     editions = manifest.get("editions")
-    if not isinstance(editions, list) or not editions or any(
-        not isinstance(item, str) or not item.strip() for item in editions
+    if (
+        not isinstance(editions, list)
+        or not editions
+        or any(not isinstance(item, str) or not item.strip() for item in editions)
     ):
-        raise PortableContentError(
-            "addon_pack.manifest.editions must be a non-empty string array"
-        )
+        raise PortableContentError("addon_pack.manifest.editions must be a non-empty string array")
     if len(editions) != len(set(editions)):
         raise PortableContentError("addon_pack.manifest.editions must be unique")
     classification = _required_text(
@@ -1943,15 +1769,10 @@ def validate_addon_pack(
         raise PortableContentError(
             "addon_pack.manifest.content_summary must map content kinds to non-negative counts"
         )
-    if "readiness" not in manifest:
-        raise PortableContentError("addon_pack.manifest.readiness is required")
-    manifest["readiness"] = validate_addon_readiness(manifest["readiness"])
     activation = manifest.get("activation")
     if not isinstance(activation, dict):
         raise PortableContentError("addon_pack.manifest.activation must be an object")
-    unknown_activation = sorted(
-        set(activation) - {"rule_policy", "preset_policy", "module_policy"}
-    )
+    unknown_activation = sorted(set(activation) - {"rule_policy", "preset_policy", "module_policy"})
     if unknown_activation:
         raise PortableContentError(
             "addon_pack.manifest.activation has unsupported fields: "
@@ -1975,9 +1796,7 @@ def validate_addon_pack(
         raise PortableContentError("addon_pack.manifest.conflicts must be an array")
     conflict_ids = []
     for index, conflict in enumerate(conflicts):
-        conflict_id = str(
-            conflict.get("id") if isinstance(conflict, dict) else conflict
-        ).strip()
+        conflict_id = str(conflict.get("id") if isinstance(conflict, dict) else conflict).strip()
         if not conflict_id:
             raise PortableContentError(
                 f"addon_pack.manifest.conflicts[{index}] must identify an addon"
@@ -2022,8 +1841,7 @@ def validate_addon_pack(
         if component["kind"] != "rule_pack":
             continue
         component_editions = {
-            str(item)
-            for item in component["payload"]["manifest"].get("editions", [])
+            str(item) for item in component["payload"]["manifest"].get("editions", [])
         }
         unsupported = sorted(addon_editions - component_editions)
         if unsupported:
@@ -2031,10 +1849,7 @@ def validate_addon_pack(
                 f"addon rule component {component['id']} does not support addon "
                 "editions: " + ", ".join(unsupported)
             )
-    locks = {
-        (item["kind"], item["id"], item["version"], item["checksum"])
-        for item in components
-    }
+    locks = {(item["kind"], item["id"], item["version"], item["checksum"]) for item in components}
     dependency_locks = {
         (item["kind"], item["id"], item["version"], item.get("checksum"))
         for item in value["dependencies"]
@@ -2048,16 +1863,12 @@ def validate_addon_pack(
 
     distribution = str(value["metadata"].get("distribution") or "")
     if distribution not in {"private", "shareable"}:
-        raise PortableContentError(
-            "addon_pack.metadata.distribution must be private or shareable"
-        )
+        raise PortableContentError("addon_pack.metadata.distribution must be private or shareable")
     if distribution == "shareable" and (
         not str(value["metadata"].get("license") or "").strip()
         or not str(value["metadata"].get("attribution") or "").strip()
     ):
-        raise PortableContentError(
-            "shareable addon packs require explicit license and attribution"
-        )
+        raise PortableContentError("shareable addon packs require explicit license and attribution")
     return value
 
 
@@ -2071,9 +1882,7 @@ def _validate_addon_component(value: Mapping[str, Any], index: int) -> dict[str,
     }
     validator = validators.get(kind)
     if validator is None:
-        raise PortableContentError(
-            f"addon_pack.components[{index}] has unsupported kind: {kind}"
-        )
+        raise PortableContentError(f"addon_pack.components[{index}] has unsupported kind: {kind}")
     return validator(value)
 
 
@@ -2171,8 +1980,10 @@ def _validate_portable_rule_source(value: Any, index: int) -> dict[str, Any]:
             f"{section_field}.title",
             maximum=MAX_RULE_SECTION_TITLE_CHARS,
         )
-        if not isinstance(section["path"], list) or not section["path"] or any(
-            not isinstance(item, str) or not item.strip() for item in section["path"]
+        if (
+            not isinstance(section["path"], list)
+            or not section["path"]
+            or any(not isinstance(item, str) or not item.strip() for item in section["path"])
         ):
             raise PortableContentError(f"{section_field}.path must be a non-empty string array")
         content = section["content"]
@@ -2297,12 +2108,15 @@ def _validate_offsets(value: Mapping[str, Any], field: str) -> None:
 def dumps_portable(envelope: Mapping[str, Any], *, indent: int = 2) -> str:
     """Validate and serialize a portable envelope as UTF-8 friendly JSON."""
 
-    return json.dumps(
-        validate_portable_envelope(envelope),
-        ensure_ascii=False,
-        sort_keys=True,
-        indent=indent,
-    ) + "\n"
+    return (
+        json.dumps(
+            validate_portable_envelope(envelope),
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=indent,
+        )
+        + "\n"
+    )
 
 
 def loads_portable(content: str | bytes) -> dict[str, Any]:
@@ -2327,12 +2141,9 @@ def dumps_module_archive(
     """Serialize one v2 module descriptor and its exact content-addressed blobs."""
 
     value = validate_module_pack(package)
-    expected = {
-        asset["checksum"]: asset for asset in value["payload"]["assets"]
-    }
+    expected = {asset["checksum"]: asset for asset in value["payload"]["assets"]}
     normalized_blobs = {
-        str(key).removeprefix("blobs/sha256/"): bytes(data)
-        for key, data in blobs.items()
+        str(key).removeprefix("blobs/sha256/"): bytes(data) for key, data in blobs.items()
     }
     if set(normalized_blobs) != set(expected):
         raise PortableContentError("module archive blobs do not match asset descriptors")
@@ -2400,9 +2211,7 @@ def loads_module_archive(
     if set(blobs) != expected:
         raise PortableContentError("module archive blobs do not match descriptor")
     for checksum, data in blobs.items():
-        asset = next(
-            item for item in value["payload"]["assets"] if item["checksum"] == checksum
-        )
+        asset = next(item for item in value["payload"]["assets"] if item["checksum"] == checksum)
         if len(data) != asset["size"] or hashlib.sha256(data).hexdigest() != checksum:
             raise PortableContentError(f"module archive blob mismatch: {checksum}")
     return value, blobs
@@ -2453,6 +2262,4 @@ def _exact_fields(value: Mapping[str, Any], allowed: set[str], field: str) -> No
     if missing:
         raise PortableContentError(f"{field} is missing: " + ", ".join(missing))
     if unknown:
-        raise PortableContentError(
-            f"{field} has unsupported fields: " + ", ".join(unknown)
-        )
+        raise PortableContentError(f"{field} has unsupported fields: " + ", ".join(unknown))

@@ -11,6 +11,7 @@ from typing import Any
 
 from sqlalchemy import select
 
+from sagasmith_core.content_pack import build_source_bundle
 from sagasmith_core.database import Database
 from sagasmith_core.documents import (
     GENERIC_DOCUMENT_LAYOUT_PROFILE,
@@ -219,9 +220,7 @@ class RuleService:
                                 **chunk.metadata,
                                 "start_offset": chunk.start_offset,
                                 "end_offset": chunk.end_offset,
-                                "page_start": page_locator.page_for_offset(
-                                    chunk.start_offset
-                                ),
+                                "page_start": page_locator.page_for_offset(chunk.start_offset),
                                 "page_end": page_locator.page_for_offset(
                                     max(chunk.start_offset, chunk.end_offset - 1)
                                 ),
@@ -723,6 +722,130 @@ class RuleService:
                 }
             )
 
+    def export_content_source(
+        self,
+        source_id: str,
+        *,
+        license: str = "private",
+        attribution: str = "User supplied source",
+    ) -> tuple[dict[str, Any], dict[str, Any], bytes]:
+        """Export one source using the unified, single-document representation."""
+
+        with self.database.transaction() as session:
+            source = session.get(RuleSource, source_id)
+            if source is None:
+                raise LookupError(source_id)
+            sections = list(
+                session.scalars(
+                    select(RuleSection)
+                    .where(RuleSection.source_id == source_id)
+                    .order_by(RuleSection.ordinal, RuleSection.id)
+                )
+            )
+            if not sections:
+                raise ValueError("a content source requires at least one indexed section")
+            document_length = max(section.end_offset for section in sections)
+            document = [" "] * document_length
+            occupied = [False] * document_length
+            chunks_by_section: dict[str, list[RuleChunk]] = {}
+            for chunk in session.scalars(
+                select(RuleChunk)
+                .where(RuleChunk.source_id == source_id)
+                .order_by(RuleChunk.ordinal, RuleChunk.id)
+            ):
+                chunks_by_section.setdefault(chunk.section_id, []).append(chunk)
+            for section in sections:
+                if section.end_offset - section.start_offset != len(section.content):
+                    raise ValueError("stored rule section offsets do not match its content")
+                for offset, character in enumerate(section.content, section.start_offset):
+                    if occupied[offset] and document[offset] != character:
+                        raise ValueError("stored rule sections overlap with conflicting content")
+                    document[offset] = character
+                    occupied[offset] = True
+            normalized_text = "".join(document)
+            parent_ordinals = {section.id: section.ordinal for section in sections}
+            portable_sections = []
+            for section in sections:
+                portable_chunks = []
+                search_offset = section.start_offset
+                for chunk in chunks_by_section.get(section.id, []):
+                    metadata = dict(chunk.metadata_json or {})
+                    start = metadata.get("start_offset")
+                    end = metadata.get("end_offset")
+                    if not isinstance(start, int) or not isinstance(end, int):
+                        relative = normalized_text.find(
+                            chunk.content,
+                            max(section.start_offset, search_offset),
+                            section.end_offset,
+                        )
+                        if relative < 0:
+                            relative = normalized_text.find(
+                                chunk.content,
+                                section.start_offset,
+                                section.end_offset,
+                            )
+                        if relative < 0:
+                            raise ValueError("stored rule chunk is not contained in its section")
+                        start = relative
+                        end = start + len(chunk.content)
+                    search_offset = end
+                    portable_chunks.append(
+                        {
+                            "ordinal": chunk.ordinal,
+                            "heading_path": list(chunk.heading_path),
+                            "start_offset": start,
+                            "end_offset": end,
+                            "token_count": chunk.token_count,
+                            "page_start": metadata.get("page_start"),
+                            "page_end": metadata.get("page_end"),
+                            "metadata": {
+                                key: value
+                                for key, value in metadata.items()
+                                if key
+                                not in {
+                                    "source_id",
+                                    "section_id",
+                                    "start_offset",
+                                    "end_offset",
+                                    "page_start",
+                                    "page_end",
+                                }
+                            },
+                        }
+                    )
+                portable_sections.append(
+                    {
+                        "ordinal": section.ordinal,
+                        "parent_ordinal": parent_ordinals.get(section.parent_id),
+                        "level": section.level,
+                        "title": section.title,
+                        "path": list(section.path),
+                        "start_offset": section.start_offset,
+                        "end_offset": section.end_offset,
+                        "chunks": portable_chunks,
+                    }
+                )
+            metadata = {
+                key: value
+                for key, value in dict(source.metadata_json or {}).items()
+                if key not in {"logical_source_key", "source_path"}
+            }
+            metadata["source_checksum"] = source.checksum
+            return build_source_bundle(
+                source_key=self._logical_source_key(source),
+                title=source.title,
+                normalized_text=normalized_text,
+                edition=source.edition,
+                locale=source.locale,
+                version=source.version,
+                publication_id=source.publication_id,
+                authority=source.authority,
+                sections=portable_sections,
+                metadata=metadata,
+                license=license,
+                attribution=attribution,
+            )
+
     def import_portable_source(
         self,
         value: dict[str, Any],
@@ -960,6 +1083,113 @@ class RuleService:
                 "chunk_map": chunk_map,
             }
 
+    def import_content_source(
+        self,
+        source: dict[str, Any],
+        normalized_document: bytes,
+        *,
+        system_id: str,
+        canonical_source_id: str | None = None,
+        embedder: Embedder | None = None,
+    ) -> dict[str, Any]:
+        """Import one unified source without persisting a second document copy.
+
+        The database still uses its established section/chunk rows.  This adapter
+        materializes their text from the package's one normalized-document blob
+        and returns a mapping keyed by the unified chunk keys used in citations.
+        """
+
+        try:
+            document = normalized_document.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("normalized content source must be UTF-8") from exc
+        unified_keys: list[str] = []
+        portable_sections: list[dict[str, Any]] = []
+        source_key = str(source["source_key"])
+        for section in source["sections"]:
+            start, end = int(section["start_offset"]), int(section["end_offset"])
+            content = document[start:end]
+            if hashlib.sha256(content.encode()).hexdigest() != section["content_hash"]:
+                raise ValueError("content source section does not match normalized document")
+            chunks = []
+            for chunk in section["chunks"]:
+                chunk_start, chunk_end = int(chunk["start_offset"]), int(chunk["end_offset"])
+                chunk_content = document[chunk_start:chunk_end]
+                if hashlib.sha256(chunk_content.encode()).hexdigest() != chunk["content_hash"]:
+                    raise ValueError("content source chunk does not match normalized document")
+                unified_keys.append(str(chunk["key"]))
+                chunks.append(
+                    {
+                        "key": portable_rule_chunk_key(
+                            source_key,
+                            int(section["ordinal"]),
+                            int(chunk["ordinal"]),
+                            chunk_content,
+                        ),
+                        "ordinal": int(chunk["ordinal"]),
+                        "heading_path": list(chunk["heading_path"]),
+                        "content": chunk_content,
+                        "content_hash": str(chunk["content_hash"]),
+                        "token_count": int(chunk["token_count"]),
+                        "metadata": {
+                            **dict(chunk.get("metadata") or {}),
+                            "start_offset": chunk_start,
+                            "end_offset": chunk_end,
+                            "page_start": chunk.get("page_start"),
+                            "page_end": chunk.get("page_end"),
+                        },
+                    }
+                )
+            portable_sections.append(
+                {
+                    "ordinal": int(section["ordinal"]),
+                    "parent_ordinal": section.get("parent_ordinal"),
+                    "level": int(section["level"]),
+                    "title": str(section["title"]),
+                    "path": list(section["path"]),
+                    "content": content,
+                    "content_hash": str(section["content_hash"]),
+                    "start_offset": start,
+                    "end_offset": end,
+                    "chunks": chunks,
+                }
+            )
+        metadata = dict(source.get("metadata") or {})
+        source_checksum = str(
+            metadata.get("indexed_source_checksum")
+            or metadata.get("source_checksum")
+            or hashlib.sha256(normalized_document).hexdigest()
+        )
+        portable = {
+            "source_key": source_key,
+            "title": str(source["title"]),
+            "edition": str(source.get("edition") or ""),
+            "locale": str(source.get("locale") or ""),
+            "version": str(source.get("version") or ""),
+            "publication_id": str(source.get("publication_id") or ""),
+            "authority": str(source.get("authority") or ""),
+            "canonical_source_key": metadata.pop("canonical_source_key", None),
+            "checksum": source_checksum,
+            "metadata": metadata,
+            "sections": portable_sections,
+        }
+        result = self.import_portable_source(
+            portable,
+            system_id=system_id,
+            canonical_source_id=canonical_source_id,
+            embedder=embedder,
+        )
+        portable_keys = [
+            chunk["key"]
+            for section in portable_sections
+            for chunk in section["chunks"]
+        ]
+        result["chunk_map"] = {
+            unified_key: result["chunk_map"][portable_key]
+            for unified_key, portable_key in zip(unified_keys, portable_keys, strict=True)
+        }
+        return result
+
     def citation(self, chunk_id: str, *, source_id: str | None = None) -> dict[str, Any]:
         """Resolve a caller-supplied chunk id into canonical, source-bound evidence."""
         with self.database.transaction() as session:
@@ -1020,10 +1250,7 @@ class RuleService:
 
     @staticmethod
     def _logical_source_key(row: RuleSource) -> str:
-        return str(
-            dict(row.metadata_json or {}).get("logical_source_key")
-            or row.source_key
-        )
+        return str(dict(row.metadata_json or {}).get("logical_source_key") or row.source_key)
 
     @staticmethod
     def _retired_source_key(

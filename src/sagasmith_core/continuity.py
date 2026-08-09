@@ -107,9 +107,7 @@ class ContinuityService:
             )
         if audience == "player":
             facts = [
-                item
-                for item in facts
-                if item.disclosure_scope in PLAYER_MEMORY_DISCLOSURE_SCOPES
+                item for item in facts if item.disclosure_scope in PLAYER_MEMORY_DISCLOSURE_SCOPES
             ]
             knowledge = [
                 item
@@ -181,9 +179,7 @@ class ContinuityService:
             return None
         progress = dict(scene.get("progress") or {})
         safe_progress = {
-            key: progress[key]
-            for key in ("status", "percent", "state_version")
-            if key in progress
+            key: progress[key] for key in ("status", "percent", "state_version") if key in progress
         }
         if scene.get("visibility", "keeper") not in PLAYER_MODULE_VISIBILITY_SCOPES:
             return {
@@ -324,37 +320,45 @@ class ContinuityService:
         reserved = max(0, int(reserved_chars))
         if reserved > MAX_PINNED_MODULE_EVIDENCE_CHARS:
             raise ValueError(
-                "pinned module evidence exceeds the context safety cap; "
-                "narrow related_refs"
+                "pinned module evidence exceeds the context safety cap; narrow related_refs"
             )
         available = max(0, budget - reserved)
         candidates: list[tuple[float, str, int, dict[str, Any]]] = []
         for index, item in enumerate(facts):
-            score = lexical_score(
-                query or " ",
-                title=" ".join(
-                    str(item.get(key) or "")
-                    for key in ("fact_key", "subject", "subject_ref", "predicate")
-                ),
-                content=str(item.get("content") or ""),
-            ) + int(item.get("importance") or 3) / 20
+            score = (
+                lexical_score(
+                    query or " ",
+                    title=" ".join(
+                        str(item.get(key) or "")
+                        for key in ("fact_key", "subject", "subject_ref", "predicate")
+                    ),
+                    content=str(item.get("content") or ""),
+                )
+                + int(item.get("importance") or 3) / 20
+            )
             candidates.append((score, "facts", index, item))
         for index, item in enumerate(knowledge):
-            score = lexical_score(
-                query or " ",
-                title=" ".join(
-                    str(item.get(key) or "")
-                    for key in ("knowledge_key", "subject_ref", "epistemic_status")
-                ),
-                content=str(item.get("proposition") or ""),
-            ) + int(item.get("confidence") or 3) / 20
+            score = (
+                lexical_score(
+                    query or " ",
+                    title=" ".join(
+                        str(item.get(key) or "")
+                        for key in ("knowledge_key", "subject_ref", "epistemic_status")
+                    ),
+                    content=str(item.get("proposition") or ""),
+                )
+                + int(item.get("confidence") or 3) / 20
+            )
             candidates.append((score, "actor_knowledge", index, item))
         for index, item in enumerate(events):
-            score = lexical_score(
-                query or " ",
-                title=str(item.get("event_type") or ""),
-                content=str(item.get("summary") or ""),
-            ) + (index + 1) / max(1, len(events)) / 10
+            score = (
+                lexical_score(
+                    query or " ",
+                    title=str(item.get("event_type") or ""),
+                    content=str(item.get("summary") or ""),
+                )
+                + (index + 1) / max(1, len(events)) / 10
+            )
             candidates.append((score, "events", index, item))
         candidates.sort(key=lambda value: (-value[0], value[1], value[2]))
 
@@ -370,9 +374,7 @@ class ContinuityService:
                 continue
             selected[ledger].append(item)
             used += size
-        selected["events"].sort(
-            key=lambda item: (item.get("sequence", 0), item.get("id", ""))
-        )
+        selected["events"].sort(key=lambda item: (item.get("sequence", 0), item.get("id", "")))
         returned = sum(len(values) for values in selected.values())
         return selected, {
             "strategy": "lexical_structured_shared_budget_v2",
@@ -406,11 +408,7 @@ class ContinuityService:
                 )
             )
         if isinstance(scoped_state, dict):
-            scene_id = str(
-                scoped_state.get("scene_id")
-                or scoped_state.get("id")
-                or ""
-            ).strip()
+            scene_id = str(scoped_state.get("scene_id") or scoped_state.get("id") or "").strip()
             module_id = str(scoped_state.get("module_id") or "").strip()
             if scene_id:
                 active.add(f"scene:{scene_id}")
@@ -466,9 +464,7 @@ class ContinuityService:
                 existing["anchor_fact_keys"] = sorted(
                     {*existing["anchor_fact_keys"], anchor.fact_key}
                 )
-                existing["matched_refs"] = sorted(
-                    {*existing["matched_refs"], *matched}
-                )
+                existing["matched_refs"] = sorted({*existing["matched_refs"], *matched})
         return sorted(
             by_binding.values(),
             key=lambda item: (

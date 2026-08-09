@@ -62,23 +62,17 @@ def upgrade() -> None:
                 )
             if "predicate" not in memory_columns:
                 batch.add_column(
-                    sa.Column(
-                        "predicate", sa.String(length=200), nullable=False, server_default=""
-                    )
+                    sa.Column("predicate", sa.String(length=200), nullable=False, server_default="")
                 )
     op.execute("UPDATE campaign_memories SET fact_key = 'memory:' || id WHERE fact_key IS NULL")
     memory_columns = _columns("campaign_memories")
     needs_not_null = bool(memory_columns["fact_key"].get("nullable", True))
-    needs_unique = "uq_campaign_memory_fact_key" not in _unique_constraints(
-        "campaign_memories"
-    )
+    needs_unique = "uq_campaign_memory_fact_key" not in _unique_constraints("campaign_memories")
     needs_index = "ix_campaign_memory_subject_ref" not in _indexes("campaign_memories")
     if needs_not_null or needs_unique or needs_index:
         with op.batch_alter_table("campaign_memories") as batch:
             if needs_not_null:
-                batch.alter_column(
-                    "fact_key", existing_type=sa.String(length=300), nullable=False
-                )
+                batch.alter_column("fact_key", existing_type=sa.String(length=300), nullable=False)
             if needs_unique:
                 batch.create_unique_constraint(
                     "uq_campaign_memory_fact_key", ["campaign_id", "fact_key"]
@@ -100,9 +94,7 @@ def upgrade() -> None:
         "source_event_ids": sa.Column(
             "source_event_ids", sa.JSON(), nullable=False, server_default="[]"
         ),
-        "importance": sa.Column(
-            "importance", sa.Integer(), nullable=False, server_default="3"
-        ),
+        "importance": sa.Column("importance", sa.Integer(), nullable=False, server_default="3"),
         "disclosure_scope": sa.Column(
             "disclosure_scope", sa.String(length=32), nullable=False, server_default="dm"
         ),

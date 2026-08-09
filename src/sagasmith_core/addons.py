@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 
 from sagasmith_core.branches import resolve_branch
 from sagasmith_core.campaigns import CampaignNotFoundError
+from sagasmith_core.content_pack import validate_content_package
 from sagasmith_core.database import Database
 from sagasmith_core.models import (
     Campaign,
@@ -21,7 +22,6 @@ from sagasmith_core.models import (
     ContentAddonVersion,
     RulePackVersion,
 )
-from sagasmith_core.portable import validate_addon_pack
 from sagasmith_core.rule_packs import RulePackService
 
 
@@ -69,33 +69,36 @@ class AddonService:
     ) -> AddonVersionInfo:
         """Register an inspected addon; components remain inactive."""
 
-        value = validate_addon_pack(package)
+        value = validate_content_package(package)
+        if value["kind"] != "addon":
+            raise AddonError("content package kind must be addon")
         addon_id = value["id"]
         version = value["version"]
-        manifest = dict(value["payload"]["manifest"])
-        components = [dict(item) for item in value["dependencies"]]
-        embedded_components = [dict(item) for item in value["payload"]["components"]]
-        component_counts = Counter(item["kind"] for item in embedded_components)
-        embedded_content = Counter()
-        for component in embedded_components:
-            if component["kind"] == "rule_pack":
-                embedded_content.update(
-                    str(artifact.get("kind") or "unknown")
-                    for artifact in component["payload"]["artifacts"]
-                )
-            elif component["kind"] == "preset_pack":
-                cards = list(component["payload"]["cards"])
-                embedded_content["actor_card"] += len(cards)
-                embedded_content.update(
-                    str(dict(card.get("payload") or {}).get("actor_type") or "actor")
-                    for card in cards
-                )
+        manifest = dict(value["manifest"])
+        components = [
+            {
+                "kind": "rule_pack",
+                "id": item["id"],
+                "version": item["version"],
+                "checksum": item["definition_checksum"],
+                "optional": False,
+            }
+            for item in value["content"].get("rule_definitions") or []
+        ]
+        component_counts = Counter(item["kind"] for item in components)
+        embedded_content = Counter(
+            str(artifact.get("kind") or "unknown")
+            for artifact in value["content"].get("artifacts") or []
+        )
+        if value["actors"]:
+            embedded_content["actor_card"] += len(value["actors"])
+        embedded_content.update(str(actor["actor_type"]) for actor in value["actors"])
         report = {
             "valid": True,
             "component_count": len(components),
             "component_counts": dict(sorted(component_counts.items())),
-            "content_summary": dict(manifest["content_summary"]),
-            "declared_content_summary": dict(manifest["content_summary"]),
+            "content_summary": dict(manifest.get("content_summary") or {}),
+            "declared_content_summary": dict(manifest.get("content_summary") or {}),
             "embedded_content_summary": dict(sorted(embedded_content.items())),
         }
         imported_provenance = {
@@ -185,7 +188,9 @@ class AddonService:
             )
             if row is None:
                 raise LookupError(f"{addon_id}@{version}")
-            value = validate_addon_pack(dict(row.package or {}))
+            value = validate_content_package(dict(row.package or {}))
+            if value["kind"] != "addon":
+                raise AddonError("stored content package kind is not addon")
             if value["checksum"] != row.checksum:
                 raise AddonError("stored addon package does not match its immutable lock")
             return value
@@ -533,12 +538,9 @@ class AddonService:
         if row is None:
             return {**dict(component), "status": "missing"}
         provenance = dict(row.provenance or {})
-        if kind == "rule_pack":
-            actual_checksum = str(
-                dict(provenance.get("portable_package") or {}).get("checksum") or ""
-            )
-        else:
-            actual_checksum = str(provenance.get("portable_package_checksum") or "")
+        actual_checksum = str(
+            dict(provenance.get("content_definition") or {}).get("definition_checksum") or ""
+        )
         equivalence_verified = any(
             str(item.get("kind") or "") == kind
             and str(item.get("id") or "") == str(component["id"])

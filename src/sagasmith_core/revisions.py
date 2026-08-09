@@ -194,9 +194,7 @@ class RevisionService:
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
             idempotency = IdempotencyService(self.database)
-            idempotency.require_uncommitted_in_session(
-                session, idempotency_key, idempotency_write
-            )
+            idempotency.require_uncommitted_in_session(session, idempotency_key, idempotency_write)
             row = session.scalar(
                 select(StateRevision)
                 .join(MutationGroup, MutationGroup.id == StateRevision.mutation_group_id)
@@ -246,9 +244,7 @@ class RevisionService:
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
             idempotency = IdempotencyService(self.database)
-            idempotency.require_uncommitted_in_session(
-                session, idempotency_key, idempotency_write
-            )
+            idempotency.require_uncommitted_in_session(session, idempotency_key, idempotency_write)
             branch_id = campaign.active_branch_id
             current = session.scalar(
                 select(StateRevision)
@@ -395,9 +391,7 @@ class RevisionService:
             if value is not None:
                 return dict(value)
             source_id = str(source.branch_key or "")
-        raise RuntimeError(
-            f"revision payload source is unavailable: {revision.id}"
-        )
+        raise RuntimeError(f"revision payload source is unavailable: {revision.id}")
 
     @staticmethod
     def _audit(session, row: StateRevision, *, actor: str, reverse: bool = False) -> None:
@@ -438,7 +432,5 @@ class RevisionService:
             idempotency_key=(
                 mutation_group.idempotency_key if mutation_group is not None else None
             ),
-            request_hash=(
-                mutation_group.request_hash if mutation_group is not None else None
-            ),
+            request_hash=(mutation_group.request_hash if mutation_group is not None else None),
         )

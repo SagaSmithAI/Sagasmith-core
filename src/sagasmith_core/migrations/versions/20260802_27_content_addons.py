@@ -27,9 +27,7 @@ def upgrade() -> None:
             sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
             sa.PrimaryKeyConstraint("id"),
         )
-        op.create_index(
-            "ix_content_addons_system_id", "content_addons", ["system_id"]
-        )
+        op.create_index("ix_content_addons_system_id", "content_addons", ["system_id"])
     if not inspector.has_table("content_addon_versions"):
         op.create_table(
             "content_addon_versions",
@@ -43,9 +41,7 @@ def upgrade() -> None:
             sa.Column("status", sa.String(length=32), nullable=False),
             sa.Column("validation_report", sa.JSON(), nullable=False),
             sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-            sa.ForeignKeyConstraint(
-                ["addon_id"], ["content_addons.id"], ondelete="CASCADE"
-            ),
+            sa.ForeignKeyConstraint(["addon_id"], ["content_addons.id"], ondelete="CASCADE"),
             sa.PrimaryKeyConstraint("addon_id", "version"),
         )
         op.create_index(
@@ -71,15 +67,9 @@ def upgrade() -> None:
             sa.Column("options", sa.JSON(), nullable=False),
             sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
             sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-            sa.ForeignKeyConstraint(
-                ["addon_id"], ["content_addons.id"], ondelete="RESTRICT"
-            ),
-            sa.ForeignKeyConstraint(
-                ["branch_id"], ["campaign_branches.id"], ondelete="CASCADE"
-            ),
-            sa.ForeignKeyConstraint(
-                ["campaign_id"], ["campaigns.id"], ondelete="CASCADE"
-            ),
+            sa.ForeignKeyConstraint(["addon_id"], ["content_addons.id"], ondelete="RESTRICT"),
+            sa.ForeignKeyConstraint(["branch_id"], ["campaign_branches.id"], ondelete="CASCADE"),
+            sa.ForeignKeyConstraint(["campaign_id"], ["campaigns.id"], ondelete="CASCADE"),
             sa.PrimaryKeyConstraint("campaign_id", "branch_id", "addon_id"),
             sa.UniqueConstraint(
                 "campaign_id",

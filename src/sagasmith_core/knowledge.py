@@ -73,9 +73,7 @@ class ActorKnowledgeService:
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
             idempotency = IdempotencyService(self.database)
-            idempotency.require_uncommitted_in_session(
-                session, idempotency_key, idempotency_write
-            )
+            idempotency.require_uncommitted_in_session(session, idempotency_key, idempotency_write)
             branch = resolve_branch(session, campaign, branch_id)
             result = self._add_in_session(
                 session,
@@ -126,9 +124,7 @@ class ActorKnowledgeService:
             if campaign is None:
                 raise CampaignNotFoundError(knowledge.campaign_id)
             idempotency = IdempotencyService(self.database)
-            idempotency.require_uncommitted_in_session(
-                session, idempotency_key, idempotency_write
-            )
+            idempotency.require_uncommitted_in_session(session, idempotency_key, idempotency_write)
             branch = resolve_branch(session, campaign, branch_id)
             result = self._revise_in_session(
                 session,
@@ -174,9 +170,7 @@ class ActorKnowledgeService:
         actor = session.get(Character, actor_id)
         if actor is None or actor.campaign_id != campaign.id:
             raise ValueError("actor must be a live character in this campaign")
-        self._validate_event(
-            session, source_event_id, campaign.id, branch_id, head_snapshot_id
-        )
+        self._validate_event(session, source_event_id, campaign.id, branch_id, head_snapshot_id)
         existing = session.scalar(
             select(ActorKnowledge).where(
                 ActorKnowledge.actor_id == actor_id,

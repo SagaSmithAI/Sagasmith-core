@@ -108,13 +108,9 @@ def test_large_idempotency_response_is_compressed_and_replays_exactly(database) 
 
     assert committed.response == response
     with database.transaction() as session:
-        stored = session.scalar(
-            select(IdempotencyRecord).where(IdempotencyRecord.key == "compile")
-        )
+        stored = session.scalar(select(IdempotencyRecord).where(IdempotencyRecord.key == "compile"))
         assert stored is not None
-        assert stored.response["_sagasmith_encoding"] == (
-            "sagasmith.idempotency.response+zlib.v1"
-        )
+        assert stored.response["_sagasmith_encoding"] == ("sagasmith.idempotency.response+zlib.v1")
         assert len(canonical_json(stored.response)) < len(canonical_json(response)) // 5
     replay = service.lookup("import-job:large", "compile", {"revision": 7})
     assert replay is not None

@@ -64,6 +64,7 @@ def resolve_branch(
         "Create a new campaign or initialize a branch explicitly."
     )
 
+
 class BranchService:
     def __init__(self, database: Database) -> None:
         self.database = database
@@ -216,9 +217,7 @@ class BranchService:
                 "actor_knowledge": self._diff_ids(left_knowledge, right_knowledge),
                 "rule_lock": self._diff_ids(left_rules, right_rules),
                 "addon_lock": self._diff_ids(left_addons, right_addons),
-                "merge_policy": (
-                    "explicit-per-fact-actor-knowledge-rule-lock-and-addon-lock"
-                ),
+                "merge_policy": ("explicit-per-fact-actor-knowledge-rule-lock-and-addon-lock"),
             }
 
     @staticmethod
@@ -244,9 +243,7 @@ class BranchService:
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
             idempotency = IdempotencyService(self.database)
-            idempotency.require_uncommitted_in_session(
-                session, idempotency_key, idempotency_write
-            )
+            idempotency.require_uncommitted_in_session(session, idempotency_key, idempotency_write)
             current = resolve_branch(session, campaign) if campaign.active_branch_id else None
             source_id = from_snapshot_id or (current.head_snapshot_id if current else None)
             if current is not None and source_id is None:
@@ -320,9 +317,7 @@ class BranchService:
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
             idempotency = IdempotencyService(self.database)
-            idempotency.require_uncommitted_in_session(
-                session, idempotency_key, idempotency_write
-            )
+            idempotency.require_uncommitted_in_session(session, idempotency_key, idempotency_write)
             row = session.get(CampaignBranch, branch_id)
             if row is None or row.campaign_id != campaign_id:
                 raise LookupError(branch_id)
@@ -439,11 +434,7 @@ class BranchService:
             session.scalars(
                 select(StateRevision.id).where(
                     StateRevision.id.in_(
-                        {
-                            str(row.branch_key)
-                            for row in rows
-                            if str(row.branch_key or "")
-                        }
+                        {str(row.branch_key) for row in rows if str(row.branch_key or "")}
                     )
                 )
             )
@@ -502,11 +493,7 @@ class BranchService:
         revision_map = {row.id: str(uuid.uuid4()) for row in rows}
         for offset, old in enumerate(rows, start=1):
             cursor_item = cursor[old.id]
-            payload_revision_id = (
-                old.branch_key
-                if old.branch_key in payload_source_ids
-                else old.id
-            )
+            payload_revision_id = old.branch_key if old.branch_key in payload_source_ids else old.id
             session.add(
                 StateRevision(
                     id=revision_map[old.id],
@@ -597,9 +584,7 @@ class BranchService:
                 )
             )
         for item in session.scalars(
-            select(CampaignAddonActivation).where(
-                CampaignAddonActivation.branch_id == source_id
-            )
+            select(CampaignAddonActivation).where(CampaignAddonActivation.branch_id == source_id)
         ):
             session.add(
                 CampaignAddonActivation(

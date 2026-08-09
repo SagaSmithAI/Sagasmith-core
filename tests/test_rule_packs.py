@@ -214,9 +214,7 @@ def test_rule_pack_activation_rolls_back_when_receipt_builder_fails(database) ->
             idempotency_write=IdempotencyWrite(
                 scope=f"rule-activation:{campaign.id}",
                 payload={"pack_id": manifest["id"]},
-                response=lambda _result: (_ for _ in ()).throw(
-                    RuntimeError("receipt failed")
-                ),
+                response=lambda _result: (_ for _ in ()).throw(RuntimeError("receipt failed")),
             ),
         )
 
@@ -352,9 +350,7 @@ def test_rule_pack_distinguishes_native_and_artifact_embedded_mechanics(
     packs = RulePackService(database)
     manifest = {
         **_pack("dnd5e.extension.contracts"),
-        "native_mechanic_refs": [
-            "dnd5e.core.spell.structured_resolution"
-        ],
+        "native_mechanic_refs": ["dnd5e.core.spell.structured_resolution"],
     }
     draft = packs.save_draft(
         manifest=manifest,
@@ -367,9 +363,7 @@ def test_rule_pack_distinguishes_native_and_artifact_embedded_mechanics(
                     "dnd5e.core.spell.structured_resolution",
                     "dnd5e.extension.contracts.plan.spark",
                 ],
-                "embedded_mechanic_refs": [
-                    "dnd5e.extension.contracts.plan.spark"
-                ],
+                "embedded_mechanic_refs": ["dnd5e.extension.contracts.plan.spark"],
             }
         ],
     )
@@ -383,16 +377,13 @@ def test_rule_pack_distinguishes_native_and_artifact_embedded_mechanics(
                 "id": "dnd5e.extension.undeclared.spell.spark",
                 "kind": "spell",
                 "card": {"name": "Spark"},
-                "mechanic_refs": [
-                    "dnd5e.core.spell.structured_resolution"
-                ],
+                "mechanic_refs": ["dnd5e.core.spell.structured_resolution"],
             }
         ],
     )
     assert undeclared.status == "rejected"
     assert any(
-        "mechanic_refs are unknown" in error
-        for error in undeclared.validation_report["errors"]
+        "mechanic_refs are unknown" in error for error in undeclared.validation_report["errors"]
     )
 
 
@@ -448,7 +439,10 @@ def test_effective_ruleset_enforces_exact_dependency_checksum(database) -> None:
     ]
 
 
-def test_effective_ruleset_accepts_portable_dependency_definition_checksum(database) -> None:
+@pytest.mark.parametrize("provenance_key", ["portable_package", "content_definition"])
+def test_effective_ruleset_accepts_stable_dependency_definition_checksum(
+    database, provenance_key: str
+) -> None:
     campaign = CampaignService(database).create(system_id="dnd5e", name="Portable dependency")
     RuleProfileService(database).set(campaign.id, edition="2014")
     packs = RulePackService(database)
@@ -456,7 +450,7 @@ def test_effective_ruleset_accepts_portable_dependency_definition_checksum(datab
     dependency = packs.save_draft(
         manifest=_pack("dnd5e.portable.dependency"),
         provenance={
-            "portable_package": {
+            provenance_key: {
                 "checksum": "b" * 64,
                 "definition_checksum": portable_checksum,
             }

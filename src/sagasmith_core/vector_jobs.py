@@ -53,9 +53,7 @@ class VectorIndexJobService:
             if selected_ids:
                 statement = statement.where(VectorIndexJob.id.in_(selected_ids))
             jobs = list(session.scalars(statement))
-            deliverable: list[
-                tuple[str, str, list[float], dict[str, Any], str]
-            ] = []
+            deliverable: list[tuple[str, str, list[float], dict[str, Any], str]] = []
             invalid: dict[str, str] = {}
             for job in jobs:
                 entity: RuleChunk | ModuleChunk | None
@@ -65,9 +63,7 @@ class VectorIndexJobService:
                     entity = session.get(ModuleChunk, job.entity_id)
                 else:
                     entity = None
-                    invalid[job.id] = (
-                        f"unsupported vector entity type: {job.entity_type}"
-                    )
+                    invalid[job.id] = f"unsupported vector entity type: {job.entity_type}"
                 if entity is None:
                     invalid.setdefault(job.id, "vector entity no longer exists")
                     continue
@@ -112,9 +108,7 @@ class VectorIndexJobService:
         if deliverable_ids:
             with self.database.transaction() as session:
                 for job in session.scalars(
-                    select(VectorIndexJob).where(
-                        VectorIndexJob.id.in_(deliverable_ids)
-                    )
+                    select(VectorIndexJob).where(VectorIndexJob.id.in_(deliverable_ids))
                 ):
                     job.attempts += 1
                     if job.id in delivered_ids:

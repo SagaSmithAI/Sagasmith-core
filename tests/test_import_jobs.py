@@ -45,7 +45,14 @@ def test_import_job_persists_inspection_candidate_review_and_result(database) ->
             }
         ],
     )
-    assert reviewed.state == "reviewed"
+    assert reviewed.state == "review_required"
+    assert reviewed.candidates[0]["draft_state"] == "editing"
+    finalized = jobs.finalize_candidate_review(
+        created.id,
+        confirmation={"confirmed_by": "agent:test", "method": "agent"},
+    )
+    assert finalized.state == "reviewed"
+    assert finalized.candidates[0]["draft_state"] == "finalized"
     compiled = jobs.record_validation(
         created.id,
         {"draft": {"status": "validated"}},
@@ -62,9 +69,10 @@ def test_import_job_persists_inspection_candidate_review_and_result(database) ->
         inspected.revision,
         extracted.revision,
         reviewed.revision,
+        finalized.revision,
         compiled.revision,
         completed.revision,
-    ] == [0, 1, 2, 3, 4, 5]
+    ] == [0, 1, 2, 3, 4, 5, 6]
     assert completed.source_id == "source-1"
     assert jobs.list(campaign.id)[0].result["pack_id"] == "dnd5e.xgte"
 
@@ -114,8 +122,12 @@ def test_compiled_import_can_reopen_for_new_evidence_before_install(database) ->
         extracted.id,
         [{"id": "candidate:old", "review_status": "accepted"}],
     )
-    compiled = jobs.record_validation(
+    finalized = jobs.finalize_candidate_review(
         reviewed.id,
+        confirmation={"confirmed_by": "agent:test", "method": "agent"},
+    )
+    compiled = jobs.record_validation(
+        finalized.id,
         {"draft": {"status": "validated", "checksum": "old"}},
         state="compiled",
     )
@@ -128,9 +140,7 @@ def test_compiled_import_can_reopen_for_new_evidence_before_install(database) ->
 
     assert reopened.state == "review_required"
     assert reopened.validation == {}
-    assert [candidate["id"] for candidate in reopened.candidates] == [
-        "candidate:corrected"
-    ]
+    assert [candidate["id"] for candidate in reopened.candidates] == ["candidate:corrected"]
 
 
 def test_review_required_import_can_add_source_bound_candidates(database) -> None:
@@ -154,6 +164,79 @@ def test_review_required_import_can_add_source_bound_candidates(database) -> Non
         "candidate:parsed",
         "candidate:agent-source-bound",
     ]
+
+
+def test_candidate_decisions_remain_editable_until_explicit_finalization(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Editable review")
+    jobs = ImportJobService(database)
+    created = jobs.create(campaign_id=campaign.id, kind="rulebook", artifact="rules.pdf")
+    inspected = jobs.record_inspection(created.id, {"parser_profile": "pdf"})
+    extracted = jobs.set_candidates(
+        inspected.id,
+        [{"id": "candidate:one", "artifact": {"kind": "feature"}}],
+    )
+
+    accepted = jobs.review_candidates(
+        extracted.id,
+        [
+            {
+                "id": "candidate:one",
+                "review_status": "accepted",
+                "editor": "agent:author",
+                "operation": "classify",
+                "note": "Initial classification.",
+            }
+        ],
+    )
+    reopened = jobs.review_candidates(
+        accepted.id,
+        [
+            {
+                "id": "candidate:one",
+                "review_status": "pending",
+                "editor": "agent:author",
+                "operation": "reopen",
+                "note": "Evidence needs another pass.",
+            }
+        ],
+    )
+
+    assert accepted.state == reopened.state == "review_required"
+    assert reopened.candidates[0]["review_status"] == "pending"
+    assert [item["operation"] for item in reopened.candidates[0]["edit_history"]] == [
+        "classify",
+        "reopen",
+    ]
+    with pytest.raises(ImportJobError, match="unresolved dispositions"):
+        jobs.finalize_candidate_review(
+            reopened.id,
+            confirmation={"confirmed_by": "agent:author", "method": "agent"},
+        )
+
+    rejected = jobs.review_candidates(
+        reopened.id,
+        [
+            {
+                "id": "candidate:one",
+                "review_status": "rejected",
+                "disposition": "exclude",
+                "editor": "agent:author",
+                "operation": "exclude_fragment",
+            }
+        ],
+    )
+    finalized = jobs.finalize_candidate_review(
+        rejected.id,
+        confirmation={"confirmed_by": "agent:author", "method": "agent"},
+    )
+
+    assert finalized.state == "reviewed"
+    assert finalized.result["review_finalization"]["candidate_set_fingerprint"]
+    with pytest.raises(ImportJobError, match="only an editable"):
+        jobs.finalize_candidate_review(
+            finalized.id,
+            confirmation={"confirmed_by": "agent:author", "method": "agent"},
+        )
 
 
 def test_import_job_update_and_exact_replay_receipt_share_one_transaction(database) -> None:
