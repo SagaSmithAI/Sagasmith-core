@@ -239,6 +239,23 @@ def test_candidate_decisions_remain_editable_until_explicit_finalization(databas
         )
 
 
+def test_agent_can_finalize_a_reviewed_empty_candidate_inventory(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Empty review")
+    jobs = ImportJobService(database)
+    created = jobs.create(campaign_id=campaign.id, kind="rulebook", artifact="rules.md")
+    inspected = jobs.record_inspection(created.id, {"parser_profile": "markdown"})
+    extracted = jobs.set_candidates(inspected.id, [])
+
+    finalized = jobs.finalize_candidate_review(
+        extracted.id,
+        confirmation={"confirmed_by": "agent:author", "method": "agent"},
+    )
+
+    assert finalized.state == "reviewed"
+    assert finalized.candidates == ()
+    assert finalized.result["review_finalization"]["candidate_set_fingerprint"]
+
+
 def test_import_job_update_and_exact_replay_receipt_share_one_transaction(database) -> None:
     campaign = CampaignService(database).create(system_id="dnd5e", name="Atomic import")
     jobs = ImportJobService(database)

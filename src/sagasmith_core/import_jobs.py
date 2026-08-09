@@ -36,11 +36,12 @@ _STATES = {
 _TRANSITIONS = {
     "staged": {"inspected", "failed"},
     # Candidate extraction and entering review are one atomic public operation
-    # when candidates are found; an empty extraction remains ``extracted``.
+    # when candidates are found; an empty extraction remains ``extracted`` and
+    # can be explicitly finalized by the Agent without manufacturing a card.
     # Evidence-bound text revisions rerun inspection without indexing or
     # mutating the staged artifact.
     "inspected": {"inspected", "extracted", "review_required", "validated", "failed"},
-    "extracted": {"review_required", "failed"},
+    "extracted": {"review_required", "reviewed", "failed"},
     # A source-bound Agent may add missed semantic entities before any approval.
     # Replacing the candidate set keeps the job in review and invalidates drafts.
     # Candidate decisions remain editable until an explicit finalization call.
@@ -333,12 +334,14 @@ class ImportJobService:
                     "import job revision conflict: "
                     f"expected {expected_revision}, found {row.revision}"
                 )
-            if row.state != "review_required":
+            if row.state not in {"extracted", "review_required"} or (
+                row.state == "extracted" and bool(row.candidates)
+            ):
                 raise ImportJobError("only an editable candidate review may be finalized")
             values = [dict(item) for item in (candidates or row.candidates or [])]
             current_ids = [str(item.get("id") or "") for item in row.candidates or []]
             final_ids = [str(item.get("id") or "") for item in values]
-            if not values or final_ids != current_ids or len(set(final_ids)) != len(final_ids):
+            if final_ids != current_ids or len(set(final_ids)) != len(final_ids):
                 raise ImportJobError(
                     "finalized candidates must preserve the complete ordered draft identity set"
                 )
