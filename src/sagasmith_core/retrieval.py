@@ -282,7 +282,13 @@ def fts5_query(query: str) -> str | None:
         return None
 
     values = [f'"{run}"' for run in _CJK_RUN.findall(stripped)]
-    values.extend(_LATIN_WORD.findall(stripped))
+    # Quote every user token. Bare words such as AND, OR, and NOT are FTS5
+    # operators, not searchable terms, and can otherwise make an ordinary
+    # heading (for example, "Roleplaying and Inspiration") invalid syntax.
+    values.extend(
+        f'"{word}"' if word.casefold() in {"and", "or", "not"} else word
+        for word in _LATIN_WORD.findall(stripped)
+    )
     tokens = list(dict.fromkeys(values))
     if not tokens:
         return None

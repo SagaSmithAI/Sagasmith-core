@@ -156,6 +156,14 @@ def test_fts5_query_handles_cjk_and_english() -> None:
     assert special is not None and "(" not in special
 
 
+def test_fts5_query_quotes_boolean_operator_words() -> None:
+    from sagasmith_core.retrieval import fts5_query
+
+    assert fts5_query("ROLEPLAYING AND INSPIRATION") == (
+        'ROLEPLAYING OR "AND" OR INSPIRATION'
+    )
+
+
 def test_fts5_hits_produces_results_on_sqlite(database) -> None:
     from alembic import command
 
