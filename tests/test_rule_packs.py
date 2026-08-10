@@ -76,6 +76,20 @@ def test_rule_pack_install_activation_and_branch_lock(database) -> None:
         packs.remove_version("dnd5e.xgte", "1.0.0")
 
 
+def test_rule_pack_keeps_advice_without_blocking_validation(database) -> None:
+    draft = RulePackService(database).save_draft(
+        manifest=_pack(),
+        additional_warnings=["declarative tests do not cover optional behavior"],
+    )
+
+    assert draft.status == "validated"
+    assert draft.validation_report == {
+        "valid": True,
+        "errors": [],
+        "warnings": ["declarative tests do not cover optional behavior"],
+    }
+
+
 def test_rule_profile_cannot_diverge_from_an_active_combat(database) -> None:
     campaigns = CampaignService(database)
     campaign = campaigns.create(system_id="dnd5e", name="Locked combat rules")

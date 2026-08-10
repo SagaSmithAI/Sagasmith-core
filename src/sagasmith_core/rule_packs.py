@@ -84,6 +84,7 @@ class RulePackService:
         mechanics: list[dict[str, Any]] | None = None,
         provenance: dict[str, Any] | None = None,
         additional_errors: list[str] | None = None,
+        additional_warnings: list[str] | None = None,
     ) -> RulePackVersionInfo:
         manifest = dict(manifest)
         artifacts = [dict(item) for item in artifacts or []]
@@ -92,6 +93,8 @@ class RulePackService:
         if additional_errors:
             report["errors"] = [*report["errors"], *additional_errors]
             report["valid"] = False
+        if additional_warnings:
+            report["warnings"] = [*report["warnings"], *additional_warnings]
         pack_id = str(manifest.get("id") or "")
         version = str(manifest.get("version") or "")
         checksum = json_sha256(
@@ -607,7 +610,7 @@ class RulePackService:
                 errors.append(
                     f"artifacts[{index}].mechanic_refs are unknown: {', '.join(unknown_refs)}"
                 )
-        return {"valid": not errors, "errors": errors}
+        return {"valid": not errors, "errors": errors, "warnings": []}
 
     @staticmethod
     def _resolve(session, campaign: Campaign, branch_id: str) -> EffectiveRulesetInfo:
