@@ -108,6 +108,14 @@ def test_principal_membership_and_actor_grants_are_explicit(database) -> None:
         access.require_actor(campaign.id, actor.id, "user:alice", control=True)
     access.grant_actor(campaign.id, "user:alice", actor.id, can_control=True, can_view_private=True)
     assert access.require_actor(campaign.id, actor.id, "user:alice", control=True)
+    partial = access.grant_actor(
+        campaign.id,
+        "user:alice",
+        actor.id,
+        can_control=True,
+    )
+    assert partial.can_control is True
+    assert partial.can_view_private is True
 
 
 def test_campaign_role_cannot_forge_unknown_actor(database) -> None:

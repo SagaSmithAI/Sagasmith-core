@@ -111,8 +111,8 @@ class AccessService:
         principal_id: str,
         actor_id: str,
         *,
-        can_control: bool = False,
-        can_view_private: bool = False,
+        can_control: bool | None = None,
+        can_view_private: bool | None = None,
     ) -> ActorGrantInfo:
         with self.database.transaction() as session:
             actor = session.get(Character, actor_id)
@@ -133,13 +133,15 @@ class AccessService:
                     campaign_id=campaign_id,
                     principal_id=principal_id,
                     actor_id=actor_id,
-                    can_control=can_control,
-                    can_view_private=can_view_private,
+                    can_control=bool(can_control),
+                    can_view_private=bool(can_view_private),
                 )
                 session.add(row)
             else:
-                row.can_control = can_control
-                row.can_view_private = can_view_private
+                if can_control is not None:
+                    row.can_control = can_control
+                if can_view_private is not None:
+                    row.can_view_private = can_view_private
             session.flush()
             return ActorGrantInfo(
                 row.campaign_id,
