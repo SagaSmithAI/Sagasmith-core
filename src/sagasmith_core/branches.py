@@ -448,9 +448,10 @@ class BranchService:
             or 0
         )
         group_ids = {row.mutation_group_id for row in rows if row.mutation_group_id}
+        row_offsets = {row.id: offset for offset, row in enumerate(rows, start=1)}
         group_map: dict[str, str] = {}
-        for group_offset, old_group in enumerate(
-            session.scalars(select(MutationGroup).where(MutationGroup.id.in_(group_ids))), start=1
+        for old_group in session.scalars(
+            select(MutationGroup).where(MutationGroup.id.in_(group_ids))
         ):
             group_rows = [row for row in rows if row.mutation_group_id == old_group.id]
             new_id = str(uuid.uuid4())
@@ -460,7 +461,7 @@ class BranchService:
                     id=new_id,
                     campaign_id=old_group.campaign_id,
                     branch_id=branch_id,
-                    sequence=max_sequence + group_offset,
+                    sequence=max_sequence + min(row_offsets[row.id] for row in group_rows),
                     operation=old_group.operation,
                     actor=old_group.actor,
                     idempotency_key=None,

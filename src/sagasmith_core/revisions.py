@@ -258,6 +258,11 @@ class RevisionService:
                 .limit(1)
             )
             current_group_id = current.mutation_group_id if current else None
+            group_revision_sequence = (
+                select(func.min(StateRevision.sequence))
+                .where(StateRevision.mutation_group_id == MutationGroup.id)
+                .scalar_subquery()
+            )
             statement = select(MutationGroup).where(
                 MutationGroup.campaign_id == campaign_id,
                 MutationGroup.branch_id == branch_id,
@@ -265,13 +270,8 @@ class RevisionService:
                 MutationGroup.redoable.is_(True),
             )
             if current_group_id:
-                current_sequence = (
-                    select(MutationGroup.sequence)
-                    .where(MutationGroup.id == current_group_id)
-                    .scalar_subquery()
-                )
-                statement = statement.where(MutationGroup.sequence > current_sequence)
-            group = session.scalar(statement.order_by(MutationGroup.sequence).limit(1))
+                statement = statement.where(group_revision_sequence > current.sequence)
+            group = session.scalar(statement.order_by(group_revision_sequence).limit(1))
             if group is None:
                 raise LookupError("nothing to redo")
             rows = self._group_rows(session, group_id=group.id)

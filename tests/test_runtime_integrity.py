@@ -17,7 +17,7 @@ from sagasmith_core import (
 )
 from sagasmith_core.idempotency import request_hash
 from sagasmith_core.integrity import canonical_json
-from sagasmith_core.models import IdempotencyRecord
+from sagasmith_core.models import IdempotencyRecord, MutationGroup, StateRevision
 
 
 def test_grouped_revision_undo_redo_is_atomic(database) -> None:
@@ -57,6 +57,42 @@ def test_grouped_revision_undo_redo_is_atomic(database) -> None:
     assert CharacterService(database).get(hero.id).sheet == hero.sheet
     revisions.redo(campaign.id)
     assert CampaignService(database).get(campaign.id).state == {"gp": 5}
+
+
+def test_redo_follows_revision_cursor_when_group_sequence_is_stale(database) -> None:
+    campaigns = CampaignService(database)
+    campaign = campaigns.create(system_id="dnd5e", name="Redo cursor", state={"step": 0})
+    mutations = StateMutationService(database)
+    mutations.replace(
+        campaign.id,
+        campaign_state={"step": 1},
+        expected_campaign_revision=campaign.revision,
+        operation="campaign.step.one",
+    )
+    mutations.replace(
+        campaign.id,
+        campaign_state={"step": 2},
+        expected_campaign_revision=campaigns.get(campaign.id).revision,
+        operation="campaign.step.two",
+    )
+    with database.transaction() as session:
+        latest = session.scalar(
+            select(StateRevision)
+            .where(StateRevision.campaign_id == campaign.id)
+            .order_by(StateRevision.sequence.desc())
+            .limit(1)
+        )
+        assert latest is not None and latest.mutation_group_id is not None
+        group = session.get(MutationGroup, latest.mutation_group_id)
+        assert group is not None
+        group.sequence = 0
+
+    revisions = RevisionService(database)
+    revisions.undo(campaign.id)
+    assert campaigns.get(campaign.id).state == {"step": 1}
+
+    revisions.redo(campaign.id)
+    assert campaigns.get(campaign.id).state == {"step": 2}
 
 
 def test_principal_membership_and_actor_grants_are_explicit(database) -> None:
