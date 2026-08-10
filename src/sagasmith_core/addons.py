@@ -105,7 +105,7 @@ class AddonService:
             "distribution": value["metadata"].get("distribution"),
             "license": value["metadata"].get("license"),
             "attribution": value["metadata"].get("attribution"),
-            "portable_checksum": value["checksum"],
+            "content_package_checksum": value["checksum"],
             **dict(provenance or {}),
         }
         with self.database.transaction() as session:
@@ -179,7 +179,7 @@ class AddonService:
             return self._version_info(row, addon)
 
     def get_package(self, addon_id: str, version: str) -> dict[str, Any]:
-        """Return the exact immutable portable package stored at import time."""
+        """Return the exact immutable content package stored at import time."""
 
         with self.database.transaction() as session:
             row = session.get(
@@ -229,9 +229,9 @@ class AddonService:
         basis: str,
         proof_checksum: str,
     ) -> dict[str, Any]:
-        """Record a plugin-proven exact local/portable component equivalence.
+        """Record plugin-proven equivalence with an installed local component.
 
-        A system plugin can rebuild a portable definition from an already
+        A system plugin can rebuild a content definition from an already
         installed local pack even when that pack was not originally imported
         from the addon envelope.  Core does not interpret system-specific
         definitions; it stores the exact addon-scoped proof after checking the

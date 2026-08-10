@@ -380,16 +380,23 @@ def _validate_asset(value: Any, index: int) -> dict[str, Any]:
     return value
 
 
-def _validate_actor(
-    value: Any,
-    index: int,
+def validate_actor_card(
+    value: Mapping[str, Any],
     *,
-    system_id: str,
-    assets_by_key: Mapping[str, Mapping[str, Any]],
+    expected_system_id: str | None = None,
+    assets_by_key: Mapping[str, Mapping[str, Any]] | None = None,
+    field: str = "actor",
 ) -> dict[str, Any]:
-    field = f"content_package.actors[{index}]"
-    if not isinstance(value, dict):
+    """Validate the only supported actor-card schema.
+
+    Detached cards may omit an image. Cards with an image must be validated
+    with their owning package's asset map so the reference cannot dangle.
+    """
+
+    if not isinstance(value, Mapping):
         raise ContentPackageError(f"{field} must be an object")
+    value = copy.deepcopy(dict(value))
+    assets_by_key = assets_by_key or {}
     _exact(
         value,
         {
@@ -416,8 +423,8 @@ def _validate_actor(
     if not _ID_RE.fullmatch(actor_id):
         raise ContentPackageError(f"{field}.id is not portable")
     _text(value["version"], f"{field}.version", maximum=100)
-    if value["system_id"] != system_id:
-        raise ContentPackageError(f"{field}.system_id does not match package")
+    if expected_system_id is not None and value["system_id"] != expected_system_id:
+        raise ContentPackageError(f"{field}.system_id does not match expected system")
     _text(value["actor_type"], f"{field}.actor_type", maximum=100)
     _text(value["name"], f"{field}.name", maximum=300)
     if value["player_name"] is not None:
@@ -441,6 +448,21 @@ def _validate_actor(
         if not isinstance(image["alt"], str):
             raise ContentPackageError(f"{field}.image.alt must be a string")
     return value
+
+
+def _validate_actor(
+    value: Any,
+    index: int,
+    *,
+    system_id: str,
+    assets_by_key: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    return validate_actor_card(
+        value,
+        expected_system_id=system_id,
+        assets_by_key=assets_by_key,
+        field=f"content_package.actors[{index}]",
+    )
 
 
 def validate_content_package(value: Mapping[str, Any]) -> dict[str, Any]:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 from sqlalchemy import delete
 
@@ -16,7 +18,6 @@ from sagasmith_core import (
 )
 from sagasmith_core.branches import BranchService
 from sagasmith_core.models import CampaignAddonActivation
-from sagasmith_core.portable import build_rule_pack
 from sagasmith_core.rule_packs import RulePackError
 
 
@@ -32,13 +33,9 @@ def _rule_component(database, *, version: str = "1.0.0") -> dict:
         publication_id=f"example.addon-source-{version}",
         authority="supplement",
     )
-    source = rules.export_portable_source(ingested.source_id)
+    source = rules.export_indexed_source(ingested.source_id)
     chunk = source["sections"][0]["chunks"][0]
-    return build_rule_pack(
-        portable_id="dnd5e.example-addon.rules",
-        version=version,
-        system_id="dnd5e",
-        manifest={
+    manifest = {
             "id": "dnd5e.example-addon.rules",
             "version": version,
             "title": "Example Addon Rules",
@@ -48,8 +45,8 @@ def _rule_component(database, *, version: str = "1.0.0") -> dict:
             "dependencies": [],
             "conflicts": [],
             "capabilities": [],
-        },
-        artifacts=[
+        }
+    artifacts = [
             {
                 "id": "dnd5e.example-addon.rules.feature.test",
                 "kind": "feature",
@@ -63,11 +60,27 @@ def _rule_component(database, *, version: str = "1.0.0") -> dict:
                     }
                 ],
             }
-        ],
-        mechanics=[],
-        sources=[source],
-        metadata={"distribution": "private", "license": "user-supplied"},
-    )
+        ]
+    definition_checksum = hashlib.sha256(
+        f"dnd5e.example-addon.rules:{version}".encode()
+    ).hexdigest()
+    return {
+        "id": "dnd5e.example-addon.rules",
+        "version": version,
+        "system_id": "dnd5e",
+        "payload": {
+            "manifest": manifest,
+            "artifacts": artifacts,
+            "mechanics": [],
+            "provenance": {},
+            "sources": [source],
+        },
+        "metadata": {
+            "distribution": "private",
+            "license": "user-supplied",
+            "definition_checksum": definition_checksum,
+        },
+    }
 
 
 def _addon(
@@ -182,7 +195,7 @@ def _install_rule_component(database, component: dict) -> None:
     packs.install(component["id"], component["version"])
 
 
-def _install_local_rule_component_without_portable_provenance(database, component: dict) -> None:
+def _install_local_rule_component_without_package_provenance(database, component: dict) -> None:
     payload = component["payload"]
     packs = RulePackService(database)
     draft = packs.save_draft(
@@ -250,7 +263,7 @@ def test_addon_accepts_exact_plugin_proven_local_component_equivalence(database)
     addon_package = _addon(component)
     addons = AddonService(database)
     imported = addons.import_package(addon_package)
-    _install_local_rule_component_without_portable_provenance(database, component)
+    _install_local_rule_component_without_package_provenance(database, component)
 
     with pytest.raises(AddonError, match="unverified"):
         addons.install(imported.addon_id, imported.version)
@@ -261,7 +274,7 @@ def test_addon_accepts_exact_plugin_proven_local_component_equivalence(database)
         component_id=component["id"],
         component_version=component["version"],
         checksum=component["metadata"]["definition_checksum"],
-        basis="portable_definition_checksum",
+        basis="content_definition_checksum",
         proof_checksum=component["metadata"]["definition_checksum"],
     )
 

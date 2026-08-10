@@ -667,12 +667,6 @@ class RulePackService:
                 if dependency is not None and dependency.version != str(item["version"]):
                     raise RulePackError(f"{pack_id} requires {dependency_id}@{item['version']}")
                 expected_checksum = str(item.get("checksum") or "")
-                portable_package = dict(
-                    (dependency.provenance if dependency is not None else {}).get(
-                        "portable_package"
-                    )
-                    or {}
-                )
                 content_definition = dict(
                     (dependency.provenance if dependency is not None else {}).get(
                         "content_definition"
@@ -683,7 +677,6 @@ class RulePackService:
                     str(value)
                     for value in (
                         dependency.checksum if dependency is not None else "",
-                        portable_package.get("definition_checksum"),
                         content_definition.get("definition_checksum"),
                     )
                     if value

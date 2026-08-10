@@ -13,7 +13,7 @@ from typing import Any, Protocol
 from sqlalchemy import select
 
 from sagasmith_core.campaigns import CampaignNotFoundError
-from sagasmith_core.content_pack import validate_content_package
+from sagasmith_core.content_pack import build_actor_card, validate_content_package
 from sagasmith_core.database import Database
 from sagasmith_core.documents import (
     GENERIC_DOCUMENT_LAYOUT_PROFILE,
@@ -42,7 +42,6 @@ from sagasmith_core.models import (
     VectorIndexJob,
 )
 from sagasmith_core.parsing import MarkdownHierarchyParser, ParsedChunk
-from sagasmith_core.portable import build_actor_card
 from sagasmith_core.retrieval import (
     SearchHit,
     cosine_similarity,
@@ -528,7 +527,7 @@ class _ContentModuleParser:
                                     "page_start": chunk.get("page_start"),
                                     "page_end": chunk.get("page_end"),
                                     "content_hash": chunk["content_hash"],
-                                    "portable_chunk_key": chunk["key"],
+                                    "indexed_chunk_key": chunk["key"],
                                 },
                             )
                             for chunk in chunks
@@ -1109,7 +1108,6 @@ class ModuleService:
                     "parser_version": row.parser_version,
                     "warnings": list(row.warnings),
                     "runtime_manifest": dict(row.metadata_json or {}).get("runtime_manifest"),
-                    "portable_package": dict(row.metadata_json or {}).get("portable_package"),
                     "chapters": self._counts(session, row.id)[0],
                     "scenes": self._counts(session, row.id)[1],
                     "chunks": self._counts(session, row.id)[2],
@@ -1122,7 +1120,7 @@ class ModuleService:
         campaign_id: str,
         module_id: str,
         *,
-        portable_id: str,
+        package_id: str,
         version: str = "1.0.0",
         actors: Sequence[dict[str, Any]] | None = None,
         metadata: dict[str, Any] | None = None,
@@ -1346,7 +1344,7 @@ class ModuleService:
                         grouped[binding.portable_actor_id] = (character, [binding])
                 actors = [
                     build_actor_card(
-                        portable_id=portable_actor_id,
+                        actor_id=portable_actor_id,
                         version=version,
                         system_id=character.system_id,
                         actor_type=character.character_type,
@@ -1356,11 +1354,10 @@ class ModuleService:
                         sheet=dict(character.sheet),
                         notes=dict(character.notes),
                         provenance=dict(bindings[0].metadata_json or {}).get(
-                            "portable_provenance", {}
+                            "content_actor_provenance", {}
                         ),
-                        metadata=dict(bindings[0].metadata_json or {}).get("portable_metadata", {}),
-                        dependencies=dict(bindings[0].metadata_json or {}).get(
-                            "portable_dependencies", []
+                        metadata=dict(bindings[0].metadata_json or {}).get(
+                            "content_actor_metadata", {}
                         ),
                         bindings=[
                             {
@@ -1372,7 +1369,7 @@ class ModuleService:
                                 "metadata": {
                                     key: value
                                     for key, value in dict(binding.metadata_json or {}).items()
-                                    if not key.startswith("portable_")
+                                    if not key.startswith("content_actor_")
                                 },
                             }
                             for binding in bindings
@@ -1430,7 +1427,7 @@ class ModuleService:
                 "endings": len(normalized_narrative["endings"]),
             }
             return {
-                "id": portable_id,
+                "id": package_id,
                 "version": version,
                 "system_id": source.system_id,
                 "manifest": module_manifest,
@@ -1529,9 +1526,9 @@ class ModuleService:
             asset_map[asset["asset_key"]] = registered["id"]
         chunks = self.list_chunks(campaign_id, result.module_id)
         chunk_map = {
-            str(dict(chunk.get("metadata") or {}).get("portable_chunk_key") or ""): chunk["id"]
+            str(dict(chunk.get("metadata") or {}).get("indexed_chunk_key") or ""): chunk["id"]
             for chunk in chunks
-            if str(dict(chunk.get("metadata") or {}).get("portable_chunk_key") or "")
+            if str(dict(chunk.get("metadata") or {}).get("indexed_chunk_key") or "")
         }
         packaged_chunks: dict[str, tuple[str, dict[str, Any]]] = {}
         for scene in value["content"]["scene_atlas"]:

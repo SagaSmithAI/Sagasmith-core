@@ -24,6 +24,9 @@ from sagasmith_core.content_pack import (
 from sagasmith_core.content_pack import (
     build_actor_card as build_content_actor_card,
 )
+from sagasmith_core.content_pack import (
+    validate_actor_card as validate_content_actor_card,
+)
 from sagasmith_core.continuity import ContinuityService
 from sagasmith_core.continuity_commit import (
     FACT_KEY_WRITE_ACTIONS,
@@ -180,6 +183,7 @@ __all__ = [
     "render_pdf_page",
     "source_ref",
     "validate_content_package",
+    "validate_content_actor_card",
     "validate_subject_context_fact",
 ]
 

@@ -439,20 +439,19 @@ def test_effective_ruleset_enforces_exact_dependency_checksum(database) -> None:
     ]
 
 
-@pytest.mark.parametrize("provenance_key", ["portable_package", "content_definition"])
 def test_effective_ruleset_accepts_stable_dependency_definition_checksum(
-    database, provenance_key: str
+    database,
 ) -> None:
     campaign = CampaignService(database).create(system_id="dnd5e", name="Portable dependency")
     RuleProfileService(database).set(campaign.id, edition="2014")
     packs = RulePackService(database)
-    portable_checksum = "a" * 64
+    definition_checksum = "a" * 64
     dependency = packs.save_draft(
         manifest=_pack("dnd5e.portable.dependency"),
         provenance={
-            provenance_key: {
+            "content_definition": {
                 "checksum": "b" * 64,
-                "definition_checksum": portable_checksum,
+                "definition_checksum": definition_checksum,
             }
         },
     )
@@ -464,7 +463,7 @@ def test_effective_ruleset_accepts_stable_dependency_definition_checksum(
                 {
                     "id": dependency.pack_id,
                     "version": dependency.version,
-                    "checksum": portable_checksum,
+                    "checksum": definition_checksum,
                 }
             ],
         )

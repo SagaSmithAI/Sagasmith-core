@@ -25,13 +25,13 @@ from sagasmith_core.documents import (
 )
 from sagasmith_core.embeddings import Embedder
 from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
+from sagasmith_core.indexed_source import (
+    rule_chunk_key,
+    validate_indexed_rule_source,
+)
 from sagasmith_core.integrity import unique_retired_source_key
 from sagasmith_core.models import RuleChunk, RuleSection, RuleSource, VectorIndexJob
 from sagasmith_core.parsing import MarkdownHierarchyParser
-from sagasmith_core.portable import (
-    portable_rule_chunk_key,
-    validate_portable_rule_source,
-)
 from sagasmith_core.retrieval import (
     SearchHit,
     cosine_similarity,
@@ -634,7 +634,7 @@ class RuleService:
                 for row in rows
             ]
 
-    def export_portable_source(self, source_id: str) -> dict[str, Any]:
+    def export_indexed_source(self, source_id: str) -> dict[str, Any]:
         """Export one indexed source without leaking local row identifiers."""
 
         with self.database.transaction() as session:
@@ -674,7 +674,7 @@ class RuleService:
                     content_hash = hashlib.sha256(chunk.content.encode("utf-8")).hexdigest()
                     chunks.append(
                         {
-                            "key": portable_rule_chunk_key(
+                            "key": rule_chunk_key(
                                 source_key,
                                 row.ordinal,
                                 chunk.ordinal,
@@ -706,7 +706,7 @@ class RuleService:
                         "chunks": chunks,
                     }
                 )
-            return validate_portable_rule_source(
+            return validate_indexed_rule_source(
                 {
                     "source_key": source_key,
                     "title": source.title,
@@ -846,7 +846,7 @@ class RuleService:
                 attribution=attribution,
             )
 
-    def import_portable_source(
+    def import_indexed_source(
         self,
         value: dict[str, Any],
         *,
@@ -854,9 +854,9 @@ class RuleService:
         canonical_source_id: str | None = None,
         embedder: Embedder | None = None,
     ) -> dict[str, Any]:
-        """Rehydrate one portable source with fresh source, section, and chunk ids."""
+        """Rehydrate one detached source with fresh source, section, and chunk ids."""
 
-        source_value = validate_portable_rule_source(value)
+        source_value = validate_indexed_rule_source(value)
         source_key = source_value["source_key"]
         checksum = source_value["checksum"]
         if source_value["canonical_source_key"] and not canonical_source_id:
@@ -1120,7 +1120,7 @@ class RuleService:
                 unified_keys.append(str(chunk["key"]))
                 chunks.append(
                     {
-                        "key": portable_rule_chunk_key(
+                        "key": rule_chunk_key(
                             source_key,
                             int(section["ordinal"]),
                             int(chunk["ordinal"]),
@@ -1173,7 +1173,7 @@ class RuleService:
             "metadata": metadata,
             "sections": portable_sections,
         }
-        result = self.import_portable_source(
+        result = self.import_indexed_source(
             portable,
             system_id=system_id,
             canonical_source_id=canonical_source_id,
