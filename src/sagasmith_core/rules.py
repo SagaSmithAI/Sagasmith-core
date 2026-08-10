@@ -538,6 +538,7 @@ class RuleService:
                         "source_checksum": dict(row.RuleSource.metadata_json or {}).get(
                             "source_checksum", row.RuleSource.checksum
                         ),
+                        "ordinal": row.RuleChunk.ordinal,
                         "page_start": dict(row.RuleChunk.metadata_json or {}).get("page_start"),
                         "page_end": dict(row.RuleChunk.metadata_json or {}).get("page_end"),
                     },
