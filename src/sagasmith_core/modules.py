@@ -1162,6 +1162,15 @@ class ModuleService:
                     "module manifest is missing required fields: "
                     + ", ".join(missing_manifest_fields)
                 )
+            unsupported_manifest_fields = sorted(
+                set(manifest) - required_manifest_fields - {"content_summary"}
+            )
+            if unsupported_manifest_fields:
+                raise ValueError(
+                    "module manifest has unsupported fields: "
+                    + ", ".join(unsupported_manifest_fields)
+                    + "; catalogs and narrative are sibling Pack decisions"
+                )
         if catalogs is not None:
             invalid_catalogs = sorted(
                 str(key) for key, items in catalogs.items() if not isinstance(items, list)

@@ -815,6 +815,29 @@ def test_module_export_rejects_malformed_pack_decisions_with_clear_fields(databa
         content="# Chapter\n## Scene\nSource-backed scene.\n",
     )
 
+    with pytest.raises(
+        ValueError,
+        match=(
+            "module manifest has unsupported fields: narrative; catalogs and "
+            "narrative are sibling Pack decisions"
+        ),
+    ):
+        modules.export_content_descriptor(
+            campaign.id,
+            imported.module_id,
+            package_id="dnd5e.module.nested-narrative",
+            manifest={
+                "title": "Nested Narrative",
+                "classification": "campaign",
+                "compatibility": {},
+                "play_profile": {},
+                "continuity": {},
+                "activation": {},
+                "content_summary": {},
+                "narrative": {"dossiers": [], "endings": []},
+            },
+        )
+
     with pytest.raises(ValueError, match="module narrative is missing required fields: dossiers"):
         modules.export_content_descriptor(
             campaign.id,
