@@ -44,6 +44,7 @@ from sqlalchemy.exc import OperationalError
 
 _LATIN_WORD = re.compile(r"[A-Za-z0-9_'-]+")
 _CJK = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
+_CJK_RUN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]+")
 
 # \u2500\u2500 Built-in Chinese \u2194 English query expansions \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 # System-neutral TTRPG terms. System profiles can add their
@@ -269,10 +270,9 @@ _FTS5_SPECIAL = re.compile(r"[*^\"()+\-\\]")
 def fts5_query(query: str) -> str | None:
     """Convert a plain-text user query to an FTS5 MATCH expression.
 
-    * English word tokens are kept as-is.
-    * Chinese characters are each emitted as independent tokens with a
-      mandatory ``+`` prefix so the result requires ALL CJK characters
-      from the query.
+    * English words and contiguous Chinese text are treated as alternatives;
+      later structured scoring ranks precise matches above loose expansions.
+    * Chinese runs are quoted so user text cannot become FTS syntax.
     * FTS5 special characters (``* ^ \\" ( ) + - \\``) are stripped.
     * Returns ``None`` when the query contains no valid tokens (useful
       for early-exit).
@@ -281,33 +281,12 @@ def fts5_query(query: str) -> str | None:
     if not stripped:
         return None
 
-    terms_builder: list[str] = []
-
-    # Extract CJK character runs — each becomes a mandatory + token
-    last = 0
-    for cjk_match in _CJK.finditer(stripped):
-        start = cjk_match.start()
-        # Any Latin text before this CJK run?
-        if start > last:
-            latin_bit = stripped[last:start]
-            for word in _LATIN_WORD.finditer(latin_bit):
-                terms_builder.append(word.group())
-        # Each CJK character in the run gets + prefix
-        run = cjk_match.group()
-        for char in run:
-            if not char.isspace():
-                terms_builder.append(f"+{char}")
-        last = cjk_match.end()
-
-    # Remaining Latin text after last CJK run
-    tail = stripped[last:]
-    if tail:
-        for word in _LATIN_WORD.finditer(tail):
-            terms_builder.append(word.group())
-
-    if not terms_builder:
+    values = [f'"{run}"' for run in _CJK_RUN.findall(stripped)]
+    values.extend(_LATIN_WORD.findall(stripped))
+    tokens = list(dict.fromkeys(values))
+    if not tokens:
         return None
-    return " ".join(dict.fromkeys(terms_builder))
+    return " OR ".join(tokens)
 
 
 def fts5_hits(

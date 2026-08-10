@@ -141,17 +141,13 @@ def test_fts5_query_handles_cjk_and_english() -> None:
     from sagasmith_core.retrieval import fts5_query
 
     cjk = fts5_query("豁免检定")
-    assert cjk is not None
-    assert "+" in cjk
+    assert cjk == '"豁免检定"'
 
     english = fts5_query("fireball")
     assert english == "fireball"
 
     mixed = fts5_query("豁免 save combat")
-    assert mixed is not None
-    assert "+" in mixed
-    assert "save" in mixed
-    assert "combat" in mixed
+    assert mixed == '"豁免" OR save OR combat'
 
     empty = fts5_query("")
     assert empty is None
