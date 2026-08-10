@@ -99,8 +99,6 @@ def _package() -> tuple[dict, dict[str, bytes]]:
             "rule_definitions": [],
             "artifacts": [{"id": "ward", "source_refs": [citation]}],
             "mechanics": [],
-            "selection_rules": [],
-            "resolutions": [],
         },
         metadata={"distribution": "shareable"},
     )

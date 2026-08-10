@@ -36,8 +36,6 @@ _REQUIRED_CONTENT_FIELDS = {
             "rule_definitions",
             "artifacts",
             "mechanics",
-            "selection_rules",
-            "resolutions",
         }
     ),
     "core_rules": frozenset(
@@ -49,8 +47,6 @@ _REQUIRED_CONTENT_FIELDS = {
             "rule_definitions",
             "artifacts",
             "mechanics",
-            "selection_rules",
-            "resolutions",
         }
     ),
     "module": frozenset(

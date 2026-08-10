@@ -334,7 +334,7 @@ def test_module_profile_metadata_is_validated_persisted_and_listed(database, tmp
     assert listed[0]["runtime_manifest"]["module_key"] == "keep"
 
 
-def test_module_profile_metadata_errors_fail_preview_and_ingest(database, tmp_path) -> None:
+def test_module_profile_metadata_errors_are_editing_advisories(database, tmp_path) -> None:
     class InvalidManifestProfile(GenericModuleProfile):
         def document_metadata(self, content: str) -> dict:
             return {"runtime_manifest_errors": ["duplicate id: npc:keeper"]}
@@ -343,17 +343,20 @@ def test_module_profile_metadata_errors_fail_preview_and_ingest(database, tmp_pa
     source.write_text("# Chapter\n## Scene\nBody.\n", encoding="utf-8")
     parser = MarkdownModuleParser(profile=InvalidManifestProfile())
     preview = ModuleService(database).preview_path(source, parser=parser)
-    assert preview["valid"] is False
-    assert preview["errors"] == ["duplicate id: npc:keeper"]
+    assert preview["valid"] is True
+    assert preview["errors"] == []
+    assert preview["warnings"] == [
+        "runtime manifest advisory: duplicate id: npc:keeper"
+    ]
 
     campaign = CampaignService(database).create(system_id="dnd5e", name="Invalid")
-    with pytest.raises(ValueError, match="invalid module runtime manifest"):
-        ModuleService(database).ingest_path(
-            campaign_id=campaign.id,
-            path=source,
-            source_key="invalid",
-            parser=parser,
-        )
+    ingested = ModuleService(database).ingest_path(
+        campaign_id=campaign.id,
+        path=source,
+        source_key="invalid",
+        parser=parser,
+    )
+    assert ingested.scenes == 1
 
 
 def test_module_scene_visibility_uses_the_shared_vocabulary(database, tmp_path) -> None:

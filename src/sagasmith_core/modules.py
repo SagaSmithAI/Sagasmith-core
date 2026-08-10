@@ -584,8 +584,10 @@ class ModuleService:
         parsed = selected_parser.parse(content)
         profile_metadata = selected_parser.document_metadata(content)
         manifest_errors = list(profile_metadata.get("runtime_manifest_errors") or [])
-        if manifest_errors:
-            raise ValueError("invalid module runtime manifest: " + "; ".join(manifest_errors))
+        import_warnings = [
+            *list(normalized_document.warnings if normalized_document else []),
+            *[f"runtime manifest advisory: {item}" for item in manifest_errors],
+        ]
         profile = getattr(selected_parser, "profile", GenericModuleProfile())
         parser_profile = getattr(profile, "name", "generic")
         parser_version = getattr(profile, "version", "1")
@@ -652,7 +654,7 @@ class ModuleService:
                 active=False,
                 parser_profile=parser_profile,
                 parser_version=parser_version,
-                warnings=list(normalized_document.warnings) if normalized_document else [],
+                warnings=import_warnings,
                 metadata_json={
                     key: value
                     for key, value in {
@@ -927,7 +929,14 @@ class ModuleService:
         parsed = selected_parser.parse(document.content)
         profile_metadata = selected_parser.document_metadata(document.content)
         scenes: list[dict[str, Any]] = []
-        errors: list[str] = list(profile_metadata.get("runtime_manifest_errors") or [])
+        errors: list[str] = []
+        warnings: list[str] = [
+            *document.warnings,
+            *[
+                f"runtime manifest advisory: {item}"
+                for item in profile_metadata.get("runtime_manifest_errors") or []
+            ],
+        ]
         keys: set[str] = set()
         stable_keys = self._scene_stable_keys(parsed)
         for chapter in parsed:
@@ -951,9 +960,9 @@ class ModuleService:
                 page_end = metadata.get("page_end")
                 if document.media_type == "application/pdf" and document.page_count is not None:
                     if page_start is None or page_end is None:
-                        errors.append(f"scene {stable_key} has no PDF page range")
+                        warnings.append(f"scene {stable_key} has no PDF page range")
                     elif not (1 <= int(page_start) <= int(page_end) <= document.page_count):
-                        errors.append(
+                        warnings.append(
                             f"scene {stable_key} has invalid PDF page range {page_start}-{page_end}"
                         )
                 scenes.append(
@@ -984,7 +993,7 @@ class ModuleService:
             "media_type": document.media_type,
             "checksum": document.checksum,
             "page_count": document.page_count,
-            "warnings": list(document.warnings),
+            "warnings": warnings,
             "metadata": dict(document.metadata),
             "profile_metadata": profile_metadata,
             "parser_profile": getattr(selected_parser.profile, "name", "generic"),

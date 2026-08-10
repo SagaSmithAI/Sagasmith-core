@@ -170,8 +170,6 @@ def _addon(
                 }
             ],
             "mechanics": [],
-            "selection_rules": [],
-            "resolutions": [],
         },
         metadata={"distribution": "private", "license": "user-supplied"},
     )
