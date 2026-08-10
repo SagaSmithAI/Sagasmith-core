@@ -1162,6 +1162,33 @@ class ModuleService:
                     "module manifest is missing required fields: "
                     + ", ".join(missing_manifest_fields)
                 )
+        if catalogs is not None:
+            invalid_catalogs = sorted(
+                str(key) for key, items in catalogs.items() if not isinstance(items, list)
+            )
+            if invalid_catalogs:
+                raise ValueError(
+                    "module catalogs fields must contain arrays: "
+                    + ", ".join(invalid_catalogs)
+                )
+        if narrative is not None:
+            required_narrative_fields = {"dossiers", "endings"}
+            missing_narrative_fields = sorted(required_narrative_fields - set(narrative))
+            if missing_narrative_fields:
+                raise ValueError(
+                    "module narrative is missing required fields: "
+                    + ", ".join(missing_narrative_fields)
+                )
+            invalid_narrative_fields = sorted(
+                field
+                for field in required_narrative_fields
+                if not isinstance(narrative[field], list)
+            )
+            if invalid_narrative_fields:
+                raise ValueError(
+                    "module narrative fields must contain arrays: "
+                    + ", ".join(invalid_narrative_fields)
+                )
 
         with self.database.transaction() as session:
             source = session.get(ModuleSource, module_id)

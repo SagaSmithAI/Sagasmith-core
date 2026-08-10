@@ -805,6 +805,39 @@ def test_module_export_rejects_partial_manifest_with_clear_fields(database) -> N
         )
 
 
+def test_module_export_rejects_malformed_pack_decisions_with_clear_fields(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Pack decisions")
+    modules = ModuleService(database)
+    imported = modules.ingest(
+        campaign_id=campaign.id,
+        source_key="pack-decisions.md",
+        title="Pack decisions",
+        content="# Chapter\n## Scene\nSource-backed scene.\n",
+    )
+
+    with pytest.raises(ValueError, match="module narrative is missing required fields: dossiers"):
+        modules.export_content_descriptor(
+            campaign.id,
+            imported.module_id,
+            package_id="dnd5e.module.bad-narrative",
+            narrative={"endings": []},
+        )
+    with pytest.raises(ValueError, match="module narrative fields must contain arrays: endings"):
+        modules.export_content_descriptor(
+            campaign.id,
+            imported.module_id,
+            package_id="dnd5e.module.bad-ending",
+            narrative={"dossiers": [], "endings": "The end"},
+        )
+    with pytest.raises(ValueError, match="module catalogs fields must contain arrays: items"):
+        modules.export_content_descriptor(
+            campaign.id,
+            imported.module_id,
+            package_id="dnd5e.module.bad-catalog",
+            catalogs={"items": {}},
+        )
+
+
 def test_reviewed_visual_connections_merge_and_restore_with_scene_progress(
     database, tmp_path
 ) -> None:
