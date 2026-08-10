@@ -783,6 +783,28 @@ def test_module_reimport_preserves_snapshot_scene_references(database) -> None:
     assert modules.current_scene(campaign.id)["title"] == "Gate"
 
 
+def test_module_export_rejects_partial_manifest_with_clear_fields(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Manifest")
+    modules = ModuleService(database)
+    imported = modules.ingest(
+        campaign_id=campaign.id,
+        source_key="manifest.md",
+        title="Manifest",
+        content="# Chapter\n## Scene\nSource-backed scene.\n",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="module manifest is missing required fields: activation, classification",
+    ):
+        modules.export_content_descriptor(
+            campaign.id,
+            imported.module_id,
+            package_id="dnd5e.module.partial",
+            manifest={"play_profile": {}},
+        )
+
+
 def test_reviewed_visual_connections_merge_and_restore_with_scene_progress(
     database, tmp_path
 ) -> None:

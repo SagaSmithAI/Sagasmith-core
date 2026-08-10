@@ -1147,6 +1147,22 @@ class ModuleService:
         campaign state are intentionally outside this authoring package.
         """
 
+        if manifest is not None:
+            required_manifest_fields = {
+                "title",
+                "classification",
+                "compatibility",
+                "play_profile",
+                "continuity",
+                "activation",
+            }
+            missing_manifest_fields = sorted(required_manifest_fields - set(manifest))
+            if missing_manifest_fields:
+                raise ValueError(
+                    "module manifest is missing required fields: "
+                    + ", ".join(missing_manifest_fields)
+                )
+
         with self.database.transaction() as session:
             source = session.get(ModuleSource, module_id)
             if source is None or source.campaign_id != campaign_id:
