@@ -205,3 +205,22 @@ def test_fts5_hits_produces_results_on_sqlite(database) -> None:
     api_hits = service.search(campaign_id=campaign.id, query="wolves")
     assert len(api_hits) >= 1
     assert "Gate" in api_hits[0].title
+
+
+def test_fts5_fallback_does_not_hide_programming_errors() -> None:
+    from types import SimpleNamespace
+
+    from sqlalchemy.exc import OperationalError
+
+    from sagasmith_core.retrieval import fts5_hits
+
+    class BrokenSession:
+        bind = SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+
+        def execute(self, *_args, **_kwargs):
+            raise OperationalError("SELECT", {}, RuntimeError("syntax error"))
+
+    with pytest.raises(ValueError, match="unsupported FTS5 table"):
+        fts5_hits(BrokenSession(), "invented_fts", "wolves")
+    with pytest.raises(OperationalError, match="syntax error"):
+        fts5_hits(BrokenSession(), "module_fts", "wolves")

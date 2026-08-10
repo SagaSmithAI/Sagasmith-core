@@ -40,6 +40,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from sqlalchemy.exc import OperationalError
+
 _LATIN_WORD = re.compile(r"[A-Za-z0-9_'-]+")
 _CJK = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
 
@@ -327,6 +329,8 @@ def fts5_hits(
     migration not applied, empty index) so callers can fall through
     to ``structured_score()`` unconditionally.
     """
+    if table not in {"module_fts", "rule_fts"}:
+        raise ValueError("unsupported FTS5 table")
     if session.bind.dialect.name != "sqlite":
         return []
     match_expr = fts5_query(query)
@@ -347,6 +351,8 @@ def fts5_hits(
             {"query": match_expr, "limit": limit},
         )
         return [str(row[0]) for row in rows]
-    except Exception:
-        # Table may not exist (migration not yet applied)
-        return []
+    except OperationalError as error:
+        message = str(error).casefold()
+        if "no such table" in message or "no such module: fts5" in message:
+            return []
+        raise
