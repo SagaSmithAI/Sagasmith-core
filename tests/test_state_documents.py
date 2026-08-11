@@ -172,6 +172,12 @@ def test_rapidocr_profile_binds_model_version_and_scale() -> None:
         RapidOcrProvider(model_type="server")
 
 
+def test_rapidocr_optional_runtime_has_functional_opencv() -> None:
+    cv2 = pytest.importorskip("cv2")
+
+    assert callable(getattr(cv2, "resize", None))
+
+
 def test_rapidocr_engine_is_shared_by_model_not_render_scale(monkeypatch) -> None:
     import sagasmith_core.documents as documents
 
