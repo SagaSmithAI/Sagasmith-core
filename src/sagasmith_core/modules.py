@@ -498,8 +498,13 @@ class _ContentModuleParser:
                     if int(section["start_offset"]) >= start and int(section["end_offset"]) <= end
                     for chunk in section["chunks"]
                 ]
+                scene_metadata = dict(scene.get("metadata") or {})
+                profile_data = scene_metadata.pop("profile_data", {})
+                if not isinstance(profile_data, dict):
+                    raise ValueError("module scene metadata.profile_data must be an object")
                 metadata = {
-                    **dict(scene.get("metadata") or {}),
+                    **dict(profile_data),
+                    **scene_metadata,
                     "stable_key": scene["stable_key"],
                     "scene_type": scene["scene_type"],
                     "page_start": scene.get("page_start"),

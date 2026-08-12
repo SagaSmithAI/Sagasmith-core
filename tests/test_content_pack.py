@@ -437,3 +437,28 @@ def test_module_package_database_import_rolls_back_as_one_transaction(database) 
         )
 
     assert ModuleService(database).list(campaign.id, include_retired=True) == []
+
+
+def test_module_package_import_restores_profile_data_without_nesting(database, tmp_path) -> None:
+    package, blobs = _module_package()
+    package["content"]["scene_atlas"][0]["metadata"] = {
+        "visibility": "restricted",
+        "profile_data": {"stress": [{"loss": "1/1d4"}]},
+    }
+    package["checksum"] = content_package_checksum(package)
+    campaign = CampaignService(database).create(system_id="neutral", name="Profile data")
+
+    imported = ModuleService(database).import_content_package(
+        campaign.id,
+        package,
+        blobs,
+        asset_writer=lambda _module_id, asset, _content: str(tmp_path / asset["name"]),
+    )
+    scene = ModuleService(database).scene_index(
+        campaign.id,
+        module_id=imported["module_id"],
+    )[0]
+
+    assert scene["visibility"] == "restricted"
+    assert scene["profile_data"]["stress"] == [{"loss": "1/1d4"}]
+    assert "profile_data" not in scene["profile_data"]
