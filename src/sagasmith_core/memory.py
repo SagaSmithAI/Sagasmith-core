@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Mapping
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from sagasmith_core.branches import resolve_branch
 from sagasmith_core.campaigns import CampaignNotFoundError
@@ -633,7 +633,21 @@ class MemoryService:
         )
         session.add(revision)
         session.flush()
-        head.revision_id = revision.id
+        changed = session.execute(
+            update(BranchFactHead)
+            .where(
+                BranchFactHead.branch_id == branch_id,
+                BranchFactHead.memory_id == memory.id,
+                BranchFactHead.revision_id == current.id,
+            )
+            .values(revision_id=revision.id),
+            execution_options={"synchronize_session": False},
+        ).rowcount
+        if changed != 1:
+            raise ValueError(
+                f"expected memory revision {current.id}, current revision changed concurrently"
+            )
+        session.expire(head)
         memory.updated_at = operational_utcnow()
         return self._info(memory, revision)
 

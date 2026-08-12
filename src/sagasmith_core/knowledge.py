@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from sagasmith_core.branches import resolve_branch
 from sagasmith_core.campaigns import CampaignNotFoundError
@@ -260,7 +260,23 @@ class ActorKnowledgeService:
         )
         session.add(revision)
         session.flush()
-        head.revision_id = revision.id
+        previous_revision_id = head.revision_id
+        changed = session.execute(
+            update(BranchActorKnowledgeHead)
+            .where(
+                BranchActorKnowledgeHead.branch_id == branch_id,
+                BranchActorKnowledgeHead.knowledge_id == knowledge.id,
+                BranchActorKnowledgeHead.revision_id == previous_revision_id,
+            )
+            .values(revision_id=revision.id),
+            execution_options={"synchronize_session": False},
+        ).rowcount
+        if changed != 1:
+            raise ValueError(
+                "expected actor-knowledge revision "
+                f"{previous_revision_id}, current revision changed concurrently"
+            )
+        session.expire(head)
         return self._info(knowledge, revision)
 
     def list(

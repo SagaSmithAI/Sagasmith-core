@@ -32,6 +32,9 @@ def test_bundled_migration_builds_schema(tmp_path: Path) -> None:
             and constraint["column_names"] == ["campaign_id", "branch_id", "idempotency_key"]
             for constraint in inspector.get_unique_constraints("mutation_groups")
         )
+        assert "reversible" in {
+            column["name"] for column in inspector.get_columns("mutation_groups")
+        }
         assert "event_sequence" in {column["name"] for column in inspector.get_columns("campaigns")}
         assert "campaign_event_participants" in inspector.get_table_names()
         assert {"event_id", "actor_id", "role"} == {

@@ -9,9 +9,10 @@ from sqlalchemy import select
 
 from sagasmith_core.branches import resolve_branch
 from sagasmith_core.campaigns import CampaignNotFoundError
+from sagasmith_core.concurrency import compare_and_swap_campaign
 from sagasmith_core.database import Database
 from sagasmith_core.events import EventService
-from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
+from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite, request_hash
 from sagasmith_core.knowledge import ActorKnowledgeService
 from sagasmith_core.memory import MemoryService
 from sagasmith_core.models import (
@@ -20,7 +21,9 @@ from sagasmith_core.models import (
     Campaign,
     CampaignMemory,
 )
+from sagasmith_core.modules import ModuleService
 from sagasmith_core.snapshots import SnapshotService
+from sagasmith_core.state import CharacterStateUpdate, StateMutationService
 
 FACT_KEY_WRITE_ACTIONS = frozenset({"add", "upsert"})
 
@@ -41,6 +44,13 @@ class ContinuityCommitService:
         event: dict[str, Any],
         facts: list[dict[str, Any]] | None = None,
         actor_knowledge: list[dict[str, Any]] | None = None,
+        campaign_state: dict[str, Any] | None = None,
+        character_updates: list[CharacterStateUpdate] | None = None,
+        scene_progress_updates: list[dict[str, Any]] | None = None,
+        expected_campaign_revision: int | None = None,
+        operation: str = "continuity.commit",
+        actor: str = "runtime",
+        rule_receipts: list[dict[str, Any]] | None = None,
         snapshot: dict[str, Any] | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
@@ -53,6 +63,83 @@ class ContinuityCommitService:
             idempotency = IdempotencyService(self.database)
             idempotency.require_uncommitted_in_session(session, idempotency_key, idempotency_write)
             branch = resolve_branch(session, campaign, branch_id)
+            updates = list(character_updates or [])
+            progress_updates = list(scene_progress_updates or [])
+            receipts = list(rule_receipts or [])
+            active_branch = campaign.active_branch_id == branch.id
+            if not active_branch and (
+                campaign_state is not None or updates or progress_updates or receipts
+            ):
+                raise ValueError(
+                    "state, progress, and rule receipts can be settled only on the active branch"
+                )
+            revision_rows = []
+            has_state_mutation = campaign_state is not None or bool(updates) or bool(receipts)
+            if active_branch and has_state_mutation:
+                revision_rows = StateMutationService(self.database).replace(
+                    campaign.id,
+                    campaign_state=(
+                        dict(campaign.state) if campaign_state is None else dict(campaign_state)
+                    ),
+                    character_updates=updates,
+                    expected_campaign_revision=(
+                        campaign.revision
+                        if expected_campaign_revision is None
+                        else expected_campaign_revision
+                    ),
+                    operation=operation,
+                    actor=actor,
+                    branch_id=branch.id,
+                    idempotency_key=idempotency_key,
+                    idempotency_request_hash=(
+                        request_hash(idempotency_write.payload)
+                        if idempotency_write is not None
+                        else None
+                    ),
+                    rule_receipts=receipts,
+                    reversible=False,
+                ) or []
+                session.expire(campaign)
+                session.refresh(campaign)
+            else:
+                compare_and_swap_campaign(
+                    session,
+                    campaign.id,
+                    expected_revision=(
+                        campaign.revision
+                        if expected_campaign_revision is None
+                        else expected_campaign_revision
+                    ),
+                    expected_branch_id=branch.id if active_branch else None,
+                    advance_revision=False,
+                )
+                session.expire(campaign)
+                session.refresh(campaign)
+
+            progress_results = []
+            modules = ModuleService(self.database)
+            for progress_update in progress_updates:
+                unknown = set(progress_update) - {
+                    "scene_id",
+                    "status",
+                    "progress",
+                    "state",
+                    "current_room",
+                    "current_location_key",
+                    "scope_id",
+                    "expected_state_version",
+                    "spatial_review",
+                }
+                if unknown:
+                    raise ValueError(
+                        "unsupported scene progress fields: " + ", ".join(sorted(unknown))
+                    )
+                progress_results.append(
+                    modules.set_scene_progress(
+                        campaign_id=campaign.id,
+                        **dict(progress_update),
+                    )
+                )
             event_info = self.events._add_in_session(
                 session,
                 campaign,
@@ -102,6 +189,9 @@ class ContinuityCommitService:
                 "event": asdict(event_info),
                 "facts": [asdict(item) for item in fact_results],
                 "actor_knowledge": [asdict(item) for item in knowledge_results],
+                "campaign_revision": campaign.revision,
+                "state_revisions": [asdict(item) for item in revision_rows],
+                "scene_progress": progress_results,
                 "snapshot": asdict(snapshot_result) if snapshot_result is not None else None,
             }
             idempotency.remember_write_in_session(
@@ -110,6 +200,9 @@ class ContinuityCommitService:
                 key=idempotency_key,
                 write=idempotency_write,
                 result=result,
+                mutation_group_id=(
+                    revision_rows[0].mutation_group_id if revision_rows else None
+                ),
             )
             return result
 

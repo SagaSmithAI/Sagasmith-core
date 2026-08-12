@@ -26,6 +26,7 @@ class RuleReceiptInfo:
     sequence: int
     applied: bool
     redoable: bool
+    reversible: bool
     created_at: datetime
 
 
@@ -79,5 +80,6 @@ class RuleReceiptService:
             sequence=group.sequence,
             applied=group.applied,
             redoable=group.redoable,
+            reversible=group.reversible,
             created_at=row.created_at,
         )

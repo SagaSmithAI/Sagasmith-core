@@ -19,6 +19,8 @@ from sagasmith_core.models import (
     StateRevision,
 )
 
+REVERSIBLE_ENTITY_TYPES = frozenset({"campaign", "character"})
+
 
 @dataclass(frozen=True)
 class RevisionInfo:
@@ -34,6 +36,7 @@ class RevisionInfo:
     mutation_group_id: str | None = None
     idempotency_key: str | None = None
     request_hash: str | None = None
+    reversible: bool = True
 
 
 class RevisionService:
@@ -75,6 +78,7 @@ class RevisionService:
         branch_id: str | None = None,
         idempotency_key: str | None = None,
         request_hash: str | None = None,
+        reversible: bool = True,
     ) -> list[RevisionInfo]:
         """Record one user-visible mutation touching one or many entities."""
         with self.database.transaction() as session:
@@ -87,6 +91,7 @@ class RevisionService:
                 branch_id=branch_id,
                 idempotency_key=idempotency_key,
                 request_hash=request_hash,
+                reversible=reversible,
             )
 
     def record_group_in_session(
@@ -100,10 +105,23 @@ class RevisionService:
         branch_id: str | None = None,
         idempotency_key: str | None = None,
         request_hash: str | None = None,
+        reversible: bool = True,
     ) -> list[RevisionInfo]:
         """Record a group inside an existing state transaction."""
         if not changes:
             raise ValueError("mutation group must contain at least one change")
+        unsupported = sorted(
+            {
+                str(change.get("entity_type") or "")
+                for change in changes
+                if str(change.get("entity_type") or "") not in REVERSIBLE_ENTITY_TYPES
+            }
+        )
+        if unsupported:
+            raise ValueError(
+                "revision groups support only reversible campaign/character documents; "
+                "unsupported entities: " + ", ".join(unsupported)
+            )
         campaign = session.get(Campaign, campaign_id)
         if campaign is None:
             raise CampaignNotFoundError(campaign_id)
@@ -136,6 +154,7 @@ class RevisionService:
             actor=actor,
             idempotency_key=idempotency_key,
             request_hash=request_hash,
+            reversible=reversible,
         )
         session.add(group)
         if self._has_redo(session, campaign_id, effective_branch_id):
@@ -208,6 +227,15 @@ class RevisionService:
             )
             if row is None:
                 raise LookupError("nothing to undo")
+            group = (
+                session.get(MutationGroup, row.mutation_group_id)
+                if row.mutation_group_id
+                else None
+            )
+            if group is not None and not group.reversible:
+                raise ValueError(
+                    "latest mutation is not reversible; restore a snapshot or branch"
+                )
             rows = self._group_rows(session, row)
             for member in sorted(rows, key=lambda item: item.sequence, reverse=True):
                 self._apply(
@@ -274,6 +302,10 @@ class RevisionService:
             group = session.scalar(statement.order_by(group_revision_sequence).limit(1))
             if group is None:
                 raise LookupError("nothing to redo")
+            if not group.reversible:
+                raise ValueError(
+                    "next mutation is not reversible; restore a snapshot or branch"
+                )
             rows = self._group_rows(session, group_id=group.id)
             for member in sorted(rows, key=lambda item: item.sequence):
                 self._apply(
@@ -433,4 +465,5 @@ class RevisionService:
                 mutation_group.idempotency_key if mutation_group is not None else None
             ),
             request_hash=(mutation_group.request_hash if mutation_group is not None else None),
+            reversible=(mutation_group.reversible if mutation_group is not None else True),
         )

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from sagasmith_core.database import Database
 from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
@@ -229,11 +229,7 @@ class ImportJobService:
                 idempotency_key,
                 idempotency_write,
             )
-            if expected_revision is not None and row.revision != expected_revision:
-                raise ImportJobError(
-                    "import job revision conflict: "
-                    f"expected {expected_revision}, found {row.revision}"
-                )
+            base_revision = row.revision if expected_revision is None else expected_revision
             values = [dict(item) for item in row.candidates or []]
             by_id = {str(item.get("id")): item for item in values}
             for decision in decisions:
@@ -284,19 +280,24 @@ class ImportJobService:
                     }
                 )
                 candidate["edit_history"] = history
-            row.candidates = values
             # Accepted/rejected are editable draft dispositions. Only
             # finalize_candidate_review may cross into the frozen reviewed state.
             next_state = "review_required"
             self._require_transition(row.state, next_state)
-            row.state = next_state
-            row.validation = {}
             result_value = dict(row.result or {})
             result_value.pop("review_finalization", None)
-            row.result = result_value
-            row.revision += 1
-            row.error = ""
-            session.flush()
+            self._compare_and_swap(
+                session,
+                row,
+                expected_revision=base_revision,
+                values={
+                    "candidates": values,
+                    "state": next_state,
+                    "validation": {},
+                    "result": result_value,
+                    "error": "",
+                },
+            )
             result = self._info(row)
             idempotency.remember_write_in_session(
                 session,
@@ -329,11 +330,7 @@ class ImportJobService:
                 idempotency_key,
                 idempotency_write,
             )
-            if expected_revision is not None and row.revision != expected_revision:
-                raise ImportJobError(
-                    "import job revision conflict: "
-                    f"expected {expected_revision}, found {row.revision}"
-                )
+            base_revision = row.revision if expected_revision is None else expected_revision
             if row.state not in {"extracted", "review_required"} or (
                 row.state == "extracted" and bool(row.candidates)
             ):
@@ -358,18 +355,23 @@ class ImportJobService:
             for value in values:
                 value["draft_state"] = "finalized"
             self._require_transition(row.state, "reviewed")
-            row.candidates = values
-            row.state = "reviewed"
-            row.revision += 1
-            row.error = ""
             result_value = dict(row.result or {})
             result_value["review_finalization"] = {
                 **dict(confirmation),
-                "candidate_revision": row.revision,
+                "candidate_revision": base_revision + 1,
                 "candidate_set_fingerprint": self._candidate_fingerprint(values),
             }
-            row.result = result_value
-            session.flush()
+            self._compare_and_swap(
+                session,
+                row,
+                expected_revision=base_revision,
+                values={
+                    "candidates": values,
+                    "state": "reviewed",
+                    "error": "",
+                    "result": result_value,
+                },
+            )
             result = self._info(row)
             idempotency.remember_write_in_session(
                 session,
@@ -463,23 +465,22 @@ class ImportJobService:
                 idempotency_key,
                 idempotency_write,
             )
-            if expected_revision is not None and row.revision != expected_revision:
-                raise ImportJobError(
-                    "import job revision conflict: "
-                    f"expected {expected_revision}, found {row.revision}"
-                )
+            base_revision = row.revision if expected_revision is None else expected_revision
             self._require_transition(row.state, state)
-            for key, value in fields.items():
-                setattr(row, key, value)
+            values = dict(fields)
             if state == "review_required" and "result" not in fields:
                 result_value = dict(row.result or {})
                 result_value.pop("review_finalization", None)
-                row.result = result_value
-            row.state = state
-            row.revision += 1
+                values["result"] = result_value
+            values["state"] = state
             if state != "failed" and "error" not in fields:
-                row.error = ""
-            session.flush()
+                values["error"] = ""
+            self._compare_and_swap(
+                session,
+                row,
+                expected_revision=base_revision,
+                values=values,
+            )
             result = self._info(row)
             idempotency.remember_write_in_session(
                 session,
@@ -489,6 +490,29 @@ class ImportJobService:
                 result=result,
             )
             return result
+
+    @staticmethod
+    def _compare_and_swap(
+        session: Any,
+        row: ImportJob,
+        *,
+        expected_revision: int,
+        values: dict[str, Any],
+    ) -> None:
+        changed = session.execute(
+            update(ImportJob)
+            .where(
+                ImportJob.id == row.id,
+                ImportJob.revision == int(expected_revision),
+            )
+            .values(**values, revision=ImportJob.revision + 1)
+            .returning(ImportJob.revision),
+            execution_options={"synchronize_session": False},
+        ).scalar_one_or_none()
+        if changed is None:
+            raise ImportJobError(f"import job revision conflict: expected {expected_revision}")
+        session.expire(row)
+        session.refresh(row)
 
     @staticmethod
     def _row(session: Any, job_id: str) -> ImportJob:

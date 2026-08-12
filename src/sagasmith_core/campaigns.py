@@ -8,6 +8,7 @@ from typing import Any
 
 from sqlalchemy import select
 
+from sagasmith_core.concurrency import compare_and_swap_campaign
 from sagasmith_core.database import Database
 from sagasmith_core.idempotency import (
     IdempotencyService,
@@ -227,20 +228,26 @@ class CampaignService:
             row = session.get(Campaign, campaign_id)
             if row is None:
                 raise CampaignNotFoundError(campaign_id)
-            if expected_revision is not None and row.revision != expected_revision:
-                raise ValueError(f"campaign revision conflict: {campaign_id}")
+            base_revision = row.revision if expected_revision is None else expected_revision
+            values: dict[str, object] = {}
             if name is not None:
-                row.name = name
+                values["name"] = name
             if status is not None:
-                row.status = status
+                values["status"] = status
             if description is not None:
-                row.description = description
+                values["description"] = description
             if settings is not None:
-                row.settings = settings
+                values["settings"] = settings
             if state is not None:
-                row.state = state
-            row.revision += 1
-            session.flush()
+                values["state"] = state
+            compare_and_swap_campaign(
+                session,
+                campaign_id,
+                expected_revision=base_revision,
+                values=values,
+            )
+            session.expire(row)
+            session.refresh(row)
             return self._info(row)
 
     def update_audited(
@@ -284,8 +291,7 @@ class CampaignService:
                 )
             ):
                 raise ValueError("idempotency key already has a committed campaign mutation")
-            if expected_revision is not None and row.revision != expected_revision:
-                raise ValueError(f"campaign revision conflict: {campaign_id}")
+            base_revision = row.revision if expected_revision is None else expected_revision
             before = {
                 "name": row.name,
                 "status": row.status,
@@ -294,18 +300,26 @@ class CampaignService:
                 "state": dict(row.state),
                 "revision": row.revision,
             }
+            values: dict[str, object] = {}
             if name is not None:
-                row.name = name
+                values["name"] = name
             if status is not None:
-                row.status = status
+                values["status"] = status
             if description is not None:
-                row.description = description
+                values["description"] = description
             if settings is not None:
-                row.settings = settings
+                values["settings"] = settings
             if state is not None:
-                row.state = state
-            row.revision += 1
-            session.flush()
+                values["state"] = state
+            compare_and_swap_campaign(
+                session,
+                campaign_id,
+                expected_revision=base_revision,
+                expected_branch_id=effective_branch_id,
+                values=values,
+            )
+            session.expire(row)
+            session.refresh(row)
             after = {
                 "name": row.name,
                 "status": row.status,

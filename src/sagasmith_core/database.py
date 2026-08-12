@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from collections.abc import Generator, Iterator
 from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +59,10 @@ class Database:
             autoflush=False,
             expire_on_commit=False,
         )
+        self._ambient_session: ContextVar[Session | None] = ContextVar(
+            f"sagasmith_database_session_{id(self)}",
+            default=None,
+        )
 
     @staticmethod
     def _enable_sqlite_foreign_keys(dbapi_connection: Any, _record: Any) -> None:
@@ -76,14 +81,17 @@ class Database:
 
     @contextmanager
     def transaction(self) -> Iterator[Session]:
+        ambient = self._ambient_session.get()
+        if ambient is not None:
+            yield ambient
+            return
         session = self.session_factory()
+        token = self._ambient_session.set(session)
         try:
-            yield session
-            session.commit()
-        except Exception:
-            session.rollback()
-            raise
+            with session.begin():
+                yield session
         finally:
+            self._ambient_session.reset(token)
             session.close()
 
     def dependency(self) -> Generator[Session, None, None]:

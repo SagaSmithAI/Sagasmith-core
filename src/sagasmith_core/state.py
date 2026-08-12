@@ -7,10 +7,12 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy import update as sql_update
 
 from sagasmith_core.branches import resolve_branch
 from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.characters import CharacterNotFoundError
+from sagasmith_core.concurrency import compare_and_swap_campaign
 from sagasmith_core.database import Database
 from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite, request_hash
 from sagasmith_core.knowledge import (
@@ -80,6 +82,7 @@ class StateMutationService:
         idempotency_request_hash: str | None = None,
         idempotency_write: IdempotencyWrite | None = None,
         rule_receipts: list[dict[str, Any]] | None = None,
+        reversible: bool = True,
     ) -> list[RevisionInfo] | None:
         updates = list(character_updates or [])
         knowledge_transfers = list(actor_knowledge_transfers or [])
@@ -124,14 +127,11 @@ class StateMutationService:
                 "state": dict(campaign.state),
                 "revision": campaign.revision,
             }
-            if (
-                expected_campaign_revision is not None
-                and campaign.revision != expected_campaign_revision
-            ):
-                raise ValueError(
-                    "campaign revision conflict: "
-                    f"expected {expected_campaign_revision}, found {campaign.revision}"
-                )
+            campaign_base_revision = (
+                campaign.revision
+                if expected_campaign_revision is None
+                else expected_campaign_revision
+            )
             if idempotency_key and session.scalar(
                 select(MutationGroup.id).where(
                     MutationGroup.campaign_id == campaign_id,
@@ -151,11 +151,6 @@ class StateMutationService:
                     raise CharacterNotFoundError(update.character_id)
                 if row.campaign_id != campaign_id:
                     raise ValueError("character must belong to the target campaign")
-                if (
-                    update.expected_revision is not None
-                    and row.revision != update.expected_revision
-                ):
-                    raise ValueError(f"character revision conflict: {update.character_id}")
                 before_characters[row.id] = {
                     "name": row.name,
                     "player_name": row.player_name,
@@ -245,20 +240,48 @@ class StateMutationService:
                         disclosure_scope=transfer.disclosure_scope,
                     )
 
-            if campaign_state is not None:
-                campaign.state = dict(campaign_state)
-                campaign.revision += 1
-            for row, update in rows:
-                if update.name is not None:
-                    row.name = update.name
-                if update.player_name is not None:
-                    row.player_name = update.player_name
-                if update.summary is not None:
-                    row.summary = update.summary
-                row.sheet = dict(update.sheet)
-                row.notes = dict(update.notes)
-                row.revision += 1
-            session.flush()
+            compare_and_swap_campaign(
+                session,
+                campaign_id,
+                expected_revision=campaign_base_revision,
+                expected_branch_id=effective_branch_id,
+                values=(
+                    {"state": dict(campaign_state)} if campaign_state is not None else None
+                ),
+                advance_revision=campaign_state is not None,
+            )
+            session.expire(campaign)
+            session.refresh(campaign)
+            for row, item in rows:
+                character_base_revision = (
+                    row.revision if item.expected_revision is None else item.expected_revision
+                )
+                values: dict[str, Any] = {
+                    "sheet": dict(item.sheet),
+                    "notes": dict(item.notes),
+                    "revision": Character.revision + 1,
+                }
+                if item.name is not None:
+                    values["name"] = item.name
+                if item.player_name is not None:
+                    values["player_name"] = item.player_name
+                if item.summary is not None:
+                    values["summary"] = item.summary
+                changed = session.execute(
+                    sql_update(Character)
+                    .where(
+                        Character.id == row.id,
+                        Character.campaign_id == campaign_id,
+                        Character.revision == character_base_revision,
+                    )
+                    .values(**values)
+                    .returning(Character.revision),
+                    execution_options={"synchronize_session": False},
+                ).scalar_one_or_none()
+                if changed is None:
+                    raise ValueError(f"character revision conflict: {row.id}")
+                session.expire(row)
+                session.refresh(row)
             if operation is None:
                 return None
             changes: list[dict[str, Any]] = []
@@ -324,6 +347,10 @@ class StateMutationService:
                 )
                 if idempotency_key
                 else None,
+                # Actor-knowledge revisions live in a separate branch ledger.
+                # Document-only undo must never rewind the campaign while
+                # leaving a copied belief behind.
+                reversible=reversible and not knowledge_transfers,
             )
             mutation_group_id = revisions[0].mutation_group_id
             if receipts and mutation_group_id is None:

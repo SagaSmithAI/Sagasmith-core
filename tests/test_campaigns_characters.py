@@ -3,6 +3,7 @@ from sqlalchemy import func, select
 
 from sagasmith_core.campaigns import CampaignService
 from sagasmith_core.characters import CharacterService
+from sagasmith_core.concurrency import compare_and_swap_campaign
 from sagasmith_core.models import Campaign, CampaignRuleProfile
 from sagasmith_core.rule_profiles import RuleProfileService
 
@@ -35,6 +36,35 @@ def test_character_cannot_bind_across_systems(database) -> None:
 
     with pytest.raises(ValueError):
         characters.bind(hero.id, coc.id)
+
+
+def test_campaign_compare_and_swap_rejects_a_second_process_writer(database) -> None:
+    campaign = CampaignService(database).create(system_id="neutral", name="CAS")
+    first = database.session_factory()
+    second = database.session_factory()
+    try:
+        first.get(Campaign, campaign.id)
+        second.get(Campaign, campaign.id)
+        compare_and_swap_campaign(
+            first,
+            campaign.id,
+            expected_revision=campaign.revision,
+            values={"state": {"winner": "first"}},
+        )
+        first.commit()
+        with pytest.raises(ValueError, match="campaign revision conflict"):
+            compare_and_swap_campaign(
+                second,
+                campaign.id,
+                expected_revision=campaign.revision,
+                values={"state": {"winner": "second"}},
+            )
+    finally:
+        first.close()
+        second.rollback()
+        second.close()
+
+    assert CampaignService(database).get(campaign.id).state == {"winner": "first"}
 
 
 def test_character_instantiation_overrides_template_notes(database) -> None:

@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from sagasmith_core.campaigns import CampaignNotFoundError
+from sagasmith_core.concurrency import compare_and_swap_campaign
 from sagasmith_core.database import Database
 from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
 from sagasmith_core.integrity import canonical_json
@@ -235,6 +236,8 @@ class BranchService:
         name: str,
         from_snapshot_id: str | None = None,
         checkout: bool = False,
+        expected_revision: int | None = None,
+        expected_branch_id: str | None = None,
         idempotency_key: str | None = None,
         idempotency_write: IdempotencyWrite | None = None,
     ) -> BranchInfo:
@@ -244,6 +247,17 @@ class BranchService:
                 raise CampaignNotFoundError(campaign_id)
             idempotency = IdempotencyService(self.database)
             idempotency.require_uncommitted_in_session(session, idempotency_key, idempotency_write)
+            compare_and_swap_campaign(
+                session,
+                campaign_id,
+                expected_revision=(
+                    campaign.revision if expected_revision is None else expected_revision
+                ),
+                expected_branch_id=expected_branch_id or campaign.active_branch_id,
+                advance_revision=not checkout,
+            )
+            session.expire(campaign)
+            session.refresh(campaign)
             current = resolve_branch(session, campaign) if campaign.active_branch_id else None
             source_id = from_snapshot_id or (current.head_snapshot_id if current else None)
             if current is not None and source_id is None:
@@ -309,6 +323,8 @@ class BranchService:
         campaign_id: str,
         branch_id: str,
         *,
+        expected_revision: int | None = None,
+        expected_branch_id: str | None = None,
         idempotency_key: str | None = None,
         idempotency_write: IdempotencyWrite | None = None,
     ) -> BranchInfo:
@@ -318,6 +334,17 @@ class BranchService:
                 raise CampaignNotFoundError(campaign_id)
             idempotency = IdempotencyService(self.database)
             idempotency.require_uncommitted_in_session(session, idempotency_key, idempotency_write)
+            compare_and_swap_campaign(
+                session,
+                campaign_id,
+                expected_revision=(
+                    campaign.revision if expected_revision is None else expected_revision
+                ),
+                expected_branch_id=expected_branch_id or campaign.active_branch_id,
+                advance_revision=False,
+            )
+            session.expire(campaign)
+            session.refresh(campaign)
             row = session.get(CampaignBranch, branch_id)
             if row is None or row.campaign_id != campaign_id:
                 raise LookupError(branch_id)
@@ -466,6 +493,7 @@ class BranchService:
                     actor=old_group.actor,
                     idempotency_key=None,
                     request_hash=None,
+                    reversible=old_group.reversible,
                     applied=all(bool(cursor[row.id].get("applied", True)) for row in group_rows),
                     redoable=all(bool(cursor[row.id].get("redoable", True)) for row in group_rows),
                 )

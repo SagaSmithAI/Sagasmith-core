@@ -526,6 +526,7 @@ class MutationGroup(Base):
     actor: Mapped[str] = mapped_column(String(100), default="runtime")
     idempotency_key: Mapped[str | None] = mapped_column(String(200), nullable=True, index=True)
     request_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    reversible: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
     applied: Mapped[bool] = mapped_column(Boolean, default=True)
     redoable: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(

@@ -10,6 +10,7 @@ from typing import Any
 from sqlalchemy import select
 
 from sagasmith_core.campaigns import CampaignNotFoundError
+from sagasmith_core.concurrency import compare_and_swap_character
 from sagasmith_core.content_pack import validate_actor_card
 from sagasmith_core.database import Database
 from sagasmith_core.idempotency import IdempotencyService
@@ -324,31 +325,50 @@ class CharacterService:
             row = session.get(Character, character_id)
             if row is None:
                 raise CharacterNotFoundError(character_id)
-            if expected_revision is not None and row.revision != expected_revision:
-                raise ValueError(f"character revision conflict: {character_id}")
+            base_revision = row.revision if expected_revision is None else expected_revision
+            values: dict[str, object] = {}
             if name is not None:
-                row.name = name
+                values["name"] = name
             if player_name is not None:
-                row.player_name = player_name
+                values["player_name"] = player_name
             if summary is not None:
-                row.summary = summary
+                values["summary"] = summary
             if sheet is not None:
-                row.sheet = sheet
+                values["sheet"] = sheet
             if notes is not None:
-                row.notes = notes
-            row.revision += 1
-            session.flush()
+                values["notes"] = notes
+            compare_and_swap_character(
+                session,
+                character_id,
+                expected_revision=base_revision,
+                values=values,
+            )
+            session.expire(row)
+            session.refresh(row)
             return self._info(row)
 
-    def bind(self, character_id: str, campaign_id: str | None) -> CharacterInfo:
+    def bind(
+        self,
+        character_id: str,
+        campaign_id: str | None,
+        *,
+        expected_revision: int | None = None,
+    ) -> CharacterInfo:
         with self.database.transaction() as session:
             row = session.get(Character, character_id)
             if row is None:
                 raise CharacterNotFoundError(character_id)
             self._validate_campaign(session, row.system_id, campaign_id)
-            row.campaign_id = campaign_id
-            row.revision += 1
-            session.flush()
+            compare_and_swap_character(
+                session,
+                character_id,
+                expected_revision=(
+                    row.revision if expected_revision is None else expected_revision
+                ),
+                values={"campaign_id": campaign_id},
+            )
+            session.expire(row)
+            session.refresh(row)
             return self._info(row)
 
     @staticmethod

@@ -14,6 +14,7 @@ from sqlalchemy import delete, func, or_, select, update
 
 from sagasmith_core.branches import BranchService, resolve_branch
 from sagasmith_core.campaigns import CampaignNotFoundError
+from sagasmith_core.concurrency import compare_and_swap_campaign
 from sagasmith_core.database import Database
 from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
 from sagasmith_core.integrity import json_sha256
@@ -218,6 +219,8 @@ class SnapshotService:
         campaign_id: str,
         slot: int,
         *,
+        expected_revision: int | None = None,
+        expected_branch_id: str | None = None,
         idempotency_key: str | None = None,
         idempotency_write: IdempotencyWrite | None = None,
     ) -> SnapshotInfo:
@@ -227,6 +230,17 @@ class SnapshotService:
                 raise CampaignNotFoundError(campaign_id)
             idempotency = IdempotencyService(self.database)
             idempotency.require_uncommitted_in_session(session, idempotency_key, idempotency_write)
+            compare_and_swap_campaign(
+                session,
+                campaign_id,
+                expected_revision=(
+                    campaign.revision if expected_revision is None else expected_revision
+                ),
+                expected_branch_id=expected_branch_id or campaign.active_branch_id,
+                advance_revision=False,
+            )
+            session.expire(campaign)
+            session.refresh(campaign)
             target = self._row(session, campaign_id, slot)
             self._assert_integrity(session, target)
             self._create_in_session(session, campaign, label=f"Before restore to slot {slot}")
@@ -267,6 +281,8 @@ class SnapshotService:
         rule_profile: dict[str, Any],
         branch_name: str,
         label: str,
+        expected_revision: int | None = None,
+        expected_branch_id: str | None = None,
         idempotency_key: str | None = None,
         idempotency_write: IdempotencyWrite | None = None,
     ) -> SnapshotInfo:
@@ -295,6 +311,17 @@ class SnapshotService:
                 idempotency_key,
                 idempotency_write,
             )
+            compare_and_swap_campaign(
+                session,
+                campaign_id,
+                expected_revision=(
+                    campaign.revision if expected_revision is None else expected_revision
+                ),
+                expected_branch_id=expected_branch_id or campaign.active_branch_id,
+                advance_revision=False,
+            )
+            session.expire(campaign)
+            session.refresh(campaign)
             if profile_value["system_id"] != campaign.system_id:
                 raise ValueError("converted rule profile system_id does not match the campaign")
             target = self._row(session, campaign_id, slot)
@@ -344,12 +371,30 @@ class SnapshotService:
             )
             return result
 
-    def checkout_branch(self, campaign_id: str, branch_id: str) -> SnapshotInfo | None:
+    def checkout_branch(
+        self,
+        campaign_id: str,
+        branch_id: str,
+        *,
+        expected_revision: int | None = None,
+        expected_branch_id: str | None = None,
+    ) -> SnapshotInfo | None:
         """Materialize a branch head without creating or deleting history."""
         with self.database.transaction() as session:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
+            compare_and_swap_campaign(
+                session,
+                campaign_id,
+                expected_revision=(
+                    campaign.revision if expected_revision is None else expected_revision
+                ),
+                expected_branch_id=expected_branch_id or campaign.active_branch_id,
+                advance_revision=False,
+            )
+            session.expire(campaign)
+            session.refresh(campaign)
             branch_row = session.get(CampaignBranch, branch_id)
             if branch_row is None or branch_row.campaign_id != campaign_id:
                 raise LookupError(branch_id)
