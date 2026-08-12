@@ -117,6 +117,17 @@ def test_principal_membership_and_actor_grants_are_explicit(database) -> None:
     assert partial.can_control is True
     assert partial.can_view_private is True
 
+    revoked = access.revoke_campaign(campaign.id, "user:alice")
+    assert revoked.previous_role == "player"
+    assert revoked.revoked_actor_grants == 1
+    assert revoked.revoked is True
+    assert access.membership(campaign.id, "user:alice") is None
+    with pytest.raises(AccessDeniedError):
+        access.require_actor(campaign.id, actor.id, "user:alice", control=True)
+    replay = access.revoke_campaign(campaign.id, "user:alice")
+    assert replay.revoked is False
+    assert replay.revoked_actor_grants == 0
+
 
 def test_campaign_role_cannot_forge_unknown_actor(database) -> None:
     campaigns = CampaignService(database)

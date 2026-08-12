@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.database import Database
@@ -50,6 +50,15 @@ class ActorGrantInfo:
     actor_id: str
     can_control: bool
     can_view_private: bool
+
+
+@dataclass(frozen=True)
+class CampaignAccessRevocationInfo:
+    campaign_id: str
+    principal_id: str
+    previous_role: str | None
+    revoked_actor_grants: int
+    revoked: bool
 
 
 class AccessService:
@@ -149,6 +158,37 @@ class AccessService:
                 row.actor_id,
                 row.can_control,
                 row.can_view_private,
+            )
+
+    def revoke_campaign(
+        self, campaign_id: str, principal_id: str
+    ) -> CampaignAccessRevocationInfo:
+        """Atomically remove one membership and every actor grant beneath it."""
+
+        with self.database.transaction() as session:
+            if session.get(Campaign, campaign_id) is None:
+                raise CampaignNotFoundError(campaign_id)
+            membership = session.get(
+                CampaignMembership,
+                {"campaign_id": campaign_id, "principal_id": principal_id},
+            )
+            if membership is None:
+                return CampaignAccessRevocationInfo(campaign_id, principal_id, None, 0, False)
+            previous_role = membership.role
+            actor_result = session.execute(
+                delete(ActorGrant).where(
+                    ActorGrant.campaign_id == campaign_id,
+                    ActorGrant.principal_id == principal_id,
+                )
+            )
+            session.delete(membership)
+            session.flush()
+            return CampaignAccessRevocationInfo(
+                campaign_id,
+                principal_id,
+                previous_role,
+                int(actor_result.rowcount or 0),
+                True,
             )
 
     def membership(self, campaign_id: str, principal_id: str) -> MembershipInfo | None:
