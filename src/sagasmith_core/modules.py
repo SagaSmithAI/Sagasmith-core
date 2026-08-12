@@ -1177,8 +1177,7 @@ class ModuleService:
             )
             if invalid_catalogs:
                 raise ValueError(
-                    "module catalogs fields must contain arrays: "
-                    + ", ".join(invalid_catalogs)
+                    "module catalogs fields must contain arrays: " + ", ".join(invalid_catalogs)
                 )
         if narrative is not None:
             required_narrative_fields = {"dossiers", "endings"}
@@ -1545,7 +1544,10 @@ class ModuleService:
         document = documents[primary["source_key"]]
         result = self.ingest(
             campaign_id=campaign_id,
-            source_key=primary["source_key"],
+            # Package decisions can change while normalized source text stays
+            # byte-identical. Include the Pack checksum in staged identity so
+            # distinct finalized versions never collapse into one candidate.
+            source_key=(f"{primary['source_key']}--content-pack-{str(value['checksum'])[:12]}"),
             logical_source_key=primary["source_key"],
             title=primary["title"],
             content=document,
@@ -2428,6 +2430,43 @@ class ModuleService:
                 row=row,
                 explicit_remaps=explicit_remaps,
             )
+            idempotency.remember_write_in_session(
+                session,
+                campaign_id=campaign_id,
+                key=idempotency_key,
+                write=idempotency_write,
+                result=result,
+            )
+            return result
+
+    def deactivate_candidate(
+        self,
+        campaign_id: str,
+        module_id: str,
+        *,
+        idempotency_key: str | None = None,
+        idempotency_write: IdempotencyWrite | None = None,
+    ) -> dict[str, Any]:
+        """Atomically stop using one module without deleting its history."""
+
+        with self.database.transaction() as session:
+            idempotency = IdempotencyService(self.database)
+            idempotency.require_uncommitted_in_session(
+                session,
+                idempotency_key,
+                idempotency_write,
+            )
+            row = session.get(ModuleSource, module_id)
+            if row is None or row.campaign_id != campaign_id:
+                raise LookupError(module_id)
+            was_active = bool(row.active)
+            row.active = False
+            session.flush()
+            result = {
+                "module_id": row.id,
+                "active": False,
+                "changed": was_active,
+            }
             idempotency.remember_write_in_session(
                 session,
                 campaign_id=campaign_id,

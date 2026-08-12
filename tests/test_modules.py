@@ -34,9 +34,7 @@ def test_module_source_evidence_contract_has_one_canonical_normalizer() -> None:
         == "The dragon's hoard-transformed HERE."
     )
     assert (
-        normalize_source_evidence_text(
-            "\x02The dragon\u2019s \u00adhoard\u2014trans￾ formed HERE."
-        )
+        normalize_source_evidence_text("\x02The dragon\u2019s \u00adhoard\u2014trans￾ formed HERE.")
         == "the dragon's hoard-transformed here."
     )
 
@@ -345,9 +343,7 @@ def test_module_profile_metadata_errors_are_editing_advisories(database, tmp_pat
     preview = ModuleService(database).preview_path(source, parser=parser)
     assert preview["valid"] is True
     assert preview["errors"] == []
-    assert preview["warnings"] == [
-        "runtime manifest advisory: duplicate id: npc:keeper"
-    ]
+    assert preview["warnings"] == ["runtime manifest advisory: duplicate id: npc:keeper"]
 
     campaign = CampaignService(database).create(system_id="dnd5e", name="Invalid")
     ingested = ModuleService(database).ingest_path(
@@ -589,6 +585,40 @@ def test_module_candidate_activation_rolls_back_when_receipt_fails(database) -> 
 
     with database.transaction() as session:
         assert session.get(ModuleSource, result.module_id).active is False
+
+
+def test_module_candidate_deactivation_and_exact_receipt_commit_together(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Deactivate module")
+    service = ModuleService(database)
+    result = service.ingest(
+        campaign_id=campaign.id,
+        source_key="module",
+        logical_source_key="module",
+        title="Module",
+        content="# Chapter\nBody.\n",
+    )
+    payload = {"module_id": result.module_id}
+    scope = f"module-deactivation:{campaign.id}"
+
+    deactivation = service.deactivate_candidate(
+        campaign.id,
+        result.module_id,
+        idempotency_key="deactivate",
+        idempotency_write=IdempotencyWrite(
+            scope=scope,
+            payload=payload,
+            response=lambda value: {"deactivation": value},
+        ),
+    )
+
+    replay = IdempotencyService(database).lookup(scope, "deactivate", payload)
+    assert deactivation == {
+        "module_id": result.module_id,
+        "active": False,
+        "changed": True,
+    }
+    assert replay is not None
+    assert replay.response == {"deactivation": deactivation}
 
 
 def test_module_activation_remaps_progress_by_stable_scene_identity(database) -> None:
