@@ -2636,6 +2636,39 @@ class ModuleService:
                 raise LookupError(module_id)
             session.delete(row)
 
+    def delete_candidate(
+        self,
+        campaign_id: str,
+        module_id: str,
+        *,
+        idempotency_key: str,
+        idempotency_write: IdempotencyWrite,
+    ) -> dict[str, Any]:
+        """Delete one inactive candidate and commit its exact receipt atomically."""
+
+        with self.database.transaction() as session:
+            idempotency = IdempotencyService(self.database)
+            idempotency.require_uncommitted_in_session(
+                session,
+                idempotency_key,
+                idempotency_write,
+            )
+            row = session.get(ModuleSource, module_id)
+            if row is None or row.campaign_id != campaign_id:
+                raise LookupError(module_id)
+            if row.active:
+                raise ValueError("cannot delete an active module candidate")
+            session.delete(row)
+            result = {"module_id": module_id, "removed": True}
+            idempotency.remember_write_in_session(
+                session,
+                campaign_id=campaign_id,
+                key=idempotency_key,
+                write=idempotency_write,
+                result=result,
+            )
+            return result
+
     def search(
         self,
         *,
