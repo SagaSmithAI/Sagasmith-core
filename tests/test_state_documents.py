@@ -2581,7 +2581,7 @@ def test_actor_event_authorization_is_not_limited_by_knowledge_top_n(database) -
     assert [item["id"] for item in context["events"]] == [event.id]
 
 
-def test_player_continuity_redacts_keeper_scene_content_and_progress_state(database) -> None:
+def test_player_continuity_redacts_restricted_scene_content_and_progress_state(database) -> None:
     campaign = CampaignService(database).create(system_id="neutral", name="Private scene")
     modules = ModuleService(database)
     modules.ingest(
@@ -2604,7 +2604,7 @@ def test_player_continuity_redacts_keeper_scene_content_and_progress_state(datab
 
     projected = context["scoped_scene"]
     assert projected["redacted"] is True
-    assert projected["content"] == "[GM-only scene content hidden]"
+    assert projected["content"] == "[Restricted scene content hidden]"
     assert projected["progress"] == {
         "status": "current",
         "percent": 0,
@@ -3395,6 +3395,8 @@ def test_state_mutation_atomically_transfers_complete_actor_knowledge(database) 
     assert copied[0].cause == "body_thief"
     assert copied[0].disclosure_scope == "dm"
     assert CampaignService(database).get(campaign.id).state == {"phase": "body-taken"}
+    with pytest.raises(ValueError, match="restore a snapshot or branch"):
+        RevisionService(database).undo(campaign.id)
 
 
 def test_state_mutation_transfers_only_explicit_actor_knowledge_ids(database) -> None:
@@ -3878,6 +3880,111 @@ def test_state_mutation_persists_rule_receipts_in_the_same_group(database) -> No
         is False
     )
     assert RuleReceiptService(database).list(campaign.id, branch_id=fork.id)[0].applied is True
+
+
+def test_continuity_commit_coordinates_state_progress_receipts_and_rollback(database) -> None:
+    campaign = CampaignService(database).create(system_id="neutral", name="Full settlement")
+    characters = CharacterService(database)
+    actor = characters.create(
+        system_id="neutral",
+        campaign_id=campaign.id,
+        name="Mira",
+        sheet={"resolve": 1},
+    )
+    modules = ModuleService(database)
+    modules.ingest(
+        campaign_id=campaign.id,
+        source_key="settlement.md",
+        title="Settlement",
+        content="# Chapter\n## Scene\nA choice changes the road.",
+    )
+    scene_id = modules.scene_index(campaign.id)[0]["scene_id"]
+    result = ContinuityCommitService(database).commit(
+        campaign.id,
+        expected_campaign_revision=campaign.revision,
+        campaign_state={"chapter": "two"},
+        character_updates=[
+            CharacterStateUpdate(
+                character_id=actor.id,
+                expected_revision=actor.revision,
+                sheet={"resolve": 2},
+                notes={},
+            )
+        ],
+        scene_progress_updates=[
+            {"scene_id": scene_id, "progress": 50, "expected_state_version": 0}
+        ],
+        event={"event_type": "choice", "summary": "The road changes."},
+        facts=[{"fact_key": "road.changed", "content": "The road changed."}],
+        rule_receipts=[
+            {
+                "ruleset_fingerprint": "neutral-profile",
+                "mechanic_id": "choice.resolve",
+                "event": "choice",
+            }
+        ],
+    )
+    assert result["campaign_revision"] == campaign.revision + 1
+    assert CampaignService(database).get(campaign.id).state == {"chapter": "two"}
+    assert characters.get(actor.id).sheet == {"resolve": 2}
+    assert modules.current_scene(campaign.id)["progress"]["percent"] == 50
+    assert RuleReceiptService(database).list(campaign.id)[0].mechanic_id == "choice.resolve"
+    with pytest.raises(ValueError, match="restore a snapshot or branch"):
+        RevisionService(database).undo(campaign.id)
+    assert CampaignService(database).get(campaign.id).state == {"chapter": "two"}
+    assert len(EventService(database).list(campaign.id)) == 1
+    assert MemoryService(database).list(campaign.id)[0].fact_key == "road.changed"
+
+    current = CampaignService(database).get(campaign.id)
+    current_actor = characters.get(actor.id)
+    with pytest.raises(ValueError, match="content is required"):
+        ContinuityCommitService(database).commit(
+            campaign.id,
+            expected_campaign_revision=current.revision,
+            campaign_state={"chapter": "corrupt"},
+            character_updates=[
+                CharacterStateUpdate(
+                    character_id=actor.id,
+                    expected_revision=current_actor.revision,
+                    sheet={"resolve": 99},
+                    notes={},
+                )
+            ],
+            scene_progress_updates=[
+                {"scene_id": scene_id, "progress": 99, "expected_state_version": 1}
+            ],
+            event={"event_type": "broken", "summary": "This must roll back."},
+            facts=[{"fact_key": "broken.fact"}],
+        )
+    assert CampaignService(database).get(campaign.id).state == {"chapter": "two"}
+    assert characters.get(actor.id).sheet == {"resolve": 2}
+    assert modules.current_scene(campaign.id)["progress"]["percent"] == 50
+
+
+def test_restore_and_checkout_enforce_campaign_head_preconditions(database) -> None:
+    campaigns = CampaignService(database)
+    campaign = campaigns.create(system_id="neutral", name="Recovery CAS")
+    snapshots = SnapshotService(database)
+    snapshot = snapshots.create(campaign.id, label="base")
+    branch = BranchService(database).create(campaign.id, name="alternate")
+    stale = campaigns.get(campaign.id)
+    campaigns.update(campaign.id, state={"newer": True}, expected_revision=stale.revision)
+
+    with pytest.raises(ValueError, match="campaign revision conflict"):
+        snapshots.restore(
+            campaign.id,
+            snapshot.slot,
+            expected_revision=stale.revision,
+            expected_branch_id=BranchService(database).current(campaign.id).id,
+        )
+    with pytest.raises(ValueError, match="campaign revision conflict"):
+        BranchService(database).checkout(
+            campaign.id,
+            branch.id,
+            expected_revision=stale.revision,
+            expected_branch_id=BranchService(database).current(campaign.id).id,
+        )
+    assert campaigns.get(campaign.id).state == {"newer": True}
 
 
 def test_pdf_normalization_and_module_generator_structure(database) -> None:

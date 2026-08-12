@@ -547,6 +547,7 @@ def validate_content_package(value: Mapping[str, Any]) -> dict[str, Any]:
                 "a supported image media type"
             )
     source_keys: set[str] = set()
+    source_bounds: dict[str, int] = {}
     chunk_owners: dict[str, str] = {}
     normalized_asset_keys: set[str] = set()
     for source_index, source in enumerate(result["sources"]):
@@ -688,6 +689,102 @@ def validate_content_package(value: Mapping[str, Any]) -> dict[str, Any]:
                     chunk["metadata"], dict
                 ):
                     raise ContentPackageError(f"{chunk_field} headings or metadata is invalid")
+        source_bounds[source_key] = max(
+            int(section["end_offset"]) for section in source["sections"]
+        )
+    module_scene_keys: set[str] = set()
+    module_scene_ordinals: set[tuple[int, int]] = set()
+    if result["kind"] == "module":
+        finalization = result["metadata"].get("agent_finalization")
+        if not isinstance(finalization, dict):
+            raise ContentPackageError(
+                "module content_package.metadata.agent_finalization is required"
+            )
+        _exact(finalization, {"confirmed", "reviewer", "note"}, "agent_finalization")
+        if finalization["confirmed"] is not True:
+            raise ContentPackageError("module content package requires Agent confirmation")
+        _text(finalization["reviewer"], "agent_finalization.reviewer", maximum=2000)
+        _text(finalization["note"], "agent_finalization.note", maximum=2000)
+        scene_atlas = result["content"].get("scene_atlas")
+        if not isinstance(scene_atlas, list) or not scene_atlas:
+            raise ContentPackageError("module packages require a non-empty scene_atlas")
+        for scene_index, scene in enumerate(scene_atlas):
+            field = f"content_package.content.scene_atlas[{scene_index}]"
+            if not isinstance(scene, dict):
+                raise ContentPackageError(f"{field} must be an object")
+            _exact(
+                scene,
+                {
+                    "stable_key",
+                    "title",
+                    "chapter",
+                    "chapter_ordinal",
+                    "scene_ordinal",
+                    "scene_type",
+                    "page_start",
+                    "page_end",
+                    "headings",
+                    "keywords",
+                    "metadata",
+                    "source_span",
+                    "source_refs",
+                },
+                field,
+            )
+            stable_key = _text(scene.get("stable_key"), f"{field}.stable_key", maximum=300)
+            if stable_key in module_scene_keys:
+                raise ContentPackageError(f"duplicate module scene stable_key: {stable_key}")
+            module_scene_keys.add(stable_key)
+            _text(scene.get("title"), f"{field}.title", maximum=500)
+            _text(scene.get("chapter"), f"{field}.chapter", maximum=500)
+            for ordinal_name in ("chapter_ordinal", "scene_ordinal"):
+                ordinal = scene[ordinal_name]
+                if isinstance(ordinal, bool) or not isinstance(ordinal, int) or ordinal < 0:
+                    raise ContentPackageError(f"{field}.{ordinal_name} is invalid")
+            ordinal_key = (scene["chapter_ordinal"], scene["scene_ordinal"])
+            if ordinal_key in module_scene_ordinals:
+                raise ContentPackageError(f"duplicate module scene ordinal: {ordinal_key}")
+            module_scene_ordinals.add(ordinal_key)
+            _text(scene["scene_type"], f"{field}.scene_type", maximum=100)
+            for page_name in ("page_start", "page_end"):
+                page = scene[page_name]
+                if page is not None and (
+                    isinstance(page, bool) or not isinstance(page, int) or page < 1
+                ):
+                    raise ContentPackageError(f"{field}.{page_name} is invalid")
+            if (
+                scene["page_start"] is not None
+                and scene["page_end"] is not None
+                and scene["page_end"] < scene["page_start"]
+            ):
+                raise ContentPackageError(f"{field} page range is invalid")
+            if any(
+                not isinstance(scene[name], list)
+                or any(not isinstance(item, str) for item in scene[name])
+                for name in ("headings", "keywords")
+            ) or not isinstance(scene["metadata"], dict):
+                raise ContentPackageError(f"{field} headings, keywords, or metadata is invalid")
+            span = scene["source_span"]
+            if not isinstance(span, dict):
+                raise ContentPackageError(f"{field}.source_span must be an object")
+            _exact(span, {"source_key", "start_offset", "end_offset"}, f"{field}.source_span")
+            if span["source_key"] not in source_keys:
+                raise ContentPackageError(f"{field}.source_span.source_key is unknown")
+            if any(
+                isinstance(span[name], bool)
+                or not isinstance(span[name], int)
+                or span[name] < 0
+                for name in ("start_offset", "end_offset")
+            ) or span["end_offset"] <= span["start_offset"]:
+                raise ContentPackageError(f"{field}.source_span range is invalid")
+            if span["end_offset"] > source_bounds[str(span["source_key"])]:
+                raise ContentPackageError(f"{field}.source_span exceeds its source")
+            refs = scene.get("source_refs")
+            if not isinstance(refs, list) or not refs:
+                raise ContentPackageError(f"{field}.source_refs must be a non-empty array")
+            for ref_index, ref in enumerate(refs):
+                _validate_source_ref(ref, f"{field}.source_refs[{ref_index}]")
+
     actor_ids: set[str] = set()
     for index, actor in enumerate(result["actors"]):
         normalized_actor = _validate_actor(
@@ -703,8 +800,70 @@ def validate_content_package(value: Mapping[str, Any]) -> dict[str, Any]:
         field = f"content_package.content_reviews[{index}]"
         if not isinstance(review, dict):
             raise ContentPackageError(f"{field} must be an object")
-        for ref_index, ref in enumerate(review.get("source_refs", [])):
+        if result["kind"] != "module":
+            # Only module imports consume the normalized review contract below.
+            # Other Pack kinds may carry system-owned review records, whose
+            # semantics remain outside core; their embedded source refs are
+            # still resolved by the generic reference walk below.
+            continue
+        _exact(
+            review,
+            {
+                "id",
+                "kind",
+                "status",
+                "target",
+                "normalized_content",
+                "evidence",
+                "source_refs",
+                "review",
+                "metadata",
+            },
+            field,
+        )
+        _text(review["id"], f"{field}.id", maximum=300)
+        _text(review["kind"], f"{field}.kind", maximum=100)
+        if review["status"] != "accepted":
+            raise ContentPackageError(f"{field}.status must be accepted")
+        target = review["target"]
+        if not isinstance(target, dict):
+            raise ContentPackageError(f"{field}.target must be an object")
+        _exact(target, {"scene_key", "content_key"}, f"{field}.target")
+        scene_key = _text(target["scene_key"], f"{field}.target.scene_key", maximum=300)
+        if scene_key not in module_scene_keys:
+            raise ContentPackageError(f"{field}.target.scene_key is not in the module")
+        _text(target["content_key"], f"{field}.target.content_key", maximum=200)
+        _text(review["normalized_content"], f"{field}.normalized_content", maximum=200_000)
+        if not isinstance(review["evidence"], dict):
+            raise ContentPackageError(f"{field}.evidence must be an object")
+        _exact(review["evidence"], {"asset_key", "page"}, f"{field}.evidence")
+        source_refs = review["source_refs"]
+        if not isinstance(source_refs, list):
+            raise ContentPackageError(f"{field}.source_refs must be an array")
+        asset_key = review["evidence"]["asset_key"]
+        page = review["evidence"]["page"]
+        visual = asset_key is not None or page is not None
+        textual = bool(source_refs)
+        if visual == textual:
+            raise ContentPackageError(f"{field} requires exactly one evidence mode")
+        if visual:
+            if asset_key not in assets_by_key:
+                raise ContentPackageError(f"{field}.evidence.asset_key is unknown")
+            media_type = str(assets_by_key[str(asset_key)]["media_type"])
+            if media_type != "application/pdf" and not media_type.startswith("image/"):
+                raise ContentPackageError(f"{field}.evidence must reference PDF or image")
+            if isinstance(page, bool) or not isinstance(page, int) or page < 1:
+                raise ContentPackageError(f"{field}.evidence.page must be 1-based")
+        for ref_index, ref in enumerate(source_refs):
             _validate_source_ref(ref, f"{field}.source_refs[{ref_index}]")
+        review_record = review["review"]
+        if not isinstance(review_record, dict):
+            raise ContentPackageError(f"{field}.review must be an object")
+        _exact(review_record, {"reviewer", "observation"}, f"{field}.review")
+        _text(review_record["reviewer"], f"{field}.review.reviewer", maximum=500)
+        _text(review_record["observation"], f"{field}.review.observation", maximum=500)
+        if not isinstance(review["metadata"], dict):
+            raise ContentPackageError(f"{field}.metadata must be an object")
 
     def inspect_refs(item: Any, field: str) -> None:
         if isinstance(item, dict):
@@ -734,8 +893,6 @@ def validate_content_package(value: Mapping[str, Any]) -> dict[str, Any]:
         )
     if result["kind"] in {"addon", "core_rules"} and not result["sources"]:
         raise ContentPackageError("rule-bearing packages require at least one source")
-    if result["kind"] == "module" and not result["content"].get("scene_atlas"):
-        raise ContentPackageError("module packages require a non-empty scene_atlas")
     if result["kind"] == "preset" and not result["actors"]:
         raise ContentPackageError("preset packages require at least one actor")
     checksum = str(result["checksum"])

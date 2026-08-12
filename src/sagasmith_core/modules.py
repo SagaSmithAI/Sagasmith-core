@@ -713,7 +713,7 @@ class ModuleService:
                             scene.content.encode("utf-8")
                         ).hexdigest(),
                     }
-                    visibility = str(scene_metadata.get("visibility", "keeper"))
+                    visibility = str(scene_metadata.get("visibility", "restricted"))
                     if visibility not in MODULE_VISIBILITY_SCOPES:
                         raise ValueError(
                             f"invalid module scene visibility {visibility!r}: "
@@ -946,7 +946,7 @@ class ModuleService:
                     errors.append(f"duplicate stable scene key: {stable_key}")
                 keys.add(stable_key)
                 metadata = dict(scene.metadata)
-                visibility = str(metadata.get("visibility", "keeper"))
+                visibility = str(metadata.get("visibility", "restricted"))
                 if visibility not in MODULE_VISIBILITY_SCOPES:
                     errors.append(f"scene {stable_key} has invalid visibility {visibility!r}")
                 spatial = dict(metadata.get("spatial") or {})
@@ -1445,21 +1445,7 @@ class ModuleService:
                     "editions": list(source_metadata.get("editions") or []),
                     "required_capabilities": ["content_package_v2"],
                 },
-                "play_profile": {
-                    "party_size": {"minimum": None, "maximum": None, "source_refs": []},
-                    "starting_level": {"value": None, "source_refs": []},
-                    "expected_end_level": {"value": None, "source_refs": []},
-                    "advancement": {
-                        "modes": ["unknown"],
-                        "recommended": "unknown",
-                        "source_refs": [],
-                    },
-                    "pregenerated_characters": {
-                        "available": False,
-                        "applicability": "Not reviewed",
-                        "source_refs": [],
-                    },
-                },
+                "play_profile": {},
                 "continuity": {
                     "series_id": source_metadata.get("series_id"),
                     "order": source_metadata.get("series_order"),
@@ -1514,6 +1500,42 @@ class ModuleService:
             }
 
     def import_content_package(
+        self,
+        campaign_id: str,
+        package: dict[str, Any],
+        blobs: Mapping[str, bytes],
+        *,
+        embedder: Embedder | None = None,
+        vector_store: VectorStore | None = None,
+        activate: bool = False,
+        asset_writer: Callable[[str, dict[str, Any], bytes], str] | None = None,
+    ) -> dict[str, Any]:
+        """Atomically import a finalized unified module Pack."""
+
+        value = validate_content_package(package)
+        expected_blobs = {str(asset["checksum"]): asset for asset in value["assets"]}
+        supplied_blobs = {
+            str(key).removeprefix("blobs/sha256/"): bytes(content)
+            for key, content in blobs.items()
+        }
+        if set(supplied_blobs) != set(expected_blobs):
+            raise ValueError("content package blobs do not match asset descriptors")
+        for digest, content in supplied_blobs.items():
+            asset = expected_blobs[digest]
+            if len(content) != int(asset["size"]) or hashlib.sha256(content).hexdigest() != digest:
+                raise ValueError(f"content package blob mismatch: {digest}")
+        with self.database.transaction():
+            return self._import_content_package_atomic(
+                campaign_id,
+                value,
+                supplied_blobs,
+                embedder=embedder,
+                vector_store=vector_store,
+                activate=activate,
+                asset_writer=asset_writer,
+            )
+
+    def _import_content_package_atomic(
         self,
         campaign_id: str,
         package: dict[str, Any],
@@ -2828,7 +2850,7 @@ class ModuleService:
                         "scene_type": row.ModuleScene.scene_type,
                         "visibility": row.ModuleScene.metadata_json.get(
                             "visibility",
-                            "keeper",
+                            "restricted",
                         ),
                         "page_start": row.ModuleChunk.page_start,
                         "page_end": row.ModuleChunk.page_end,
@@ -3134,22 +3156,12 @@ class ModuleService:
         *,
         progress_state: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Build a scene-structure dict from DB columns + profile-populated metadata.
+        """Build the stable scene structure and isolate system fields.
 
-        Column-backed fields (always populated regardless of profile):
-          scene_type, headings
-
-        Fields set by any profile that implements ``scene_boundaries()``:
-          scene_level, line_count, subsections, tags
-
-        Fields set only by certain system profiles — **not** guaranteed for every
-        system. Consumers must treat missing/empty values as "not provided by the
-        profile that parsed this module", not "zero of that thing exists":
-
-          - ``visibility`` — defaulted to ``"keeper"`` if the profile omits it
-          - ``clues``, ``checks``       — CoC profile populates these
-          - ``sanity``                  — CoC profile only
-          - ``transitions``, ``node_id`` — CoC ``solo_scenario`` parsing only
+        Core owns headings, generic tags, visibility, and reviewed spatial data.
+        Every profile-specific value remains under ``profile_data`` so a system
+        can expose clues, checks, stress, transitions, or other mechanics without
+        promoting that vocabulary into the shared schema.
         """
         metadata = dict(scene.metadata_json or {})
         spatial = dict(metadata.get("spatial") or {})
@@ -3175,18 +3187,36 @@ class ModuleService:
             }
         return {
             "scene_type": scene.scene_type,
-            "visibility": metadata.get("visibility", "keeper"),
+            "visibility": metadata.get("visibility", "restricted"),
             "scene_level": metadata.get("scene_level"),
             "line_count": metadata.get("line_count"),
             "headings": list(canonical_heading_path(scene.headings)),
             "subsections": list(metadata.get("subsections", [])),
             "tags": list(metadata.get("tags", [])),
-            "clues": list(metadata.get("clues", [])),
-            "checks": list(metadata.get("checks", [])),
-            "sanity": list(metadata.get("sanity", [])),
-            "transitions": list(metadata.get("transitions", [])),
-            "node_id": metadata.get("node_id"),
             "spatial": spatial,
+            "profile_data": {
+                key: value
+                for key, value in metadata.items()
+                if key
+                not in {
+                    "content_checksum",
+                    "absolute_end",
+                    "absolute_start",
+                    "end_line",
+                    "headings",
+                    "keywords",
+                    "line_count",
+                    "page_end",
+                    "page_start",
+                    "scene_level",
+                    "spatial",
+                    "stable_key",
+                    "start_line",
+                    "subsections",
+                    "tags",
+                    "visibility",
+                }
+            },
         }
 
     @staticmethod

@@ -284,7 +284,7 @@ def test_addon_accepts_exact_plugin_proven_local_component_equivalence(database)
     assert addons.install(imported.addon_id, imported.version).status == "installed"
 
 
-def test_addon_activation_rejects_wrong_edition_and_active_combat(database) -> None:
+def test_addon_activation_rejects_wrong_edition_and_runtime_lock(database) -> None:
     component = _rule_component(database)
     addon_package = _addon(component)
     _install_rule_component(database, component)
@@ -302,8 +302,15 @@ def test_addon_activation_rejects_wrong_edition_and_active_combat(database) -> N
         )
 
     RuleProfileService(database).set(campaign.id, edition="2014")
-    CampaignService(database).update(campaign.id, state={"combat": {"active": True}})
-    with pytest.raises(AddonError, match="active combat"):
+    CampaignService(database).update(
+        campaign.id,
+        state={
+            "mutation_locks": [
+                {"domains": ["addon_activation"], "reason": "active encounter"}
+            ]
+        },
+    )
+    with pytest.raises(AddonError, match="active encounter"):
         addons.set_activation(
             campaign.id,
             addon_id=addon_package["id"],

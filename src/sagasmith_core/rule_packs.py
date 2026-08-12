@@ -10,6 +10,7 @@ from sqlalchemy import delete, func, select
 
 from sagasmith_core.branches import resolve_branch
 from sagasmith_core.campaigns import CampaignNotFoundError
+from sagasmith_core.concurrency import compare_and_swap_campaign
 from sagasmith_core.database import Database
 from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
 from sagasmith_core.integrity import json_sha256
@@ -21,6 +22,7 @@ from sagasmith_core.models import (
     RulePack,
     RulePackVersion,
 )
+from sagasmith_core.runtime_locks import require_mutation_unlocked
 
 PACK_ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)+$")
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
@@ -256,17 +258,17 @@ class RulePackService:
                 idempotency_key,
                 idempotency_write,
             )
-            if (
-                expected_campaign_revision is not None
-                and campaign.revision != expected_campaign_revision
-            ):
-                raise ValueError(
-                    "campaign revision conflict: "
-                    f"expected {expected_campaign_revision}, found {campaign.revision}"
-                )
+            base_revision = (
+                campaign.revision
+                if expected_campaign_revision is None
+                else expected_campaign_revision
+            )
             branch = resolve_branch(session, campaign, branch_id)
-            if dict(campaign.state or {}).get("combat", {}).get("active", False):
-                raise RulePackError("rule-pack activation cannot change during active combat")
+            require_mutation_unlocked(
+                campaign.state,
+                "rule_pack_activation",
+                error_type=RulePackError,
+            )
             version_row = session.get(RulePackVersion, {"pack_id": pack_id, "version": version})
             if version_row is None or version_row.status != "installed":
                 raise RulePackError("the exact rule-pack version must be installed first")
@@ -301,7 +303,13 @@ class RulePackService:
             row.checksum = version_row.checksum
             row.enabled = bool(enabled)
             row.options = dict(options or {})
-            campaign.revision += 1
+            compare_and_swap_campaign(
+                session,
+                campaign_id,
+                expected_revision=base_revision,
+            )
+            session.expire(campaign)
+            session.refresh(campaign)
             session.flush()
             effective = self._resolve(session, campaign, branch.id)
             result = self._activation_info(row)
@@ -338,16 +346,16 @@ class RulePackService:
                 idempotency_key,
                 idempotency_write,
             )
-            if (
-                expected_campaign_revision is not None
-                and campaign.revision != expected_campaign_revision
-            ):
-                raise ValueError(
-                    "campaign revision conflict: "
-                    f"expected {expected_campaign_revision}, found {campaign.revision}"
-                )
-            if dict(campaign.state or {}).get("combat", {}).get("active", False):
-                raise RulePackError("rule-pack activation cannot change during active combat")
+            base_revision = (
+                campaign.revision
+                if expected_campaign_revision is None
+                else expected_campaign_revision
+            )
+            require_mutation_unlocked(
+                campaign.state,
+                "rule_pack_activation",
+                error_type=RulePackError,
+            )
             branch = resolve_branch(session, campaign, branch_id)
             owned = session.get(
                 CampaignRuleActivation,
@@ -376,7 +384,13 @@ class RulePackService:
             )
             if not result.rowcount:
                 raise LookupError(f"rule-pack activation not found: {pack_id}")
-            campaign.revision += 1
+            compare_and_swap_campaign(
+                session,
+                campaign_id,
+                expected_revision=base_revision,
+            )
+            session.expire(campaign)
+            session.refresh(campaign)
             session.flush()
             effective = self._resolve(session, campaign, branch.id)
             idempotency.remember_write_in_session(

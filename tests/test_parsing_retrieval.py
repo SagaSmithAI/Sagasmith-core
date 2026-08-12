@@ -88,9 +88,8 @@ def test_rrf_combines_rankings_deterministically() -> None:
     assert {item[0] for item in fused[:2]} == {"a", "b"}
 
 
-def test_enrich_query_appends_english_aliases() -> None:
-    expanded = enrich_query("豁免")
-    assert "save" in expanded or "saving" in expanded
+def test_enrich_query_has_no_core_owned_game_vocabulary() -> None:
+    assert enrich_query("豁免") == "豁免"
 
 
 def test_enrich_query_preserves_unchanged_query_when_no_match() -> None:

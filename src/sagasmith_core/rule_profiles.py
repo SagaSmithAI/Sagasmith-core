@@ -8,10 +8,12 @@ from typing import Any
 from sqlalchemy import select
 
 from sagasmith_core.campaigns import CampaignNotFoundError
+from sagasmith_core.concurrency import compare_and_swap_campaign
 from sagasmith_core.database import Database
 from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
 from sagasmith_core.models import Campaign, CampaignRuleProfile, Character
 from sagasmith_core.rule_profile_contract import RULE_PROFILE_OWNED_SETTING_FIELDS
+from sagasmith_core.runtime_locks import mutation_lock
 
 
 @dataclass(frozen=True)
@@ -39,7 +41,6 @@ class RuleProfileService:
         expected_campaign_revision: int | None = None,
         idempotency_key: str | None = None,
         idempotency_write: IdempotencyWrite | None = None,
-        active_combat_option_keys: set[str] | frozenset[str] | None = None,
     ) -> RuleProfileInfo:
         with self.database.transaction() as session:
             campaign = session.get(Campaign, campaign_id)
@@ -52,10 +53,18 @@ class RuleProfileService:
                 idempotency_write,
             )
             row = session.get(CampaignRuleProfile, campaign_id)
-            if dict(campaign.state or {}).get("combat", {}).get("active", False):
-                mutable_option_keys = set(active_combat_option_keys or ())
+            base_revision = (
+                campaign.revision
+                if expected_campaign_revision is None
+                else expected_campaign_revision
+            )
+            lock = mutation_lock(campaign.state, "rule_profile")
+            if lock is not None:
+                mutable_option_keys = {
+                    str(item) for item in lock.get("mutable_option_keys", []) if str(item)
+                }
                 if not mutable_option_keys:
-                    raise ValueError("rule profile cannot change during active combat")
+                    raise ValueError("rule profile cannot change while locked")
                 if (
                     row is None
                     or row.edition != edition
@@ -63,7 +72,7 @@ class RuleProfileService:
                     or list(row.publications or []) != list(publications or [])
                 ):
                     raise ValueError(
-                        "active-combat rule maintenance cannot change edition, "
+                        "locked-activity rule maintenance cannot change edition, "
                         "locale, or publications"
                     )
                 current_options = dict(row.options or {})
@@ -75,17 +84,9 @@ class RuleProfileService:
                 }
                 if not changed_option_keys <= mutable_option_keys:
                     raise ValueError(
-                        "active-combat rule maintenance changed options outside "
+                        "locked-activity rule maintenance changed options outside "
                         "its explicit allowlist"
                     )
-            if (
-                expected_campaign_revision is not None
-                and campaign.revision != expected_campaign_revision
-            ):
-                raise ValueError(
-                    "campaign revision conflict: "
-                    f"expected {expected_campaign_revision}, found {campaign.revision}"
-                )
             if (
                 row is not None
                 and row.edition
@@ -114,7 +115,15 @@ class RuleProfileService:
                 for key, value in dict(campaign.settings or {}).items()
                 if key not in RULE_PROFILE_OWNED_SETTING_FIELDS
             }
-            campaign.revision += 1
+            compare_and_swap_campaign(
+                session,
+                campaign_id,
+                expected_revision=base_revision,
+                expected_branch_id=campaign.active_branch_id,
+                values={"settings": dict(campaign.settings)},
+            )
+            session.expire(campaign)
+            session.refresh(campaign)
             session.flush()
             result = self._info(row)
             idempotency.remember_write_in_session(

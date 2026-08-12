@@ -94,6 +94,18 @@ validates structure, hashes, references, and kind invariants. System plugins add
 semantic validation; finalized modules also require an explicit
 `metadata.agent_finalization` record. Draft editing remains outside the Pack.
 
+For a module that record is exact and contains `confirmed: true`, a non-empty
+`reviewer`, and a non-empty `note`. Every Scene Atlas entry must have a unique
+stable key and chapter/scene ordinal, bounded source span, and resolvable source
+references. Module `content_reviews` use one exact normalized schema and exactly
+one evidence mode: either a PDF/image page or one or more source references.
+Review schemas carried by other Pack kinds remain system-owned, while core still
+checks every embedded source reference.
+
+Module import validates every blob before opening the database transaction and
+then persists the module, assets, and reviews in one transaction. A failure
+cannot leave a partially imported database graph.
+
 ## Required invariants
 
 Builders, MCP facades, public catalogs, and tests enforce:

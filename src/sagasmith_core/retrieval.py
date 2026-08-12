@@ -9,8 +9,8 @@ When ChromaDB / embeddings are unavailable, ``structured_score()`` and
   ``tags``, ``scene_type``, ``chunk_type``, and more each carry different
   weights so a short but precise match beats a long loose one.
 - **Query expansion** \u2014 ``enrich_query()`` appends English equivalents for
-  common Chinese TTRPG terms, bridging the gap between player language and
-  English-heavy rule/module text without any vector model.
+  caller-provided system terms; core does not embed game vocabulary or
+  translations.
 
 Together they replace the old single-field ``lexical_score()`` with a
 profile-aware, denormalised scoring pipeline that works on any backend
@@ -46,42 +46,10 @@ _LATIN_WORD = re.compile(r"[A-Za-z0-9_'-]+")
 _CJK = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
 _CJK_RUN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]+")
 
-# \u2500\u2500 Built-in Chinese \u2194 English query expansions \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-# System-neutral TTRPG terms. System profiles can add their
-# own domain vocabulary via the ``query_hints`` parameter on search().
-_TTRPG_TERMS: dict[str, Sequence[str]] = {
-    "\u8c41\u514d": ("save", "saving"),
-    "\u68c0\u5b9a": ("check", "roll", "test"),
-    "\u5c5e\u6027": ("ability", "score", "stat"),
-    "\u6280\u80fd": ("skill",),
-    "\u719f\u7ec3": ("proficient", "proficiency"),
-    "\u653b\u51fb": ("attack", "strike"),
-    "\u4f24\u5bb3": ("damage", "wound", "hurt"),
-    "\u9632\u5fa1": ("defense", "armor", "protect"),
-    "\u6cbb\u7597": ("heal", "healing", "cure"),
-    "\u6cd5\u672f": ("spell", "magic"),
-    "\u6b66\u5668": ("weapon", "arms"),
-    "\u62a4\u7532": ("armor", "armour"),
-    "\u9ab0\u5b50": ("dice", "roll"),
-    "\u7b49\u7ea7": ("level",),
-    "\u7ecf\u9a8c": ("experience", "xp"),
-    "\u7ebf\u7d22": ("clue", "hint", "evidence"),
-    "\u6218\u6597": ("combat", "battle", "fight"),
-    "\u8425\u5730": ("camp", "rest"),
-    "\u7269\u54c1": ("item", "object", "thing"),
-    "\u95e8": ("door", "gate", "entrance"),
-    "\u94a5\u5319": ("key",),
-    "\u5b9d\u85cf": ("treasure", "loot"),
-    "\u9677\u9631": ("trap", "hazard"),
-    "\u602a\u7269": ("monster", "creature", "beast"),
-    "\u5934\u76ee": ("boss", "leader", "chief"),
-    "\u4efb\u52a1": ("quest", "mission", "task"),
-    "\u5956\u52b1": ("reward", "prize"),
-    "\u56de\u5408": ("turn", "round"),
-    "\u79fb\u52a8": ("move", "movement"),
-    "\u641c\u7d22": ("search", "explore", "scan"),
-    "\u9690\u85cf": ("hidden", "secret", "conceal"),
-}
+# Core performs language-agnostic lexical retrieval. Games and profiles provide
+# domain vocabulary explicitly through ``query_hints``; no fantasy, combat, or
+# level-based ontology is privileged here.
+_DEFAULT_QUERY_HINTS: dict[str, Sequence[str]] = {}
 
 # Default field weights for structured scoring.
 # Used when the caller does not supply custom ``field_weights``.
@@ -145,17 +113,14 @@ def enrich_query(
     *,
     extra_terms: dict[str, Sequence[str]] | None = None,
 ) -> str:
-    """Expand Chinese TTRPG terms with English equivalents.
+    """Expand a query only with caller-provided vocabulary.
 
-    Appends English aliases behind the original query so both Chinese and
-    English lexical matching fire on the same search.  Built-in mappings
-    are system-neutral; system profiles inject domain vocabulary (e.g.
-    domain-specific terms and translations via
-    ``extra_terms``.
+    Profiles may append translated aliases so multilingual lexical matching
+    can fire without core assigning mechanics or genre to a term.
 
     Returns the original query unchanged when no expansions fire.
     """
-    merged = dict(_TTRPG_TERMS)
+    merged = dict(_DEFAULT_QUERY_HINTS)
     if extra_terms:
         for term, aliases in extra_terms.items():
             merged.setdefault(term, []).extend(aliases)

@@ -173,7 +173,7 @@ class ContinuityService:
 
     @staticmethod
     def _player_scene_projection(scene: dict[str, Any] | None) -> dict[str, Any] | None:
-        """Remove keeper prose and arbitrary progress state from a player context."""
+        """Remove restricted prose and arbitrary progress state from a player context."""
 
         if not isinstance(scene, dict):
             return None
@@ -181,16 +181,16 @@ class ContinuityService:
         safe_progress = {
             key: progress[key] for key in ("status", "percent", "state_version") if key in progress
         }
-        if scene.get("visibility", "keeper") not in PLAYER_MODULE_VISIBILITY_SCOPES:
+        if scene.get("visibility", "restricted") not in PLAYER_MODULE_VISIBILITY_SCOPES:
             return {
                 "campaign_id": scene.get("campaign_id"),
                 "scope_id": scene.get("scope_id"),
                 "requested_scope_id": scene.get("requested_scope_id"),
                 "inherited_from_party": scene.get("inherited_from_party", False),
                 "scene_id": scene.get("scene_id"),
-                "visibility": scene.get("visibility", "keeper"),
+                "visibility": scene.get("visibility", "restricted"),
                 "redacted": True,
-                "content": "[GM-only scene content hidden]",
+                "content": "[Restricted scene content hidden]",
                 "progress": safe_progress,
             }
         projected = deepcopy(scene)

@@ -12,5 +12,5 @@ PLAYER_MEMORY_DISCLOSURE_SCOPES = frozenset({"public", "party", "player"})
 ACTOR_KNOWLEDGE_DISCLOSURE_SCOPES = frozenset({"dm", "owner", "party", "public", "player"})
 PLAYER_OWNED_ACTOR_DISCLOSURE_SCOPES = frozenset({"owner", "party", "public", "player"})
 
-MODULE_VISIBILITY_SCOPES = frozenset({"keeper", "party", "public"})
-PLAYER_MODULE_VISIBILITY_SCOPES = frozenset({"party", "public"})
+MODULE_VISIBILITY_SCOPES = frozenset({"restricted", "group", "public"})
+PLAYER_MODULE_VISIBILITY_SCOPES = frozenset({"group", "public"})

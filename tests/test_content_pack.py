@@ -6,16 +6,19 @@ import zipfile
 
 import pytest
 
+from sagasmith_core.campaigns import CampaignService
 from sagasmith_core.content_pack import (
     ContentPackageError,
     blob_descriptor,
     build_actor_card,
     build_content_package,
     build_source_bundle,
+    content_package_checksum,
     dumps_content_archive,
     loads_content_archive,
     source_ref,
 )
+from sagasmith_core.modules import ModuleService
 from sagasmith_core.rules import RuleService
 
 
@@ -101,6 +104,121 @@ def _package() -> tuple[dict, dict[str, bytes]]:
             "mechanics": [],
         },
         metadata={"distribution": "shareable"},
+    )
+    return package, {
+        document_asset["checksum"]: document_blob,
+        image_asset["checksum"]: image,
+    }
+
+
+def _module_package() -> tuple[dict, dict[str, bytes]]:
+    document = "# Chapter\n## Scene\nA private promise changes the road."
+    source, document_asset, document_blob = build_source_bundle(
+        source_key="example.module",
+        title="Example Module",
+        normalized_text=document,
+        sections=[
+            {
+                "ordinal": 0,
+                "parent_ordinal": None,
+                "level": 1,
+                "title": "Chapter",
+                "path": ["Chapter"],
+                "start_offset": 0,
+                "end_offset": len(document),
+                "chunks": [
+                    {
+                        "ordinal": 0,
+                        "heading_path": ["Chapter", "Scene"],
+                        "start_offset": 0,
+                        "end_offset": len(document),
+                        "token_count": 10,
+                        "page_start": 1,
+                        "page_end": 1,
+                        "metadata": {},
+                    }
+                ],
+            }
+        ],
+        license="Apache-2.0",
+        attribution="Example author",
+    )
+    image = b"\x89PNG\r\n\x1a\nmap"
+    image_asset = blob_descriptor(
+        asset_key="example.module.map",
+        kind="map",
+        name="map.png",
+        media_type="image/png",
+        content=image,
+        license="Apache-2.0",
+        attribution="Example author",
+    )
+    chunk = source["sections"][0]["chunks"][0]
+    citation = source_ref(
+        source_key=source["source_key"],
+        chunk_key=chunk["key"],
+        page=1,
+        note="Scene evidence",
+    )
+    package = build_content_package(
+        kind="module",
+        package_id="example.module",
+        version="1.0.0",
+        system_id="neutral",
+        manifest={"title": "Example Module"},
+        sources=[source],
+        assets=[document_asset, image_asset],
+        content_reviews=[
+            {
+                "id": "review.scene.promise",
+                "kind": "narrative",
+                "status": "accepted",
+                "target": {"scene_key": "scene.promise", "content_key": "promise"},
+                "normalized_content": "A private promise changes the road.",
+                "evidence": {"asset_key": None, "page": None},
+                "source_refs": [citation],
+                "review": {"reviewer": "agent:test", "observation": "Exact source text."},
+                "metadata": {},
+            }
+        ],
+        actors=[],
+        content={
+            "classification": "original",
+            "compatibility": {},
+            "play_profile": {},
+            "continuity": {},
+            "activation": {"mode": "campaign_attach"},
+            "scene_atlas": [
+                {
+                    "stable_key": "scene.promise",
+                    "title": "Scene",
+                    "chapter": "Chapter",
+                    "chapter_ordinal": 0,
+                    "scene_ordinal": 0,
+                    "scene_type": "scene",
+                    "page_start": 1,
+                    "page_end": 1,
+                    "headings": ["Chapter", "Scene"],
+                    "keywords": [],
+                    "metadata": {},
+                    "source_span": {
+                        "source_key": source["source_key"],
+                        "start_offset": 0,
+                        "end_offset": len(document),
+                    },
+                    "source_refs": [citation],
+                }
+            ],
+            "catalogs": {},
+            "narrative": {},
+        },
+        metadata={
+            "agent_finalization": {
+                "confirmed": True,
+                "reviewer": "agent:test",
+                "note": "Reviewed against the original source.",
+            }
+        },
     )
     return package, {
         document_asset["checksum"]: document_blob,
@@ -269,3 +387,53 @@ def test_manifest_identity_cannot_disagree_with_package_identity() -> None:
         from sagasmith_core.content_pack import validate_content_package
 
         validate_content_package(package)
+
+
+def test_module_package_requires_agent_finalization_and_complete_review_shape() -> None:
+    from sagasmith_core.content_pack import validate_content_package
+
+    package, _ = _module_package()
+    del package["metadata"]["agent_finalization"]
+    package["checksum"] = content_package_checksum(package)
+    with pytest.raises(ContentPackageError, match="agent_finalization"):
+        validate_content_package(package)
+
+    package, _ = _module_package()
+    del package["content_reviews"][0]["target"]
+    package["checksum"] = content_package_checksum(package)
+    with pytest.raises(ContentPackageError, match="missing fields: target"):
+        validate_content_package(package)
+
+
+def test_non_module_review_payload_remains_system_owned() -> None:
+    from sagasmith_core.content_pack import validate_content_package
+
+    package, _ = _package()
+    package["content_reviews"] = [
+        {
+            "system_review_kind": "artifact_ruling",
+            "decision": {"accepted": True},
+            "source_refs": [package["content"]["artifacts"][0]["source_refs"][0]],
+        }
+    ]
+    package["checksum"] = content_package_checksum(package)
+
+    assert validate_content_package(package)["content_reviews"] == package["content_reviews"]
+
+
+def test_module_package_database_import_rolls_back_as_one_transaction(database) -> None:
+    package, blobs = _module_package()
+    campaign = CampaignService(database).create(system_id="neutral", name="Atomic Pack")
+
+    def fail_asset_write(_module_id: str, _asset: dict, _content: bytes) -> str:
+        raise RuntimeError("asset staging failed")
+
+    with pytest.raises(RuntimeError, match="asset staging failed"):
+        ModuleService(database).import_content_package(
+            campaign.id,
+            package,
+            blobs,
+            asset_writer=fail_asset_write,
+        )
+
+    assert ModuleService(database).list(campaign.id, include_retired=True) == []

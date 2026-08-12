@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 
 from sagasmith_core.branches import resolve_branch
 from sagasmith_core.campaigns import CampaignNotFoundError
+from sagasmith_core.concurrency import compare_and_swap_campaign
 from sagasmith_core.content_pack import validate_content_package
 from sagasmith_core.database import Database
 from sagasmith_core.models import (
@@ -23,6 +24,7 @@ from sagasmith_core.models import (
     RulePackVersion,
 )
 from sagasmith_core.rule_packs import RulePackService
+from sagasmith_core.runtime_locks import require_mutation_unlocked
 
 
 class AddonError(ValueError):
@@ -314,8 +316,11 @@ class AddonService:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
-            if dict(campaign.state or {}).get("combat", {}).get("active", False):
-                raise AddonError("addon activation cannot change during active combat")
+            require_mutation_unlocked(
+                campaign.state,
+                "addon_activation",
+                error_type=AddonError,
+            )
             branch = resolve_branch(session, campaign, branch_id)
             addon = session.get(ContentAddon, addon_id)
             row = session.get(
@@ -370,16 +375,16 @@ class AddonService:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
-            if (
-                expected_campaign_revision is not None
-                and campaign.revision != expected_campaign_revision
-            ):
-                raise ValueError(
-                    "campaign revision conflict: "
-                    f"expected {expected_campaign_revision}, found {campaign.revision}"
-                )
-            if dict(campaign.state or {}).get("combat", {}).get("active", False):
-                raise AddonError("addon activation cannot change during active combat")
+            base_revision = (
+                campaign.revision
+                if expected_campaign_revision is None
+                else expected_campaign_revision
+            )
+            require_mutation_unlocked(
+                campaign.state,
+                "addon_activation",
+                error_type=AddonError,
+            )
             branch = resolve_branch(session, campaign, branch_id)
             addon = session.get(ContentAddon, addon_id)
             version_row = session.get(
@@ -464,7 +469,13 @@ class AddonService:
                 enabled=enabled,
                 addon_options=addon_options,
             )
-            campaign.revision += 1
+            compare_and_swap_campaign(
+                session,
+                campaign_id,
+                expected_revision=base_revision,
+            )
+            session.expire(campaign)
+            session.refresh(campaign)
             session.flush()
             RulePackService._resolve(session, campaign, branch.id)
             return self._activation_info(row)

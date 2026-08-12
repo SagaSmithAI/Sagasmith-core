@@ -90,16 +90,23 @@ def test_rule_pack_keeps_advice_without_blocking_validation(database) -> None:
     }
 
 
-def test_rule_profile_cannot_diverge_from_an_active_combat(database) -> None:
+def test_rule_profile_cannot_diverge_while_runtime_locked(database) -> None:
     campaigns = CampaignService(database)
     campaign = campaigns.create(system_id="dnd5e", name="Locked combat rules")
-    campaigns.update(campaign.id, state={"combat": {"active": True}})
+    campaigns.update(
+        campaign.id,
+        state={
+            "mutation_locks": [
+                {"domains": ["rule_profile"], "reason": "active encounter"}
+            ]
+        },
+    )
 
-    with pytest.raises(ValueError, match="rule profile cannot change during active combat"):
+    with pytest.raises(ValueError, match="rule profile cannot change while locked"):
         RuleProfileService(database).set(campaign.id, edition="2024")
 
 
-def test_rule_profile_allows_only_explicit_option_maintenance_in_combat(
+def test_rule_profile_allows_only_declared_option_maintenance_while_locked(
     database,
 ) -> None:
     campaigns = CampaignService(database)
@@ -117,7 +124,15 @@ def test_rule_profile_allows_only_explicit_option_maintenance_in_combat(
     campaign = campaigns.get(campaign.id)
     campaigns.update(
         campaign.id,
-        state={"combat": {"active": True}},
+        state={
+            "mutation_locks": [
+                {
+                    "domains": ["rule_profile"],
+                    "reason": "active encounter",
+                    "mutable_option_keys": ["_core_rule_pack_lock"],
+                }
+            ]
+        },
         expected_revision=campaign.revision,
     )
 
@@ -129,7 +144,6 @@ def test_rule_profile_allows_only_explicit_option_maintenance_in_combat(
             "house_option": "preserved",
             "_core_rule_pack_lock": {"fingerprint": "new"},
         },
-        active_combat_option_keys={"_core_rule_pack_lock"},
     )
 
     assert maintained.options["house_option"] == "preserved"
@@ -143,7 +157,6 @@ def test_rule_profile_allows_only_explicit_option_maintenance_in_combat(
                 "house_option": "changed",
                 "_core_rule_pack_lock": {"fingerprint": "newer"},
             },
-            active_combat_option_keys={"_core_rule_pack_lock"},
         )
     with pytest.raises(ValueError, match="cannot change edition, locale, or publications"):
         profiles.set(
@@ -151,7 +164,6 @@ def test_rule_profile_allows_only_explicit_option_maintenance_in_combat(
             edition="2014",
             locale="zh-CN",
             options=maintained.options,
-            active_combat_option_keys={"_core_rule_pack_lock"},
         )
 
 

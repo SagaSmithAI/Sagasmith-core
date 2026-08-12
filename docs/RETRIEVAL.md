@@ -8,6 +8,10 @@ Rules and modules use the same retrieval pipeline:
 4. reciprocal-rank fusion across available rankings;
 5. expansion from a selected chunk to the complete section or scene.
 
+Core does not ship game vocabulary or bilingual rule synonyms. System packages
+pass their own deterministic `query_hints` to `RuleService.search` or
+`ModuleService.search`; `enrich_query` only applies the supplied mapping.
+
 `RuleService.search` can be constrained with exact `source_ids`, `source_keys`, or
 publication ids. Import and review workflows should use one of these filters before
 expanding a hit so same-name sections from different books or editions cannot supply

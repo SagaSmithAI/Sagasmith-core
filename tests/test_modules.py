@@ -72,7 +72,7 @@ def test_module_ingest_search_and_progress(database) -> None:
     assert result.scenes == 2
     assert hits[0].title == "Broken Gate"
     assert hits[0].metadata["scene_type"] == "section"
-    assert hits[0].metadata["visibility"] == "keeper"
+    assert hits[0].metadata["visibility"] == "restricted"
     assert (
         expanded["content_sha256"]
         == hashlib.sha256(expanded["content"].encode("utf-8")).hexdigest()
@@ -96,8 +96,8 @@ def test_module_ingest_search_and_progress(database) -> None:
     assert current["progress"]["state"] == {"wolves_defeated": False}
     index = service.scene_index(campaign.id)
     assert [item["title"] for item in index] == ["Broken Gate", "Inner Hall"]
-    assert index[0]["visibility"] == "keeper"
-    assert index[0]["clues"] == []
+    assert index[0]["visibility"] == "restricted"
+    assert index[0]["profile_data"] == {}
     assert index[0]["stable_key"] == "chapter-one-broken-gate"
     assert index[0]["chapter_ordinal"] == 0
     assert index[0]["scene_ordinal"] == 0
