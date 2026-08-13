@@ -764,6 +764,25 @@ def validate_content_package(value: Mapping[str, Any]) -> dict[str, Any]:
                 for name in ("headings", "keywords")
             ) or not isinstance(scene["metadata"], dict):
                 raise ContentPackageError(f"{field} headings, keywords, or metadata is invalid")
+            metadata = scene["metadata"]
+            allowed_metadata = {
+                "visibility",
+                "scene_level",
+                "line_count",
+                "subsections",
+                "tags",
+                "spatial",
+                "profile_data",
+            }
+            unknown_metadata = sorted(set(metadata) - allowed_metadata)
+            if unknown_metadata:
+                raise ContentPackageError(
+                    f"{field}.metadata has profile fields outside profile_data: "
+                    + ", ".join(unknown_metadata)
+                )
+            profile_data = metadata.get("profile_data", {})
+            if not isinstance(profile_data, dict):
+                raise ContentPackageError(f"{field}.metadata.profile_data must be an object")
             span = scene["source_span"]
             if not isinstance(span, dict):
                 raise ContentPackageError(f"{field}.source_span must be an object")

@@ -17,6 +17,7 @@ from sagasmith_core.content_pack import (
     dumps_content_archive,
     loads_content_archive,
     source_ref,
+    validate_content_package,
 )
 from sagasmith_core.modules import ModuleService
 from sagasmith_core.rules import RuleService
@@ -462,3 +463,15 @@ def test_module_package_import_restores_profile_data_without_nesting(database, t
     assert scene["visibility"] == "restricted"
     assert scene["profile_data"]["stress"] == [{"loss": "1/1d4"}]
     assert "profile_data" not in scene["profile_data"]
+
+
+def test_module_package_rejects_profile_fields_outside_profile_data() -> None:
+    package, _blobs = _module_package()
+    package["content"]["scene_atlas"][0]["metadata"] = {
+        "visibility": "restricted",
+        "stress": [{"loss": "1/1d4"}],
+    }
+    package["checksum"] = content_package_checksum(package)
+
+    with pytest.raises(ContentPackageError, match="outside profile_data: stress"):
+        validate_content_package(package)

@@ -12,6 +12,10 @@ not provide aliases for the superseded protocols.
 - Read system-specific scene values from `profile_data`. Fields such as clues,
   checks, sanity/stress, transitions, and node identifiers are no longer a
   fixed top-level Core superset.
+- Module Pack validation rejects profile-owned values left at the top level of
+  scene `metadata`; producers must move them under `profile_data` before import.
+- Generic Markdown block quotes use the neutral chunk type `blockquote` rather
+  than the presentation-specific `read_aloud` label.
 - Module Packs require exact Agent finalization, complete Scene Atlas evidence,
   and normalized module-review records.
 

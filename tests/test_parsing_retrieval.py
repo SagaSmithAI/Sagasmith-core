@@ -76,6 +76,12 @@ def test_module_parser_supports_profiles_without_scene_boundary_hook() -> None:
     assert chapters[0].scenes[0].title == "Gate"
 
 
+def test_generic_module_profile_uses_neutral_blockquote_chunk_type() -> None:
+    chapters = MarkdownModuleParser().parse("# Chapter\n## Quoted text\n> Exact quotation.\n")
+
+    assert chapters[0].scenes[0].chunks[0].metadata["chunk_type"] == "blockquote"
+
+
 def test_lexical_search_handles_chinese_and_english() -> None:
     assert lexical_score("擒抱 grapple", title="Grapple 擒抱", content="Rules") > 0
 

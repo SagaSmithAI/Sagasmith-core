@@ -193,7 +193,7 @@ class GenericModuleProfile:
         if lines and all(line.lstrip().startswith("|") for line in lines):
             return "table"
         if text.lstrip().startswith(">"):
-            return "read_aloud"
+            return "blockquote"
         if lines and sum(line.lstrip().startswith(("-", "*")) for line in lines) >= len(lines) / 2:
             return "list"
         if heading.casefold() in {"appendix", "附录", "reference", "参考"}:
