@@ -5,16 +5,45 @@
 Do **not** replace campaign snapshots with an unbounded fully incremental DAG.
 The measured data supports this order instead:
 
-1. prototype a self-contained compressed snapshot record;
+1. use a self-contained compressed snapshot record;
 2. after measuring that format in current-schema full playthroughs, consider
    immutable bindings specifically for `characters` and `revision_cursor`;
 3. consider checkpoint plus typed delta storage only if those two changes still
    leave a demonstrated snapshot-specific capacity or write-latency problem;
 4. keep a fully incremental chain rejected.
 
-This is a storage decision, not authorization to implement a format migration.
-The current public state document and restore semantics remain authoritative
-until a separately reviewed migration satisfies the gates below.
+The public state document and restore semantics remain authoritative; compression
+is an internal storage concern and does not add an ancestor replay dependency.
+
+## Implementation status (2026-08-14)
+
+Phase 1 is implemented by snapshot schema v8 and Alembic revision
+`20260814_29`:
+
+- the database stores `compressed_payload`, `payload_codec`,
+  `uncompressed_size`, the canonical document `checksum`, and a
+  `record_checksum`; the former JSON `payload` column is removed;
+- `zlib-1` is the single current codec, with a 64 MiB declared and enforced
+  uncompressed-size limit;
+- the record checksum covers the compressed bytes plus schema, snapshot,
+  campaign, branch, parent, slot, codec, size, and document checksum identities;
+- every service obtains full state through one bounded `_materialize` boundary;
+- public `get` and `export` still return the complete JSON document with logical
+  `storage_mode: full`;
+- the one-time migration accepts complete checksum-valid schema-v7 payloads and
+  rejects v3–v6 instead of adding a runtime compatibility path;
+- downgrade is deliberately unavailable; rollback restores the pre-migration
+  database and matching runtime.
+
+On a temporary copy of Avernus v29, all eight real v7 snapshots migrated and
+verified as v8. Compressed payload bytes were 220,603 versus 1,521,530 raw
+(85.5% smaller), and the SQLite snapshot table allocation fell from 1,544,192
+to 233,472 bytes. Migration took 0.124 s, a subsequent real restore took 0.102
+s, and export returned a valid full JSON document. These figures are one-host
+validation evidence, not a cross-platform latency SLO.
+
+Phase 2 targeted bindings and Phase 3 checkpoint-plus-delta remain gated future
+work. A fully incremental DAG remains rejected.
 
 ## Audit scope and method
 
@@ -266,7 +295,7 @@ compressed node cannot satisfy.
 
 ## Executable follow-up design
 
-### Phase 1: self-contained compressed record prototype
+### Phase 1: self-contained compressed record (implemented)
 
 Keep one canonical typed state document identical to the current public payload.
 At capture:

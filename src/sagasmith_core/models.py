@@ -12,6 +12,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -690,9 +691,12 @@ class CampaignSnapshot(Base):
     )
     slot: Mapped[int] = mapped_column(Integer, nullable=False)
     label: Mapped[str] = mapped_column(String(300), default="")
-    schema_version: Mapped[int] = mapped_column(Integer, default=1)
-    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, default=8)
+    compressed_payload: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    payload_codec: Mapped[str] = mapped_column(String(32), nullable=False)
+    uncompressed_size: Mapped[int] = mapped_column(Integer, nullable=False)
     checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    record_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
     recap: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=operational_utcnow

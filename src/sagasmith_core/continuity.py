@@ -258,6 +258,18 @@ class ContinuityService:
                     .order_by(CampaignSnapshot.slot)
                 )
             )
+            latest = snapshots[-1] if snapshots else None
+            latest_payload_chars = (
+                len(
+                    json.dumps(
+                        SnapshotService._materialize(latest),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                )
+                if latest
+                else 0
+            )
 
         active_facts = sum(revision.status == "active" for _, revision in fact_rows)
         inactive_knowledge = sum(
@@ -273,7 +285,6 @@ class ContinuityService:
             bool(revision.source_event_id and revision.source_event_id not in event_ids)
             for _, revision in knowledge_rows
         )
-        latest = snapshots[-1] if snapshots else None
         return {
             "campaign_id": campaign_id,
             "branch_id": branch.id,
@@ -298,11 +309,7 @@ class ContinuityService:
                 "total_on_branch": len(snapshots),
                 "latest_id": latest.id if latest else None,
                 "latest_slot": latest.slot if latest else None,
-                "latest_payload_chars": (
-                    len(json.dumps(latest.payload, ensure_ascii=False, separators=(",", ":")))
-                    if latest
-                    else 0
-                ),
+                "latest_payload_chars": latest_payload_chars,
             },
         }
 
@@ -483,7 +490,7 @@ class ContinuityService:
             if snapshot is None:
                 return None
             SnapshotService._assert_integrity(session, snapshot)
-            values = snapshot.payload.get("scene_progress", [])
+            values = SnapshotService._materialize(snapshot).get("scene_progress", [])
             for effective_scope in (scope_id, "party"):
                 match = next(
                     (

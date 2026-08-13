@@ -306,7 +306,11 @@ class BranchService:
                     if snapshot is None or snapshot.campaign_id != campaign_id:
                         raise LookupError(row.head_snapshot_id)
                     SnapshotService._assert_integrity(session, snapshot)
-                    SnapshotService(self.database)._apply(session, campaign, dict(snapshot.payload))
+                    SnapshotService(self.database)._apply(
+                        session,
+                        campaign,
+                        SnapshotService._materialize(snapshot),
+                    )
                     checked_out_snapshot = SnapshotService(self.database)._info(session, snapshot)
             result = self._info(row, active_branch_id=campaign.active_branch_id)
             idempotency.remember_write_in_session(
@@ -381,7 +385,11 @@ class BranchService:
                 if snapshot is None or snapshot.campaign_id != campaign_id:
                     raise LookupError(row.head_snapshot_id)
                 SnapshotService._assert_integrity(session, snapshot)
-                SnapshotService(self.database)._apply(session, campaign, dict(snapshot.payload))
+                SnapshotService(self.database)._apply(
+                    session,
+                    campaign,
+                    SnapshotService._materialize(snapshot),
+                )
                 snapshot_info = SnapshotService(self.database)._info(session, snapshot)
             else:
                 snapshot_info = None
@@ -431,9 +439,11 @@ class BranchService:
         snapshot = session.get(CampaignSnapshot, snapshot_id)
         if snapshot is None:
             return
+        from sagasmith_core.snapshots import SnapshotService
+
         cursor = {
             str(item["id"]): item
-            for item in dict(snapshot.payload).get("revision_cursor", [])
+            for item in SnapshotService._materialize(snapshot).get("revision_cursor", [])
             if item.get("id")
         }
         if not cursor:
@@ -549,7 +559,10 @@ class BranchService:
         snapshot = session.get(CampaignSnapshot, snapshot_id)
         if snapshot is None:
             return
-        for item in dict(snapshot.payload).get("rule_lock", []):
+        from sagasmith_core.snapshots import SnapshotService
+
+        payload = SnapshotService._materialize(snapshot)
+        for item in payload.get("rule_lock", []):
             session.add(
                 CampaignRuleActivation(
                     campaign_id=snapshot.campaign_id,
@@ -561,7 +574,7 @@ class BranchService:
                     options=dict(item.get("options") or {}),
                 )
             )
-        for item in dict(snapshot.payload).get("addon_lock", []):
+        for item in payload.get("addon_lock", []):
             session.add(
                 CampaignAddonActivation(
                     campaign_id=snapshot.campaign_id,

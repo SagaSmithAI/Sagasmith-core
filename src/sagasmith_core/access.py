@@ -262,7 +262,7 @@ class AccessService:
                         SnapshotService._assert_integrity(session, snapshot)
                     actor_exists = snapshot is not None and any(
                         str(item.get("id")) == actor_id
-                        for item in dict(snapshot.payload).get("characters", [])
+                        for item in SnapshotService._materialize(snapshot).get("characters", [])
                     )
             if not actor_exists:
                 raise AccessDeniedError(

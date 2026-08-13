@@ -17,7 +17,6 @@ from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.concurrency import compare_and_swap_campaign
 from sagasmith_core.database import Database
 from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
-from sagasmith_core.integrity import json_sha256
 from sagasmith_core.models import (
     ActorKnowledge,
     ActorKnowledgeRevision,
@@ -48,6 +47,11 @@ from sagasmith_core.rule_profile_contract import (
     RULE_PROFILE_OWNED_SETTING_FIELDS,
     SNAPSHOT_RULE_PROFILE_FIELDS,
 )
+from sagasmith_core.snapshot_storage import (
+    SnapshotStorageError,
+    decode_snapshot_payload,
+    encode_snapshot_payload,
+)
 from sagasmith_core.visibility import (
     PLAYER_EVENT_AUDIENCE_SCOPES,
     PLAYER_MEMORY_DISCLOSURE_SCOPES,
@@ -71,12 +75,8 @@ class SnapshotInfo:
     branch_id: str | None = None
 
 
-def _checksum(value: dict[str, Any]) -> str:
-    return json_sha256(value)
-
-
 class SnapshotService:
-    SCHEMA_VERSION = 7
+    SCHEMA_VERSION = 8
 
     def __init__(self, database: Database) -> None:
         self.database = database
@@ -139,23 +139,35 @@ class SnapshotService:
             or 0
         ) + 1
         payload = self._capture(session, campaign, branch.id)
-        parent_payload = (
-            dict(session.get(CampaignSnapshot, parent_id).payload) if parent_id else None
-        )
+        parent = session.get(CampaignSnapshot, parent_id) if parent_id else None
+        parent_payload = self._materialize(parent) if parent is not None else None
         canonical_recap = self._build_recap(parent_payload, payload)
         recap = (
             canonical_recap if recap is None else self._attach_presentation(canonical_recap, recap)
         )
+        snapshot_id = str(uuid.uuid4())
+        encoded = encode_snapshot_payload(
+            payload,
+            schema_version=self.SCHEMA_VERSION,
+            snapshot_id=snapshot_id,
+            campaign_id=campaign.id,
+            branch_id=branch.id,
+            parent_id=parent_id,
+            slot=slot,
+        )
         row = CampaignSnapshot(
-            id=str(uuid.uuid4()),
+            id=snapshot_id,
             campaign_id=campaign.id,
             branch_id=branch.id,
             parent_id=parent_id,
             slot=slot,
             label=label,
             schema_version=self.SCHEMA_VERSION,
-            payload=payload,
-            checksum=_checksum(payload),
+            compressed_payload=encoded.compressed_payload,
+            payload_codec=encoded.payload_codec,
+            uncompressed_size=encoded.uncompressed_size,
+            checksum=encoded.payload_checksum,
+            record_checksum=encoded.record_checksum,
             recap=recap,
         )
         session.add(row)
@@ -174,8 +186,8 @@ class SnapshotService:
             if parent is not None:
                 self._assert_integrity(session, parent)
             return self._build_recap(
-                dict(parent.payload) if parent else None,
-                dict(row.payload),
+                self._materialize(parent) if parent else None,
+                self._materialize(row),
             )
 
     def list(self, campaign_id: str) -> list[SnapshotInfo]:
@@ -257,7 +269,7 @@ class SnapshotService:
             branch_service._copy_snapshot_heads(session, target.id, branch.id)
             branch_service._copy_snapshot_revisions(session, target.id, branch.id)
             branch_service._checkout(session, campaign, branch)
-            self._apply(session, campaign, dict(target.payload))
+            self._apply(session, campaign, self._materialize(target))
             result = self._create_in_session(
                 session,
                 campaign,
@@ -326,7 +338,7 @@ class SnapshotService:
                 raise ValueError("converted rule profile system_id does not match the campaign")
             target = self._row(session, campaign_id, slot)
             self._assert_integrity(session, target)
-            target_payload = deepcopy(dict(target.payload))
+            target_payload = deepcopy(self._materialize(target))
             if target_payload.get("rule_profile") is None:
                 raise ValueError("source snapshot has no rule profile to convert")
             self._create_in_session(
@@ -415,7 +427,7 @@ class SnapshotService:
                 raise LookupError(branch_row.head_snapshot_id)
             self._assert_integrity(session, row)
             BranchService._checkout(session, campaign, branch_row)
-            self._apply(session, campaign, dict(row.payload))
+            self._apply(session, campaign, self._materialize(row))
             return self._info(session, row)
 
     def lineage(self, campaign_id: str, slot: int | None = None) -> list[SnapshotInfo]:
@@ -1050,11 +1062,36 @@ class SnapshotService:
         )
 
     @classmethod
+    def _materialize(cls, row: CampaignSnapshot) -> dict[str, Any]:
+        """Return one verified full state document without walking its ancestry."""
+
+        if row.schema_version != cls.SCHEMA_VERSION:
+            raise SnapshotIntegrityError(
+                "snapshot schema is unsupported; create a new snapshot with the current runtime"
+            )
+        try:
+            return decode_snapshot_payload(
+                schema_version=row.schema_version,
+                snapshot_id=row.id,
+                campaign_id=row.campaign_id,
+                branch_id=row.branch_id,
+                parent_id=row.parent_id,
+                slot=row.slot,
+                payload_codec=row.payload_codec,
+                uncompressed_size=row.uncompressed_size,
+                payload_checksum=row.checksum,
+                record_checksum=row.record_checksum,
+                compressed_payload=bytes(row.compressed_payload),
+            )
+        except SnapshotStorageError as exc:
+            raise SnapshotIntegrityError(str(exc)) from exc
+
+    @classmethod
     def _document(cls, session, row: CampaignSnapshot) -> dict[str, Any]:
         return {
             **asdict(cls._info(session, row)),
             "schema_version": row.schema_version,
-            "payload": dict(row.payload),
+            "payload": cls._materialize(row),
             "recap": dict(row.recap) if row.recap else None,
             "storage_mode": "full",
             "valid": cls._is_valid(session, row),
@@ -1075,9 +1112,7 @@ class SnapshotService:
             raise SnapshotIntegrityError(
                 "snapshot schema is unsupported; create a new snapshot with the current runtime"
             )
-        if _checksum(row.payload) != row.checksum:
-            raise SnapshotIntegrityError("snapshot payload failed checksum verification")
-        payload = dict(row.payload)
+        payload = cls._materialize(row)
         required = {
             "campaign",
             "rule_profile",
@@ -1329,7 +1364,7 @@ class SnapshotService:
             raise SnapshotIntegrityError("checked-out branch head is missing")
         cls._assert_integrity(session, head)
         current = cls._capture(session, campaign, branch.id)
-        expected = dict(head.payload)
+        expected = cls._materialize(head)
         # Campaign revision is a live optimistic-concurrency token. Checkout
         # advances it monotonically, so it is not part of worktree dirtiness.
         current_campaign = dict(current.get("campaign") or {})

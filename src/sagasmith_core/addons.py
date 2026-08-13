@@ -516,10 +516,12 @@ class AddonService:
             )
             if references:
                 raise AddonError("an activated addon version cannot be removed")
+            from sagasmith_core.snapshots import SnapshotService
+
             historical_reference = any(
                 item.get("addon_id") == addon_id and item.get("version") == version
                 for snapshot in session.scalars(select(CampaignSnapshot))
-                for item in dict(snapshot.payload or {}).get("addon_lock", [])
+                for item in SnapshotService._materialize(snapshot).get("addon_lock", [])
             )
             if historical_reference:
                 raise AddonError("an addon version referenced by a snapshot cannot be removed")

@@ -214,10 +214,12 @@ class RulePackService:
                 raise RulePackError(
                     "a rule-pack version referenced by a branch lock cannot be removed"
                 )
+            from sagasmith_core.snapshots import SnapshotService
+
             historical_reference = any(
                 item.get("pack_id") == pack_id and item.get("version") == version
                 for snapshot in session.scalars(select(CampaignSnapshot))
-                for item in dict(snapshot.payload or {}).get("rule_lock", [])
+                for item in SnapshotService._materialize(snapshot).get("rule_lock", [])
             )
             if historical_reference:
                 raise RulePackError(

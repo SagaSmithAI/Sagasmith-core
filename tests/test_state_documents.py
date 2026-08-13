@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import zlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -75,6 +76,13 @@ from sagasmith_core.models import (
     MutationGroup,
     SnapshotActorKnowledgeBinding,
     StateRevision,
+)
+from sagasmith_core.snapshot_storage import (
+    MAX_SNAPSHOT_PAYLOAD_BYTES,
+    SnapshotStorageError,
+    decode_snapshot_payload,
+    encode_snapshot_payload,
+    snapshot_record_checksum,
 )
 from sagasmith_core.snapshots import SnapshotIntegrityError
 from sagasmith_core.visibility import (
@@ -3099,6 +3107,123 @@ def test_snapshot_is_full_and_validates_actor_knowledge_bindings(database) -> No
     assert snapshots.verify(campaign.id, saved.slot) is False
     with pytest.raises(SnapshotIntegrityError, match="actor-knowledge bindings"):
         snapshots.restore(campaign.id, saved.slot)
+
+
+def test_snapshot_storage_is_self_contained_compressed_and_parent_bound(database) -> None:
+    campaign = CampaignService(database).create(
+        system_id="dnd5e",
+        name="Compressed save",
+        state={"repeated": "x" * 20_000},
+    )
+    snapshots = SnapshotService(database)
+    base = snapshots.create(campaign.id, label="Compressed base")
+    child = snapshots.create(campaign.id, label="Compressed child")
+
+    with database.transaction() as session:
+        row = session.get(CampaignSnapshot, child.id)
+        assert row is not None
+        assert row.payload_codec == "zlib-1"
+        assert len(row.compressed_payload) < row.uncompressed_size
+        assert len(zlib.decompress(row.compressed_payload)) == row.uncompressed_size
+        assert row.schema_version == 8
+
+    document = snapshots.get(campaign.id, child.slot)
+    assert document["storage_mode"] == "full"
+    assert document["payload"]["campaign"]["state"] == {"repeated": "x" * 20_000}
+    assert document["valid"] is True
+
+    with database.transaction() as session:
+        row = session.get(CampaignSnapshot, child.id)
+        assert row is not None
+        row.parent_id = None
+
+    assert snapshots.verify(campaign.id, child.slot) is False
+    with pytest.raises(SnapshotIntegrityError, match="record failed checksum"):
+        snapshots.restore(campaign.id, child.slot)
+    assert snapshots.verify(campaign.id, base.slot) is True
+
+
+def test_snapshot_storage_rejects_trailing_data_and_oversized_decompression() -> None:
+    identity = {
+        "schema_version": 8,
+        "snapshot_id": "snapshot-1",
+        "campaign_id": "campaign-1",
+        "branch_id": "branch-1",
+        "parent_id": None,
+        "slot": 1,
+    }
+    encoded = encode_snapshot_payload({"campaign": {"state": "safe"}}, **identity)
+    trailing = encoded.compressed_payload + b"trailing"
+    trailing_checksum = snapshot_record_checksum(
+        **identity,
+        payload_codec=encoded.payload_codec,
+        uncompressed_size=encoded.uncompressed_size,
+        payload_checksum=encoded.payload_checksum,
+        compressed_payload=trailing,
+    )
+    with pytest.raises(SnapshotStorageError, match="decompressed size"):
+        decode_snapshot_payload(
+            **identity,
+            payload_codec=encoded.payload_codec,
+            uncompressed_size=encoded.uncompressed_size,
+            payload_checksum=encoded.payload_checksum,
+            record_checksum=trailing_checksum,
+            compressed_payload=trailing,
+        )
+
+    truncated = encoded.compressed_payload[:-1]
+    truncated_checksum = snapshot_record_checksum(
+        **identity,
+        payload_codec=encoded.payload_codec,
+        uncompressed_size=encoded.uncompressed_size,
+        payload_checksum=encoded.payload_checksum,
+        compressed_payload=truncated,
+    )
+    with pytest.raises(SnapshotStorageError, match="decompressed size"):
+        decode_snapshot_payload(
+            **identity,
+            payload_codec=encoded.payload_codec,
+            uncompressed_size=encoded.uncompressed_size,
+            payload_checksum=encoded.payload_checksum,
+            record_checksum=truncated_checksum,
+            compressed_payload=truncated,
+        )
+
+    garbage = b"not-a-zlib-stream"
+    garbage_checksum = snapshot_record_checksum(
+        **identity,
+        payload_codec=encoded.payload_codec,
+        uncompressed_size=encoded.uncompressed_size,
+        payload_checksum=encoded.payload_checksum,
+        compressed_payload=garbage,
+    )
+    with pytest.raises(SnapshotStorageError, match="decompression failed"):
+        decode_snapshot_payload(
+            **identity,
+            payload_codec=encoded.payload_codec,
+            uncompressed_size=encoded.uncompressed_size,
+            payload_checksum=encoded.payload_checksum,
+            record_checksum=garbage_checksum,
+            compressed_payload=garbage,
+        )
+
+    oversized = MAX_SNAPSHOT_PAYLOAD_BYTES + 1
+    oversized_checksum = snapshot_record_checksum(
+        **identity,
+        payload_codec=encoded.payload_codec,
+        uncompressed_size=oversized,
+        payload_checksum=encoded.payload_checksum,
+        compressed_payload=encoded.compressed_payload,
+    )
+    with pytest.raises(SnapshotStorageError, match="invalid uncompressed size"):
+        decode_snapshot_payload(
+            **identity,
+            payload_codec=encoded.payload_codec,
+            uncompressed_size=oversized,
+            payload_checksum=encoded.payload_checksum,
+            record_checksum=oversized_checksum,
+            compressed_payload=encoded.compressed_payload,
+        )
 
 
 def test_restore_head_recaptures_materialized_actors_and_actor_knowledge(database) -> None:
