@@ -78,6 +78,7 @@ from sagasmith_core.models import (
     ModuleSource,
     MutationGroup,
     SnapshotActorKnowledgeBinding,
+    StateDocument,
     StateRevision,
 )
 from sagasmith_core.snapshot_storage import (
@@ -88,6 +89,7 @@ from sagasmith_core.snapshot_storage import (
     snapshot_record_checksum,
 )
 from sagasmith_core.snapshots import SnapshotIntegrityError
+from sagasmith_core.state_document_storage import StateDocumentStorageError
 from sagasmith_core.visibility import (
     ACTOR_KNOWLEDGE_DISCLOSURE_SCOPES,
     EVENT_AUDIENCE_SCOPES,
@@ -3235,6 +3237,42 @@ def test_snapshot_document_decodes_payload_once(database, monkeypatch) -> None:
     assert calls == 1
 
 
+def test_state_revisions_share_compressed_documents_and_fail_closed(database) -> None:
+    campaign = CampaignService(database).create(
+        system_id="dnd5e",
+        name="Shared revision documents",
+        state={"clock": 1},
+    )
+    revisions = RevisionService(database)
+    change = {
+        "operation": "test.shared-document",
+        "entity_type": "campaign",
+        "entity_id": campaign.id,
+        "before": {"state": {"clock": 0}, "revision": 1},
+        "after": {"state": {"clock": 1}, "revision": 2},
+    }
+    revisions.record(campaign.id, **change)
+    revisions.record(campaign.id, **change)
+
+    with database.transaction() as session:
+        rows = list(
+            session.scalars(
+                select(StateRevision)
+                .where(StateRevision.campaign_id == campaign.id)
+                .order_by(StateRevision.sequence)
+            )
+        )
+        documents = list(session.scalars(select(StateDocument)))
+        assert len(documents) == 2
+        assert rows[0].before_document_id == rows[1].before_document_id
+        assert rows[0].after_document_id == rows[1].after_document_id
+        session.get(StateDocument, rows[-1].before_document_id).compressed_payload += b"trailing"
+
+    with pytest.raises(StateDocumentStorageError, match="decompressed size"):
+        revisions.undo(campaign.id)
+    assert RevisionService(database).history(campaign.id)[0].applied is True
+
+
 def test_snapshot_storage_rejects_trailing_data_and_oversized_decompression() -> None:
     identity = {
         "schema_version": 8,
@@ -3413,6 +3451,7 @@ def test_branch_checkout_bulk_restores_large_revision_cursor(database) -> None:
     mutations = StateMutationService(database)
     snapshots = SnapshotService(database)
     branches = BranchService(database)
+    main_branch_id = branches.current(campaign.id).id
 
     for step in range(60):
         current = campaigns.get(campaign.id)
@@ -3448,10 +3487,7 @@ def test_branch_checkout_bulk_restores_large_revision_cursor(database) -> None:
         if statement.startswith("SELECT") and "FROM STATE_REVISIONS" in statement
     ]
     assert revision_copy_selects
-    assert all(
-        "STATE_REVISIONS.BEFORE" not in statement and "STATE_REVISIONS.AFTER" not in statement
-        for statement in revision_copy_selects
-    )
+    assert all("COMPRESSED_PAYLOAD" not in statement for statement in revision_copy_selects)
     with database.session_factory() as session:
         cloned_revisions = list(
             session.scalars(
@@ -3461,11 +3497,28 @@ def test_branch_checkout_bulk_restores_large_revision_cursor(database) -> None:
                     MutationGroup.id == StateRevision.mutation_group_id,
                 )
                 .where(MutationGroup.branch_id == alternate.id)
+                .order_by(StateRevision.sequence)
+            )
+        )
+        source_revisions = list(
+            session.scalars(
+                select(StateRevision)
+                .join(
+                    MutationGroup,
+                    MutationGroup.id == StateRevision.mutation_group_id,
+                )
+                .where(MutationGroup.branch_id == main_branch_id)
+                .order_by(StateRevision.sequence)
             )
         )
         audit_rows = list(session.scalars(select(AuditLog)))
     assert len(cloned_revisions) == 60
-    assert all(row.before is None and row.after is None for row in cloned_revisions)
+    assert len(source_revisions) == 60
+    assert [
+        (row.before_document_id, row.after_document_id) for row in cloned_revisions
+    ] == [
+        (row.before_document_id, row.after_document_id) for row in source_revisions
+    ]
     assert audit_rows
     assert all(row.before is None and row.after is None for row in audit_rows)
     current = campaigns.get(campaign.id)

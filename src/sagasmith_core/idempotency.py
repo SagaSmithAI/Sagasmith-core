@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sagasmith_core.database import Database
 from sagasmith_core.integrity import canonical_json, json_sha256
 from sagasmith_core.models import Campaign, IdempotencyRecord, MutationGroup, StateRevision
+from sagasmith_core.state_documents import load_state_document
 
 
 class IdempotencyConflictError(ValueError):
@@ -180,8 +181,8 @@ class IdempotencyService:
                     .order_by(StateRevision.sequence)
                 )
                 for revision in revision_rows:
-                    before = dict(revision.before or {})
-                    after = dict(revision.after or {})
+                    before = load_state_document(session, revision.before_document_id) or {}
+                    after = load_state_document(session, revision.after_document_id) or {}
                     entity_revisions.append(
                         {
                             "entity_type": revision.entity_type,
@@ -253,8 +254,8 @@ class IdempotencyService:
                     .order_by(StateRevision.sequence)
                 )
                 for revision in revision_rows:
-                    before = dict(revision.before or {})
-                    after = dict(revision.after or {})
+                    before = load_state_document(session, revision.before_document_id) or {}
+                    after = load_state_document(session, revision.after_document_id) or {}
                     entity_revisions.append(
                         {
                             "entity_type": revision.entity_type,

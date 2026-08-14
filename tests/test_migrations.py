@@ -18,7 +18,14 @@ def test_bundled_migration_builds_schema(tmp_path: Path) -> None:
         assert "current_location_key" in {
             column["name"] for column in inspector.get_columns("scene_progress")
         }
-        assert "redoable" in {column["name"] for column in inspector.get_columns("state_revisions")}
+        state_revision_columns = {
+            column["name"] for column in inspector.get_columns("state_revisions")
+        }
+        assert "redoable" in state_revision_columns
+        assert {"before_document_id", "after_document_id"}.issubset(state_revision_columns)
+        assert "before" not in state_revision_columns
+        assert "after" not in state_revision_columns
+        assert "state_documents" in inspector.get_table_names()
         assert "template_id" in {column["name"] for column in inspector.get_columns("characters")}
         assert "rule_pack_versions" in inspector.get_table_names()
         assert "provenance" in {
@@ -139,6 +146,56 @@ def test_snapshot_v2_migrates_existing_revision_history(tmp_path: Path) -> None:
             column["name"] for column in inspect(database.engine).get_columns("state_revisions")
         }
         assert "redoable" in columns
+    finally:
+        database.dispose()
+
+
+def test_state_documents_migrate_and_deduplicate_v29_revision_payloads(tmp_path: Path) -> None:
+    database = Database(sqlite_database_url(tmp_path / "state-documents.db"))
+    config = alembic_config(database.url)
+    before = json.dumps({"revision": 1, "state": {"clock": 0}})
+    after = json.dumps({"revision": 2, "state": {"clock": 1}})
+    with database.engine.begin() as connection:
+        connection.exec_driver_sql(
+            "CREATE TABLE state_revisions ("
+            "id VARCHAR(36) PRIMARY KEY, mutation_group_id VARCHAR(36), "
+            "campaign_id VARCHAR(36) NOT NULL, parent_id VARCHAR(36), sequence INTEGER NOT NULL, "
+            "branch_key VARCHAR(36) NOT NULL, operation VARCHAR(100) NOT NULL, "
+            "entity_type VARCHAR(64) NOT NULL, entity_id VARCHAR(100) NOT NULL, "
+            "before JSON, after JSON, applied BOOLEAN NOT NULL DEFAULT 1, "
+            "redoable BOOLEAN NOT NULL DEFAULT 1, created_at DATETIME NOT NULL)"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO state_revisions "
+            "(id, mutation_group_id, campaign_id, parent_id, sequence, branch_key, operation, "
+            "entity_type, entity_id, before, after, applied, redoable, created_at) VALUES "
+            "(?, NULL, 'campaign-1', NULL, ?, 'branch-key', 'test.migrate', 'campaign', "
+            "'campaign-1', ?, ?, 1, 1, CURRENT_TIMESTAMP)",
+            [
+                ("revision-1", 1, before, after),
+                ("revision-2", 2, before, after),
+            ],
+        )
+
+    command.stamp(config, "20260814_29")
+    command.upgrade(config, "head")
+    try:
+        inspector = inspect(database.engine)
+        columns = {column["name"] for column in inspector.get_columns("state_revisions")}
+        assert {"before_document_id", "after_document_id"}.issubset(columns)
+        assert "before" not in columns
+        assert "after" not in columns
+        with database.engine.connect() as connection:
+            document_count = connection.exec_driver_sql(
+                "SELECT count(*) FROM state_documents"
+            ).scalar_one()
+            references = connection.exec_driver_sql(
+                "SELECT before_document_id, after_document_id FROM state_revisions "
+                "ORDER BY sequence"
+            ).all()
+        assert document_count == 2
+        assert references[0] == references[1]
+        assert all(references[0])
     finally:
         database.dispose()
 

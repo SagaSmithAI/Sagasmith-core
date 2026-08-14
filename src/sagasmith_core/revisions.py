@@ -18,6 +18,7 @@ from sagasmith_core.models import (
     MutationGroup,
     StateRevision,
 )
+from sagasmith_core.state_documents import load_state_document, persist_state_documents
 
 REVERSIBLE_ENTITY_TYPES = frozenset({"campaign", "character"})
 
@@ -179,7 +180,18 @@ class RevisionService:
         )
         rows: list[StateRevision] = []
         parent_id = current.id if current else None
-        for offset, change in enumerate(changes):
+        document_ids = persist_state_documents(
+            session,
+            [
+                value
+                for change in changes
+                for value in (change.get("before"), change.get("after"))
+            ],
+        )
+        document_pairs = list(zip(document_ids[::2], document_ids[1::2], strict=True))
+        for offset, (change, (before_document_id, after_document_id)) in enumerate(
+            zip(changes, document_pairs, strict=True)
+        ):
             row = StateRevision(
                 id=str(uuid.uuid4()),
                 mutation_group_id=group.id,
@@ -190,8 +202,8 @@ class RevisionService:
                 operation=operation,
                 entity_type=str(change["entity_type"]),
                 entity_id=str(change["entity_id"]),
-                before=change.get("before"),
-                after=change.get("after"),
+                before_document_id=before_document_id,
+                after_document_id=after_document_id,
             )
             session.add(row)
             session.flush()
@@ -409,21 +421,8 @@ class RevisionService:
         *,
         before: bool,
     ) -> dict[str, Any] | None:
-        value = revision.before if before else revision.after
-        if value is not None:
-            return dict(value)
-        source_id = str(revision.branch_key or "")
-        visited = {revision.id}
-        while source_id and source_id not in visited:
-            visited.add(source_id)
-            source = session.get(StateRevision, source_id)
-            if source is None:
-                break
-            value = source.before if before else source.after
-            if value is not None:
-                return dict(value)
-            source_id = str(source.branch_key or "")
-        raise RuntimeError(f"revision payload source is unavailable: {revision.id}")
+        document_id = revision.before_document_id if before else revision.after_document_id
+        return load_state_document(session, document_id)
 
     @staticmethod
     def _audit(session, row: StateRevision, *, actor: str, reverse: bool = False) -> None:

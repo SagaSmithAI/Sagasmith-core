@@ -469,6 +469,20 @@ class CampaignEventParticipant(Base):
     role: Mapped[str] = mapped_column(String(32), primary_key=True)
 
 
+class StateDocument(Base):
+    """One canonical compressed document shared by reversible revision references."""
+
+    __tablename__ = "state_documents"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    payload_codec: Mapped[str] = mapped_column(String(32), nullable=False)
+    uncompressed_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    compressed_payload: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=operational_utcnow
+    )
+
+
 class StateRevision(Base):
     __tablename__ = "state_revisions"
     __table_args__ = (
@@ -492,8 +506,12 @@ class StateRevision(Base):
     operation: Mapped[str] = mapped_column(String(100), nullable=False)
     entity_type: Mapped[str] = mapped_column(String(64), nullable=False)
     entity_id: Mapped[str] = mapped_column(String(100), nullable=False)
-    before: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
-    after: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    before_document_id: Mapped[str | None] = mapped_column(
+        ForeignKey("state_documents.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    after_document_id: Mapped[str | None] = mapped_column(
+        ForeignKey("state_documents.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
     applied: Mapped[bool] = mapped_column(Boolean, default=True)
     redoable: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(

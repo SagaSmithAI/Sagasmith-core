@@ -460,6 +460,8 @@ class BranchService:
                     StateRevision.operation,
                     StateRevision.entity_type,
                     StateRevision.entity_id,
+                    StateRevision.before_document_id,
+                    StateRevision.after_document_id,
                 )
                 .where(StateRevision.id.in_(cursor))
                 .order_by(StateRevision.sequence)
@@ -540,15 +542,14 @@ class BranchService:
                     campaign_id=old.campaign_id,
                     parent_id=revision_map.get(old.parent_id),
                     sequence=max_sequence + offset,
-                    # Branch cursors share immutable payloads with their source
-                    # revisions. Undo/redo resolves this id without duplicating
-                    # potentially large campaign and character JSON documents.
+                    # Preserve the historical cursor source identity. Reversible
+                    # documents are shared directly by immutable checksum refs.
                     branch_key=payload_revision_id,
                     operation=old.operation,
                     entity_type=old.entity_type,
                     entity_id=old.entity_id,
-                    before=None,
-                    after=None,
+                    before_document_id=old.before_document_id,
+                    after_document_id=old.after_document_id,
                     applied=bool(cursor_item.get("applied", True)),
                     redoable=bool(cursor_item.get("redoable", True)),
                 )
