@@ -121,6 +121,7 @@ class SnapshotService:
         label: str = "",
         recap: dict[str, Any] | None = None,
         parent_id: str | None = None,
+        parent_payload: dict[str, Any] | None = None,
     ) -> SnapshotInfo:
         branch = resolve_branch(session, campaign)
         if parent_id is not None and parent_id != branch.head_snapshot_id:
@@ -140,7 +141,8 @@ class SnapshotService:
         ) + 1
         payload = self._capture(session, campaign, branch.id)
         parent = session.get(CampaignSnapshot, parent_id) if parent_id else None
-        parent_payload = self._materialize(parent) if parent is not None else None
+        if parent is not None and parent_payload is None:
+            parent_payload = self._materialize(parent)
         canonical_recap = self._build_recap(parent_payload, payload)
         recap = (
             canonical_recap if recap is None else self._attach_presentation(canonical_recap, recap)
@@ -182,13 +184,13 @@ class SnapshotService:
         with self.database.transaction() as session:
             row = self._row(session, campaign_id, slot)
             parent = session.get(CampaignSnapshot, row.parent_id) if row.parent_id else None
-            self._assert_integrity(session, row)
+            payload = self._materialize(row)
+            self._assert_integrity(session, row, payload)
+            parent_payload = None
             if parent is not None:
-                self._assert_integrity(session, parent)
-            return self._build_recap(
-                self._materialize(parent) if parent else None,
-                self._materialize(row),
-            )
+                parent_payload = self._materialize(parent)
+                self._assert_integrity(session, parent, parent_payload)
+            return self._build_recap(parent_payload, payload)
 
     def list(self, campaign_id: str) -> list[SnapshotInfo]:
         with self.database.transaction() as session:
@@ -254,7 +256,8 @@ class SnapshotService:
             session.expire(campaign)
             session.refresh(campaign)
             target = self._row(session, campaign_id, slot)
-            self._assert_integrity(session, target)
+            target_payload = self._materialize(target)
+            self._assert_integrity(session, target, target_payload)
             self._create_in_session(session, campaign, label=f"Before restore to slot {slot}")
             branch = CampaignBranch(
                 id=str(uuid.uuid4()),
@@ -269,12 +272,13 @@ class SnapshotService:
             branch_service._copy_snapshot_heads(session, target.id, branch.id)
             branch_service._copy_snapshot_revisions(session, target.id, branch.id)
             branch_service._checkout(session, campaign, branch)
-            self._apply(session, campaign, self._materialize(target))
+            self._apply(session, campaign, target_payload)
             result = self._create_in_session(
                 session,
                 campaign,
                 label=f"Restored from slot {slot}",
                 parent_id=target.id,
+                parent_payload=target_payload,
             )
             idempotency.remember_write_in_session(
                 session,
@@ -337,8 +341,9 @@ class SnapshotService:
             if profile_value["system_id"] != campaign.system_id:
                 raise ValueError("converted rule profile system_id does not match the campaign")
             target = self._row(session, campaign_id, slot)
-            self._assert_integrity(session, target)
-            target_payload = deepcopy(self._materialize(target))
+            source_payload = self._materialize(target)
+            self._assert_integrity(session, target, source_payload)
+            target_payload = deepcopy(source_payload)
             if target_payload.get("rule_profile") is None:
                 raise ValueError("source snapshot has no rule profile to convert")
             self._create_in_session(
@@ -366,6 +371,7 @@ class SnapshotService:
                 campaign,
                 label=converted_label,
                 parent_id=target.id,
+                parent_payload=source_payload,
             )
             idempotency.remember_write_in_session(
                 session,
@@ -417,7 +423,8 @@ class SnapshotService:
                 row = session.get(CampaignSnapshot, branch_row.head_snapshot_id)
                 if row is None:
                     raise LookupError(branch_row.head_snapshot_id)
-                self._assert_integrity(session, row)
+                payload = self._materialize(row)
+                self._assert_integrity(session, row, payload)
                 return self._info(session, row)
             self._assert_clean_branch(session, campaign, current)
             if branch_row.head_snapshot_id is None:
@@ -425,9 +432,10 @@ class SnapshotService:
             row = session.get(CampaignSnapshot, branch_row.head_snapshot_id)
             if row is None or row.campaign_id != campaign_id:
                 raise LookupError(branch_row.head_snapshot_id)
-            self._assert_integrity(session, row)
+            payload = self._materialize(row)
+            self._assert_integrity(session, row, payload)
             BranchService._checkout(session, campaign, branch_row)
-            self._apply(session, campaign, self._materialize(row))
+            self._apply(session, campaign, payload)
             return self._info(session, row)
 
     def lineage(self, campaign_id: str, slot: int | None = None) -> list[SnapshotInfo]:
@@ -1088,26 +1096,38 @@ class SnapshotService:
 
     @classmethod
     def _document(cls, session, row: CampaignSnapshot) -> dict[str, Any]:
+        payload = cls._materialize(row)
         return {
             **asdict(cls._info(session, row)),
             "schema_version": row.schema_version,
-            "payload": cls._materialize(row),
+            "payload": payload,
             "recap": dict(row.recap) if row.recap else None,
-            "valid": cls._is_valid(session, row),
+            "valid": cls._is_valid(session, row, payload),
         }
 
     @classmethod
-    def _is_valid(cls, session, row: CampaignSnapshot) -> bool:
+    def _is_valid(
+        cls,
+        session,
+        row: CampaignSnapshot,
+        payload: dict[str, Any] | None = None,
+    ) -> bool:
         try:
-            cls._assert_integrity(session, row)
+            cls._assert_integrity(session, row, payload)
         except SnapshotIntegrityError:
             return False
         return True
 
     @classmethod
-    def _assert_integrity(cls, session, row: CampaignSnapshot) -> None:
+    def _assert_integrity(
+        cls,
+        session,
+        row: CampaignSnapshot,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
         """Verify the full payload, DAG ancestry, and indexed continuity bindings."""
-        payload = cls._materialize(row)
+        if payload is None:
+            payload = cls._materialize(row)
         required = {
             "campaign",
             "rule_profile",
@@ -1177,16 +1197,23 @@ class SnapshotService:
                 "snapshot module activation references an unavailable revision"
             )
 
+        lineage = {
+            snapshot_id: parent_id
+            for snapshot_id, parent_id in session.execute(
+                select(CampaignSnapshot.id, CampaignSnapshot.parent_id).where(
+                    CampaignSnapshot.campaign_id == row.campaign_id
+                )
+            )
+        }
         visited = {row.id}
         parent_id = row.parent_id
         while parent_id:
-            parent = session.get(CampaignSnapshot, parent_id)
-            if parent is None or parent.campaign_id != row.campaign_id:
+            if parent_id not in lineage:
                 raise SnapshotIntegrityError("snapshot lineage crosses campaign boundaries")
-            if parent.id in visited:
+            if parent_id in visited:
                 raise SnapshotIntegrityError("snapshot lineage contains a cycle")
-            visited.add(parent.id)
-            parent_id = parent.parent_id
+            visited.add(parent_id)
+            parent_id = lineage[parent_id]
 
         payload_facts = {str(item.get("id")): item for item in payload.get("memories", [])}
         expected_facts = cls._payload_revision_map(payload.get("memories", []), "memory")
@@ -1198,9 +1225,21 @@ class SnapshotService:
         }
         if expected_facts != actual_facts:
             raise SnapshotIntegrityError("snapshot fact bindings do not match its full payload")
+        memories = {
+            memory.id: memory
+            for memory in session.scalars(
+                select(CampaignMemory).where(CampaignMemory.id.in_(actual_facts))
+            )
+        }
+        memory_revisions = {
+            revision.id: revision
+            for revision in session.scalars(
+                select(MemoryRevision).where(MemoryRevision.id.in_(actual_facts.values()))
+            )
+        }
         for memory_id, revision_id in actual_facts.items():
-            memory = session.get(CampaignMemory, memory_id)
-            revision = session.get(MemoryRevision, revision_id)
+            memory = memories.get(memory_id)
+            revision = memory_revisions.get(revision_id)
             item = payload_facts[memory_id]
             revision_item = dict(item.get("revision") or {})
             invalid = (
@@ -1256,9 +1295,23 @@ class SnapshotService:
         for item in payload.get("actor_knowledge", []):
             if str(item.get("actor_id")) not in actor_ids:
                 raise SnapshotIntegrityError("snapshot contains knowledge for a missing actor")
+        knowledge_rows = {
+            knowledge.id: knowledge
+            for knowledge in session.scalars(
+                select(ActorKnowledge).where(ActorKnowledge.id.in_(actual_knowledge))
+            )
+        }
+        knowledge_revisions = {
+            revision.id: revision
+            for revision in session.scalars(
+                select(ActorKnowledgeRevision).where(
+                    ActorKnowledgeRevision.id.in_(actual_knowledge.values())
+                )
+            )
+        }
         for knowledge_id, revision_id in actual_knowledge.items():
-            knowledge = session.get(ActorKnowledge, knowledge_id)
-            revision = session.get(ActorKnowledgeRevision, revision_id)
+            knowledge = knowledge_rows.get(knowledge_id)
+            revision = knowledge_revisions.get(revision_id)
             item = payload_knowledge[knowledge_id]
             revision_item = dict(item.get("revision") or {})
             if (
@@ -1293,23 +1346,31 @@ class SnapshotService:
             actual_events
         ):
             raise SnapshotIntegrityError("snapshot event bindings do not match its full payload")
-        for event_id in actual_events:
-            event = session.get(CampaignEvent, event_id)
-            item = payload_events[event_id]
-            participant_rows = list(
-                session.scalars(
-                    select(CampaignEventParticipant)
-                    .where(CampaignEventParticipant.event_id == event_id)
-                    .order_by(
-                        CampaignEventParticipant.role,
-                        CampaignEventParticipant.actor_id,
-                    )
-                )
+        events = {
+            event.id: event
+            for event in session.scalars(
+                select(CampaignEvent).where(CampaignEvent.id.in_(actual_events))
             )
-            actual_participants = [
+        }
+        participants_by_event: dict[str, list[dict[str, str]]] = {
+            event_id: [] for event_id in actual_events
+        }
+        for participant in session.scalars(
+            select(CampaignEventParticipant)
+            .where(CampaignEventParticipant.event_id.in_(actual_events))
+            .order_by(
+                CampaignEventParticipant.event_id,
+                CampaignEventParticipant.role,
+                CampaignEventParticipant.actor_id,
+            )
+        ):
+            participants_by_event.setdefault(participant.event_id, []).append(
                 {"actor_id": participant.actor_id, "role": participant.role}
-                for participant in participant_rows
-            ]
+            )
+        for event_id in actual_events:
+            event = events.get(event_id)
+            item = payload_events[event_id]
+            actual_participants = participants_by_event[event_id]
             expected_participants = list(item.get("participants") or [])
             if (
                 event is None
@@ -1357,9 +1418,9 @@ class SnapshotService:
         head = session.get(CampaignSnapshot, branch.head_snapshot_id)
         if head is None or head.campaign_id != campaign.id:
             raise SnapshotIntegrityError("checked-out branch head is missing")
-        cls._assert_integrity(session, head)
-        current = cls._capture(session, campaign, branch.id)
         expected = cls._materialize(head)
+        cls._assert_integrity(session, head, expected)
+        current = cls._capture(session, campaign, branch.id)
         # Campaign revision is a live optimistic-concurrency token. Checkout
         # advances it monotonically, so it is not part of worktree dirtiness.
         current_campaign = dict(current.get("campaign") or {})

@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import delete, event, select
 
+import sagasmith_core.snapshots as snapshot_module
 from sagasmith_core import (
     FACT_KEY_WRITE_ACTIONS,
     ActorKnowledgeService,
@@ -71,6 +72,7 @@ from sagasmith_core.models import (
     AuditLog,
     Campaign,
     CampaignBranch,
+    CampaignEvent,
     CampaignEventParticipant,
     CampaignSnapshot,
     ModuleSource,
@@ -3163,6 +3165,74 @@ def test_snapshot_verify_rejects_unavailable_module_without_addons(database) -> 
     assert snapshots.verify(campaign.id, saved.slot) is False
     with pytest.raises(SnapshotIntegrityError, match="unavailable revision"):
         snapshots.restore(campaign.id, saved.slot)
+
+
+def test_snapshot_integrity_query_count_is_bounded_for_large_event_ledgers(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Large ledger")
+    branch_id = BranchService(database).current(campaign.id).id
+    with database.transaction() as session:
+        session.add_all(
+            [
+                CampaignEvent(
+                    id=f"event-{index:04d}",
+                    campaign_id=campaign.id,
+                    branch_id=branch_id,
+                    sequence=index + 1,
+                    event_type="narrative",
+                    summary=f"Ledger event {index}",
+                    payload={"index": index},
+                    audience_scope="dm",
+                )
+                for index in range(1000)
+            ]
+        )
+        session.add_all(
+            [
+                CampaignEventParticipant(
+                    event_id=f"event-{index:04d}",
+                    actor_id="ledger-observer",
+                    role="observer",
+                )
+                for index in range(1000)
+            ]
+        )
+    snapshots = SnapshotService(database)
+    saved = snapshots.create(campaign.id, label="Thousand events")
+    statements: list[str] = []
+
+    def record_statement(_conn, _cursor, statement, _parameters, _context, _many) -> None:
+        statements.append(statement)
+
+    event.listen(database.engine, "before_cursor_execute", record_statement)
+    try:
+        assert snapshots.verify(campaign.id, saved.slot)
+    finally:
+        event.remove(database.engine, "before_cursor_execute", record_statement)
+
+    select_statements = [
+        statement for statement in statements if statement.lstrip().upper().startswith("SELECT")
+    ]
+    assert len(select_statements) <= 25
+    assert sum("campaign_event_participants" in item.casefold() for item in select_statements) == 1
+
+
+def test_snapshot_document_decodes_payload_once(database, monkeypatch) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Single decode")
+    snapshots = SnapshotService(database)
+    saved = snapshots.create(campaign.id, label="One payload")
+    original_decode = snapshot_module.decode_snapshot_payload
+    calls = 0
+
+    def counted_decode(**kwargs):
+        nonlocal calls
+        calls += 1
+        return original_decode(**kwargs)
+
+    monkeypatch.setattr(snapshot_module, "decode_snapshot_payload", counted_decode)
+    document = snapshots.get(campaign.id, saved.slot)
+
+    assert document["valid"] is True
+    assert calls == 1
 
 
 def test_snapshot_storage_rejects_trailing_data_and_oversized_decompression() -> None:
