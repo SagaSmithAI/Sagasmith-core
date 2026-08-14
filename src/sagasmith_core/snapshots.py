@@ -18,6 +18,7 @@ from sagasmith_core.concurrency import compare_and_swap_campaign
 from sagasmith_core.database import Database
 from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
 from sagasmith_core.models import (
+    ActorGrant,
     ActorKnowledge,
     ActorKnowledgeRevision,
     BranchActorKnowledgeHead,
@@ -36,6 +37,7 @@ from sagasmith_core.models import (
     MemoryRevision,
     ModuleSource,
     MutationGroup,
+    Principal,
     RulePackVersion,
     SceneProgress,
     SnapshotActorKnowledgeBinding,
@@ -76,7 +78,7 @@ class SnapshotInfo:
 
 
 class SnapshotService:
-    SCHEMA_VERSION = 8
+    SCHEMA_VERSION = 9
 
     def __init__(self, database: Database) -> None:
         self.database = database
@@ -525,6 +527,13 @@ class SnapshotService:
                 select(Character).where(Character.campaign_id == campaign.id).order_by(Character.id)
             )
         )
+        actor_grants = list(
+            session.scalars(
+                select(ActorGrant)
+                .where(ActorGrant.campaign_id == campaign.id)
+                .order_by(ActorGrant.actor_id, ActorGrant.principal_id)
+            )
+        )
         progress = list(
             session.scalars(
                 select(SceneProgress)
@@ -650,6 +659,15 @@ class SnapshotService:
                     "revision": row.revision,
                 }
                 for row in characters
+            ],
+            "actor_grants": [
+                {
+                    "principal_id": row.principal_id,
+                    "actor_id": row.actor_id,
+                    "can_control": row.can_control,
+                    "can_view_private": row.can_view_private,
+                }
+                for row in actor_grants
             ],
             "module_activations": active_module_ids,
             "scene_progress": [
@@ -981,9 +999,13 @@ class SnapshotService:
         )
         RulePackService._resolve(session, campaign, branch.id)
 
+        session.execute(delete(ActorGrant).where(ActorGrant.campaign_id == campaign.id))
         session.execute(delete(Character).where(Character.campaign_id == campaign.id))
         for item in payload.get("characters", []):
             session.add(Character(campaign_id=campaign.id, **item))
+        session.flush()
+        for item in payload["actor_grants"]:
+            session.add(ActorGrant(campaign_id=campaign.id, **item))
 
         session.execute(delete(SceneProgress).where(SceneProgress.campaign_id == campaign.id))
         SnapshotService._restore_module_activations(
@@ -1133,6 +1155,7 @@ class SnapshotService:
             "rule_profile",
             "rule_lock",
             "characters",
+            "actor_grants",
             "scene_progress",
             "events",
             "memories",
@@ -1292,6 +1315,23 @@ class SnapshotService:
                 "snapshot actor-knowledge bindings do not match its full payload"
             )
         actor_ids = {str(item.get("id")) for item in payload.get("characters", [])}
+        grant_identities: set[tuple[str, str]] = set()
+        for item in payload["actor_grants"]:
+            if not isinstance(item, dict):
+                raise SnapshotIntegrityError("snapshot actor grants are malformed")
+            principal_id = str(item.get("principal_id") or "")
+            actor_id = str(item.get("actor_id") or "")
+            identity = (principal_id, actor_id)
+            if (
+                not principal_id
+                or actor_id not in actor_ids
+                or identity in grant_identities
+                or not isinstance(item.get("can_control"), bool)
+                or not isinstance(item.get("can_view_private"), bool)
+                or session.get(Principal, principal_id) is None
+            ):
+                raise SnapshotIntegrityError("snapshot actor grants are malformed")
+            grant_identities.add(identity)
         for item in payload.get("actor_knowledge", []):
             if str(item.get("actor_id")) not in actor_ids:
                 raise SnapshotIntegrityError("snapshot contains knowledge for a missing actor")

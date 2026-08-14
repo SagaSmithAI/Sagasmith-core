@@ -6,21 +6,25 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 
 from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.database import Database
 from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
 from sagasmith_core.models import (
+    ActorGrant,
+    ActorKnowledge,
     AuditLog,
     Campaign,
+    CampaignEventParticipant,
     Character,
+    ModuleActorBinding,
     MutationGroup,
     StateRevision,
 )
 from sagasmith_core.state_documents import load_state_document, persist_state_documents
 
-REVERSIBLE_ENTITY_TYPES = frozenset({"campaign", "character"})
+REVERSIBLE_ENTITY_TYPES = frozenset({"campaign", "character", "actor_lifecycle"})
 
 
 @dataclass(frozen=True)
@@ -401,6 +405,9 @@ class RevisionService:
 
     @staticmethod
     def _apply(session, revision: StateRevision, value: dict[str, Any] | None) -> None:
+        if revision.entity_type == "actor_lifecycle":
+            RevisionService._apply_actor_lifecycle(session, revision, value)
+            return
         if revision.entity_type == "campaign":
             row = session.get(Campaign, revision.entity_id)
         elif revision.entity_type == "character":
@@ -413,6 +420,78 @@ class RevisionService:
             if key.startswith("_") or not hasattr(row, key):
                 raise ValueError(f"unsupported reversible field: {key}")
             setattr(row, key, item)
+
+    @staticmethod
+    def _apply_actor_lifecycle(
+        session, revision: StateRevision, value: dict[str, Any] | None
+    ) -> None:
+        row = session.get(Character, revision.entity_id)
+        if value is None:
+            if row is None:
+                raise LookupError(revision.entity_id)
+            external_reference = any(
+                session.scalar(statement) is not None
+                for statement in (
+                    select(ActorKnowledge.id).where(
+                        ActorKnowledge.campaign_id == revision.campaign_id,
+                        ActorKnowledge.actor_id == revision.entity_id,
+                    ).limit(1),
+                    select(CampaignEventParticipant.event_id).where(
+                        CampaignEventParticipant.actor_id == revision.entity_id
+                    ).limit(1),
+                    select(ModuleActorBinding.id).where(
+                        ModuleActorBinding.character_id == revision.entity_id
+                    ).limit(1),
+                    select(Character.id).where(
+                        Character.template_id == revision.entity_id
+                    ).limit(1),
+                )
+            )
+            if external_reference:
+                raise ValueError(
+                    "actor lifecycle undo is blocked by an external actor reference"
+                )
+            session.execute(
+                delete(ActorGrant).where(
+                    ActorGrant.campaign_id == revision.campaign_id,
+                    ActorGrant.actor_id == revision.entity_id,
+                )
+            )
+            session.delete(row)
+            session.flush()
+            return
+        if row is not None:
+            raise ValueError("actor lifecycle redo requires the actor to be absent")
+        character = dict(value.get("character") or {})
+        expected_fields = {
+            "id",
+            "system_id",
+            "campaign_id",
+            "template_id",
+            "character_type",
+            "name",
+            "player_name",
+            "summary",
+            "sheet",
+            "notes",
+            "revision",
+        }
+        if set(character) != expected_fields or character.get("id") != revision.entity_id:
+            raise ValueError("actor lifecycle revision contains an invalid character document")
+        row = Character(**character)
+        session.add(row)
+        session.flush()
+        for grant in list(value.get("grants") or []):
+            session.add(
+                ActorGrant(
+                    campaign_id=revision.campaign_id,
+                    principal_id=str(grant["principal_id"]),
+                    actor_id=revision.entity_id,
+                    can_control=bool(grant.get("can_control")),
+                    can_view_private=bool(grant.get("can_view_private")),
+                )
+            )
+        session.flush()
 
     @staticmethod
     def _payload_value(

@@ -2,9 +2,34 @@
 
 Audit date: 2026-08-14
 
+## Convergence addendum — 2026-08-15
+
+The authorization and actor-lifecycle follow-up is now complete on the single
+current runtime protocol:
+
+- `AccessService.authorization_fingerprint` hashes campaign membership and the
+  principal's complete actor-grant authority, so Host context epochs change on
+  role, control, or private-view changes.
+- `ActorLifecycleService.create` atomically creates a campaign actor, optional
+  library-template lineage, initial grants, optional campaign state, one
+  idempotency receipt, and one reversible mutation group. Undo removes the actor
+  and its grants after checking external references; redo restores the same id
+  and document.
+- Snapshot schema 9 captures actor grants with campaign actors. Restore and
+  branch checkout replace both together; schema 8 is not read through an alias
+  or compatibility branch.
+
+Public tests cover create/template retry, lifecycle undo/redo, snapshot/branch
+restore, and grant integrity. The retained CoC private databases were exercised
+only through isolated temporary copies at Alembic head `20260815_33`; both copies
+passed SQLite `quick_check` and foreign-key checks after restart and current
+runtime playthroughs. The v32 corpus counts and performance measurements below
+remain the 2026-08-14 audit baseline and were not relabeled as a new full-corpus
+scan.
+
 ## Technical summary
 
-The current v32 databases are structurally healthy and the public persistence
+The audited v32 databases are structurally healthy and the public persistence
 paths remain functional across Core, D&D, CoC, and Narrative MCP. All 60
 accessible retained databases were upgraded from v29 to v32, compacted, and
 passed SQLite `quick_check`, foreign-key checks, compressed-document checksum

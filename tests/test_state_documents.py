@@ -3170,7 +3170,7 @@ def test_snapshot_storage_is_self_contained_compressed_and_parent_bound(database
         assert row.payload_codec == "zlib-1"
         assert len(row.compressed_payload) < row.uncompressed_size
         assert len(zlib.decompress(row.compressed_payload)) == row.uncompressed_size
-        assert row.schema_version == 8
+        assert row.schema_version == 9
 
     document = snapshots.get(campaign.id, child.slot)
     assert "storage_mode" not in document
@@ -3315,7 +3315,7 @@ def test_state_revisions_share_compressed_documents_and_fail_closed(database) ->
 
 def test_snapshot_storage_rejects_trailing_data_and_oversized_decompression() -> None:
     identity = {
-        "schema_version": 8,
+        "schema_version": 9,
         "snapshot_id": "snapshot-1",
         "campaign_id": "campaign-1",
         "branch_id": "branch-1",

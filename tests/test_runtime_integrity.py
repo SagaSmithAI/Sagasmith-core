@@ -129,6 +129,48 @@ def test_principal_membership_and_actor_grants_are_explicit(database) -> None:
     assert replay.revoked_actor_grants == 0
 
 
+def test_authorization_fingerprint_tracks_role_and_sorted_actor_grants(database) -> None:
+    campaigns = CampaignService(database)
+    characters = CharacterService(database)
+    access = AccessService(database)
+    campaign = campaigns.create(system_id="test", name="Fingerprint")
+    actor_b = characters.create(system_id="test", campaign_id=campaign.id, name="B")
+    actor_a = characters.create(system_id="test", campaign_id=campaign.id, name="A")
+    access.ensure_principal("user:alice")
+
+    absent = access.authorization_fingerprint(campaign.id, "user:alice")
+    access.grant_campaign(campaign.id, "user:alice", role="player")
+    member = access.authorization_fingerprint(campaign.id, "user:alice")
+    assert member != absent
+
+    for actor in sorted((actor_a, actor_b), key=lambda item: item.id, reverse=True):
+        access.grant_actor(
+            campaign.id,
+            "user:alice",
+            actor.id,
+            can_control=True,
+            can_view_private=False,
+        )
+    with_grants = access.authorization_fingerprint(campaign.id, "user:alice")
+    assert with_grants != member
+    assert with_grants == access.authorization_fingerprint(campaign.id, "user:alice")
+
+    access.grant_actor(
+        campaign.id,
+        "user:alice",
+        actor_a.id,
+        can_view_private=True,
+    )
+    private = access.authorization_fingerprint(campaign.id, "user:alice")
+    assert private != with_grants
+
+    access.grant_campaign(campaign.id, "user:alice", role="observer")
+    assert access.authorization_fingerprint(campaign.id, "user:alice") != private
+
+    access.revoke_campaign(campaign.id, "user:alice")
+    assert access.authorization_fingerprint(campaign.id, "user:alice") == absent
+
+
 def test_campaign_role_cannot_forge_unknown_actor(database) -> None:
     campaigns = CampaignService(database)
     campaign = campaigns.create(system_id="dnd5e", name="Access owner")

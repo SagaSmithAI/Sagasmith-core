@@ -8,6 +8,7 @@ from sqlalchemy import delete, select
 
 from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.database import Database
+from sagasmith_core.integrity import json_sha256
 from sagasmith_core.models import (
     ActorGrant,
     Campaign,
@@ -199,6 +200,40 @@ class AccessService:
             )
             return (
                 None if row is None else MembershipInfo(row.campaign_id, row.principal_id, row.role)
+            )
+
+    def authorization_fingerprint(self, campaign_id: str, principal_id: str) -> str:
+        """Hash one principal's complete, system-neutral campaign authority."""
+
+        with self.database.transaction() as session:
+            membership = session.get(
+                CampaignMembership,
+                {"campaign_id": campaign_id, "principal_id": principal_id},
+            )
+            grants = list(
+                session.scalars(
+                    select(ActorGrant)
+                    .where(
+                        ActorGrant.campaign_id == campaign_id,
+                        ActorGrant.principal_id == principal_id,
+                    )
+                    .order_by(ActorGrant.actor_id)
+                )
+            )
+            return json_sha256(
+                {
+                    "campaign_id": campaign_id,
+                    "principal_id": principal_id,
+                    "role": membership.role if membership is not None else None,
+                    "actor_grants": [
+                        {
+                            "actor_id": row.actor_id,
+                            "can_control": bool(row.can_control),
+                            "can_view_private": bool(row.can_view_private),
+                        }
+                        for row in grants
+                    ],
+                }
             )
 
     def accessible_campaign_ids(self, principal_id: str) -> set[str]:

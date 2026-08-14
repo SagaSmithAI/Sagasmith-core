@@ -757,7 +757,7 @@ class CampaignSnapshot(Base):
     )
     slot: Mapped[int] = mapped_column(Integer, nullable=False)
     label: Mapped[str] = mapped_column(String(300), default="")
-    schema_version: Mapped[int] = mapped_column(Integer, default=8)
+    schema_version: Mapped[int] = mapped_column(Integer, default=9)
     compressed_payload: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     payload_codec: Mapped[str] = mapped_column(String(32), nullable=False)
     uncompressed_size: Mapped[int] = mapped_column(Integer, nullable=False)

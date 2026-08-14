@@ -1,6 +1,11 @@
 """Shared runtime contracts for SagaSmith system packages."""
 
 from sagasmith_core.access import AccessDeniedError, AccessService, default_local_principal
+from sagasmith_core.actor_lifecycle import (
+    ActorLifecycleResult,
+    ActorLifecycleService,
+    InitialActorGrant,
+)
 from sagasmith_core.addons import AddonError, AddonService
 from sagasmith_core.branches import BranchService
 from sagasmith_core.campaigns import CampaignService
@@ -109,6 +114,8 @@ __all__ = [
     "BgeSmallEnEmbedder",
     "BgeSmallZhEmbedder",
     "ActorKnowledgeService",
+    "ActorLifecycleResult",
+    "ActorLifecycleService",
     "AddonError",
     "AddonService",
     "AccessDeniedError",
@@ -139,6 +146,7 @@ __all__ = [
     "IdempotencyWrite",
     "ImportJobError",
     "ImportJobService",
+    "InitialActorGrant",
     "ModuleService",
     "NormalizedDocument",
     "OcrPageLayout",
