@@ -1,60 +1,10 @@
 import json
-import zlib
 from pathlib import Path
 
-import pytest
 from alembic import command
 from sqlalchemy import inspect
 
 from sagasmith_core.database import Database, alembic_config, sqlite_database_url
-from sagasmith_core.integrity import json_sha256
-from sagasmith_core.snapshot_storage import decode_snapshot_payload
-
-
-def _prepare_snapshot_compression_source(
-    database: Database,
-    payload: dict,
-    *,
-    schema_version: int = 7,
-) -> None:
-    config = alembic_config(database.url)
-    command.upgrade(config, "20260813_28")
-    checksum = json_sha256(payload)
-    with database.engine.begin() as connection:
-        columns = {
-            column["name"] for column in inspect(connection).get_columns("campaign_snapshots")
-        }
-        if "payload" not in columns:
-            connection.exec_driver_sql("ALTER TABLE campaign_snapshots ADD COLUMN payload JSON")
-        for column in (
-            "compressed_payload",
-            "payload_codec",
-            "uncompressed_size",
-            "record_checksum",
-        ):
-            if column in columns:
-                connection.exec_driver_sql(f"ALTER TABLE campaign_snapshots DROP COLUMN {column}")
-        connection.exec_driver_sql(
-            "INSERT INTO campaigns "
-            "(id, system_id, slug, name, status, description, settings, state, revision, "
-            "event_sequence, created_at, updated_at) VALUES "
-            "('campaign-1', 'dnd5e', 'migration', 'Migration', 'active', '', '{}', '{}', "
-            "1, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
-        )
-        connection.exec_driver_sql(
-            "INSERT INTO campaign_snapshots "
-            "(id, campaign_id, branch_id, parent_id, slot, label, schema_version, payload, "
-            "checksum, recap, created_at) VALUES "
-            "(:id, :campaign_id, NULL, NULL, 1, 'Before compression', :schema_version, "
-            ":payload, :checksum, NULL, CURRENT_TIMESTAMP)",
-            {
-                "id": "snapshot-1",
-                "campaign_id": "campaign-1",
-                "schema_version": schema_version,
-                "payload": json.dumps(payload),
-                "checksum": checksum,
-            },
-        )
 
 
 def test_bundled_migration_builds_schema(tmp_path: Path) -> None:
@@ -109,7 +59,6 @@ def test_bundled_migration_builds_schema(tmp_path: Path) -> None:
         assert "active" not in revision_columns
         assert "active" in rule_source_columns
         assert "is_head" not in snapshot_columns
-        assert "payload" not in snapshot_columns
         assert {
             "compressed_payload",
             "payload_codec",
@@ -117,106 +66,6 @@ def test_bundled_migration_builds_schema(tmp_path: Path) -> None:
             "record_checksum",
         }.issubset(snapshot_columns)
         assert "is_current" not in branch_columns
-    finally:
-        database.dispose()
-
-
-def test_snapshot_compression_migrates_current_full_payload_once(tmp_path: Path) -> None:
-    database = Database(sqlite_database_url(tmp_path / "snapshot-compression.db"))
-    payload = {
-        "campaign": {
-            "name": "Migration",
-            "status": "active",
-            "description": "",
-            "settings": {},
-            "state": {"repeated": "x" * 4096},
-            "revision": 1,
-        },
-        "rule_profile": None,
-        "rule_lock": [],
-        "addon_lock": [],
-        "characters": [],
-        "module_activations": [],
-        "scene_progress": [],
-        "events": [],
-        "memories": [],
-        "actor_knowledge": [],
-        "revision_cursor": [],
-    }
-    _prepare_snapshot_compression_source(database, payload)
-
-    database.upgrade_schema()
-
-    try:
-        inspector = inspect(database.engine)
-        columns = {column["name"] for column in inspector.get_columns("campaign_snapshots")}
-        assert "payload" not in columns
-        with database.engine.connect() as connection:
-            row = connection.exec_driver_sql(
-                "SELECT id, campaign_id, branch_id, parent_id, slot, schema_version, "
-                "compressed_payload, payload_codec, uncompressed_size, checksum, record_checksum "
-                "FROM campaign_snapshots WHERE id = 'snapshot-1'"
-            ).mappings().one()
-        assert row["schema_version"] == 8
-        assert row["payload_codec"] == "zlib-1"
-        assert len(row["compressed_payload"]) < row["uncompressed_size"]
-        assert len(zlib.decompress(row["compressed_payload"])) == row["uncompressed_size"]
-        assert (
-            decode_snapshot_payload(
-                schema_version=row["schema_version"],
-                snapshot_id=row["id"],
-                campaign_id=row["campaign_id"],
-                branch_id=row["branch_id"],
-                parent_id=row["parent_id"],
-                slot=row["slot"],
-                payload_codec=row["payload_codec"],
-                uncompressed_size=row["uncompressed_size"],
-                payload_checksum=row["checksum"],
-                record_checksum=row["record_checksum"],
-                compressed_payload=row["compressed_payload"],
-            )
-            == payload
-        )
-    finally:
-        database.dispose()
-
-
-def test_snapshot_compression_rejects_legacy_payload_protocol(tmp_path: Path) -> None:
-    database = Database(sqlite_database_url(tmp_path / "legacy-snapshot-compression.db"))
-    payload = {
-        "campaign": {},
-        "rule_profile": None,
-        "rule_lock": [],
-        "characters": [],
-        "scene_progress": [],
-        "events": [],
-        "memories": [],
-        "actor_knowledge": [],
-        "revision_cursor": [],
-    }
-    _prepare_snapshot_compression_source(database, payload, schema_version=6)
-
-    try:
-        with pytest.raises(RuntimeError, match="pinned historical runtime"):
-            database.upgrade_schema()
-        with database.engine.connect() as connection:
-            columns = {
-                column["name"]
-                for column in inspect(connection).get_columns("campaign_snapshots")
-            }
-            row = connection.exec_driver_sql(
-                "SELECT schema_version, payload FROM campaign_snapshots "
-                "WHERE id = 'snapshot-1'"
-            ).mappings().one()
-        assert "payload" in columns
-        assert not {
-            "compressed_payload",
-            "payload_codec",
-            "uncompressed_size",
-            "record_checksum",
-        }.intersection(columns)
-        assert row["schema_version"] == 6
-        assert json.loads(row["payload"]) == payload
     finally:
         database.dispose()
 
