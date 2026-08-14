@@ -73,6 +73,7 @@ from sagasmith_core.models import (
     CampaignBranch,
     CampaignEventParticipant,
     CampaignSnapshot,
+    ModuleSource,
     MutationGroup,
     SnapshotActorKnowledgeBinding,
     StateRevision,
@@ -3141,6 +3142,27 @@ def test_snapshot_storage_is_self_contained_compressed_and_parent_bound(database
     with pytest.raises(SnapshotIntegrityError, match="record failed checksum"):
         snapshots.restore(campaign.id, child.slot)
     assert snapshots.verify(campaign.id, base.slot) is True
+
+
+def test_snapshot_verify_rejects_unavailable_module_without_addons(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Module save")
+    other = CampaignService(database).create(system_id="dnd5e", name="Other campaign")
+    imported = ModuleService(database).ingest(
+        campaign_id=campaign.id,
+        source_key="module.md",
+        title="Module",
+        content="# Chapter\n## Scene\nContent.",
+    )
+    snapshots = SnapshotService(database)
+    saved = snapshots.create(campaign.id, label="Module active")
+    assert snapshots.get(campaign.id, saved.slot)["payload"]["addon_lock"] == []
+
+    with database.transaction() as session:
+        session.get(ModuleSource, imported.module_id).campaign_id = other.id
+
+    assert snapshots.verify(campaign.id, saved.slot) is False
+    with pytest.raises(SnapshotIntegrityError, match="unavailable revision"):
+        snapshots.restore(campaign.id, saved.slot)
 
 
 def test_snapshot_storage_rejects_trailing_data_and_oversized_decompression() -> None:

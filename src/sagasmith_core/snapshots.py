@@ -1164,18 +1164,18 @@ class SnapshotService:
                         "snapshot addon rule locks are absent from the runtime rule lock: "
                         + ", ".join(missing_rule_locks)
                     )
-            available_module_ids = set(
-                session.scalars(
-                    select(ModuleSource.id).where(
-                        ModuleSource.campaign_id == row.campaign_id,
-                        ModuleSource.id.in_(active_module_ids or [""]),
-                    )
+        available_module_ids = set(
+            session.scalars(
+                select(ModuleSource.id).where(
+                    ModuleSource.campaign_id == row.campaign_id,
+                    ModuleSource.id.in_(active_module_ids or [""]),
                 )
             )
-            if available_module_ids != set(active_module_ids):
-                raise SnapshotIntegrityError(
-                    "snapshot module activation references an unavailable revision"
-                )
+        )
+        if available_module_ids != set(active_module_ids):
+            raise SnapshotIntegrityError(
+                "snapshot module activation references an unavailable revision"
+            )
 
         visited = {row.id}
         parent_id = row.parent_id
