@@ -162,6 +162,39 @@ def test_module_search_can_be_scoped_to_one_active_revision(database) -> None:
     assert {hit.source_id for hit in scoped} == {current.module_id}
 
 
+def test_module_draft_can_replace_one_system_owned_scene_profile_field(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Profile draft")
+    service = ModuleService(database)
+    imported = service.ingest(
+        campaign_id=campaign.id,
+        source_key="keep.md",
+        title="Keep",
+        content="# Chapter\n## Gate\nA stone gate.",
+    )
+    scene = service.scene_index(campaign.id, module_id=imported.module_id)[0]
+
+    result = service.set_scene_profile_field(
+        campaign_id=campaign.id,
+        module_id=imported.module_id,
+        scene_id=scene["scene_id"],
+        field="system_profile",
+        value={"version": 1},
+    )
+
+    assert result["value"] == {"version": 1}
+    assert service.read_scene(campaign.id, scene["scene_id"])["profile_data"] == {
+        "system_profile": {"version": 1}
+    }
+    with pytest.raises(ValueError, match="canonical scene fields"):
+        service.set_scene_profile_field(
+            campaign_id=campaign.id,
+            module_id=imported.module_id,
+            scene_id=scene["scene_id"],
+            field="spatial",
+            value={},
+        )
+
+
 def test_module_chunks_can_be_listed_in_source_order(database) -> None:
     campaign = CampaignService(database).create(system_id="dnd5e", name="Chunk review")
     service = ModuleService(database)

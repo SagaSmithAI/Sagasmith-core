@@ -2257,6 +2257,58 @@ class ModuleService:
                 **self._scene_structure(row.ModuleScene, progress_state=progress_state),
             }
 
+    def set_scene_profile_field(
+        self,
+        *,
+        campaign_id: str,
+        module_id: str,
+        scene_id: str,
+        field: str,
+        value: Any,
+    ) -> dict[str, Any]:
+        """Replace one system-owned scene profile value inside an ambient draft transaction."""
+
+        field_name = str(field).strip()
+        if not field_name or len(field_name) > 200 or field_name.startswith("_"):
+            raise ValueError("scene profile field must contain 1 to 200 public characters")
+        canonical_fields = {
+            "absolute_end",
+            "absolute_start",
+            "content_checksum",
+            "end_line",
+            "headings",
+            "keywords",
+            "line_count",
+            "page_end",
+            "page_start",
+            "scene_level",
+            "spatial",
+            "stable_key",
+            "start_line",
+            "subsections",
+            "tags",
+            "visibility",
+        }
+        if field_name in canonical_fields:
+            raise ValueError("canonical scene fields cannot be changed through profile_data")
+        with self.database.transaction() as session:
+            row = session.execute(
+                select(ModuleScene, ModuleSource)
+                .join(ModuleSource, ModuleSource.id == ModuleScene.module_id)
+                .where(
+                    ModuleScene.id == scene_id,
+                    ModuleScene.module_id == module_id,
+                    ModuleSource.campaign_id == campaign_id,
+                )
+            ).one_or_none()
+            if row is None:
+                raise LookupError(scene_id)
+            metadata = dict(row.ModuleScene.metadata_json or {})
+            metadata[field_name] = value
+            row.ModuleScene.metadata_json = metadata
+            session.flush()
+            return {"scene_id": scene_id, "field": field_name, "value": value}
+
     def scene_index(
         self,
         campaign_id: str,
