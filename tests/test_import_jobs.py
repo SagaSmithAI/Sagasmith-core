@@ -1,4 +1,5 @@
 import pytest
+from sqlalchemy import select
 
 from sagasmith_core import (
     CampaignService,
@@ -7,6 +8,8 @@ from sagasmith_core import (
     ImportJobService,
 )
 from sagasmith_core.import_jobs import ImportJobError
+from sagasmith_core.models import ImportJob
+from sagasmith_core.state_document_storage import StateDocumentStorageError
 
 
 def test_import_job_persists_inspection_candidate_review_and_result(database) -> None:
@@ -75,6 +78,32 @@ def test_import_job_persists_inspection_candidate_review_and_result(database) ->
     ] == [0, 1, 2, 3, 4, 5, 6]
     assert completed.source_id == "source-1"
     assert jobs.list(campaign.id)[0].result["pack_id"] == "dnd5e.xgte"
+
+
+def test_import_job_document_is_compressed_exact_and_corruption_fails_closed(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Compressed import")
+    jobs = ImportJobService(database)
+    source_text = "repeatable source evidence\n" * 5000
+    created = jobs.create(
+        campaign_id=campaign.id,
+        kind="module",
+        artifact="large-module.pdf",
+        payload={"source_text": source_text, "nested": {"enabled": True}},
+    )
+    inspected = jobs.record_inspection(
+        created.id,
+        {"parser_profile": "pdf", "parser_version": "2", "pages": list(range(100))},
+    )
+    assert inspected.payload == {"source_text": source_text, "nested": {"enabled": True}}
+
+    with database.transaction() as session:
+        row = session.scalar(select(ImportJob).where(ImportJob.id == created.id))
+        assert row is not None
+        assert len(row.compressed_document) < row.document_uncompressed_size
+        row.compressed_document += b"trailing"
+
+    with pytest.raises(StateDocumentStorageError, match="decompressed size"):
+        jobs.get(created.id)
 
 
 def test_inspected_import_can_rerun_inspection_after_text_review(database) -> None:

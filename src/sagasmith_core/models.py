@@ -1077,9 +1077,33 @@ class ImportJob(TimestampMixin, Base):
     module_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     parser_profile: Mapped[str] = mapped_column(String(100), default="")
     parser_version: Mapped[str] = mapped_column(String(32), default="")
-    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    inspection: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    candidates: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
-    validation: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    result: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    document_codec: Mapped[str] = mapped_column(String(32), nullable=False)
+    document_uncompressed_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    document_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    compressed_document: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     error: Mapped[str] = mapped_column(Text, default="")
+
+    def _document_field(self, name: str) -> Any:
+        from sagasmith_core.import_job_storage import decode_import_job_document
+
+        return decode_import_job_document(self)[name]
+
+    @property
+    def payload(self) -> dict[str, Any]:
+        return dict(self._document_field("payload"))
+
+    @property
+    def inspection(self) -> dict[str, Any]:
+        return dict(self._document_field("inspection"))
+
+    @property
+    def candidates(self) -> list[dict[str, Any]]:
+        return [dict(item) for item in self._document_field("candidates")]
+
+    @property
+    def validation(self) -> dict[str, Any]:
+        return dict(self._document_field("validation"))
+
+    @property
+    def result(self) -> dict[str, Any]:
+        return dict(self._document_field("result"))

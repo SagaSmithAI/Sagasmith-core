@@ -12,6 +12,12 @@ from sqlalchemy import select, update
 
 from sagasmith_core.database import Database
 from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
+from sagasmith_core.import_job_storage import (
+    IMPORT_JOB_DOCUMENT_FIELDS,
+    apply_import_job_document,
+    decode_import_job_document,
+    encoded_import_job_columns,
+)
 from sagasmith_core.models import Campaign, ImportJob
 
 
@@ -123,8 +129,8 @@ class ImportJobService:
                 kind=kind,
                 artifact=artifact,
                 artifact_checksum=artifact_checksum,
-                payload=dict(payload or {}),
             )
+            apply_import_job_document(row, {"payload": dict(payload or {})})
             session.add(row)
             session.flush()
             result = self._info(row)
@@ -499,6 +505,15 @@ class ImportJobService:
         expected_revision: int,
         values: dict[str, Any],
     ) -> None:
+        document_updates = {
+            key: values.pop(key)
+            for key in tuple(values)
+            if key in IMPORT_JOB_DOCUMENT_FIELDS
+        }
+        if document_updates:
+            document = dict(decode_import_job_document(row))
+            document.update(document_updates)
+            values.update(encoded_import_job_columns(document))
         changed = session.execute(
             update(ImportJob)
             .where(
@@ -511,6 +526,7 @@ class ImportJobService:
         ).scalar_one_or_none()
         if changed is None:
             raise ImportJobError(f"import job revision conflict: expected {expected_revision}")
+        row.__dict__.pop("_decoded_import_job_document", None)
         session.expire(row)
         session.refresh(row)
 

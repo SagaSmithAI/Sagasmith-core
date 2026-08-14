@@ -43,6 +43,22 @@ def test_bundled_migration_builds_schema(tmp_path: Path) -> None:
         assert "campaign_rule_activations" in inspector.get_table_names()
         assert "rule_resolution_receipts" in inspector.get_table_names()
         assert "revision" in {column["name"] for column in inspector.get_columns("import_jobs")}
+        import_job_columns = {
+            column["name"] for column in inspector.get_columns("import_jobs")
+        }
+        assert {
+            "document_codec",
+            "document_uncompressed_size",
+            "document_checksum",
+            "compressed_document",
+        }.issubset(import_job_columns)
+        assert not {
+            "payload",
+            "inspection",
+            "candidates",
+            "validation",
+            "result",
+        }.intersection(import_job_columns)
         assert any(
             constraint["name"] == "uq_mutation_group_branch_idempotency"
             and constraint["column_names"] == ["campaign_id", "branch_id", "idempotency_key"]
@@ -261,6 +277,65 @@ def test_rule_pack_payloads_migrate_v30_json_columns(tmp_path: Path) -> None:
                 "FROM rule_pack_payloads"
             ).one()
         assert count == 1
+        assert codec == "zlib-1"
+        assert compressed < raw_size
+    finally:
+        database.dispose()
+
+
+def test_import_job_documents_migrate_v31_json_columns(tmp_path: Path) -> None:
+    database = Database(sqlite_database_url(tmp_path / "import-job-documents.db"))
+    config = alembic_config(database.url)
+    with database.engine.begin() as connection:
+        connection.exec_driver_sql(
+            "CREATE TABLE import_jobs ("
+            "id VARCHAR(36) PRIMARY KEY, campaign_id VARCHAR(36) NOT NULL, "
+            "system_id VARCHAR(64) NOT NULL, kind VARCHAR(32) NOT NULL, "
+            "state VARCHAR(32) NOT NULL, revision INTEGER NOT NULL, "
+            "artifact VARCHAR(500) NOT NULL, artifact_checksum VARCHAR(64) NOT NULL, "
+            "source_id VARCHAR(36), module_id VARCHAR(36), "
+            "parser_profile VARCHAR(100) NOT NULL, parser_version VARCHAR(32) NOT NULL, "
+            "payload JSON NOT NULL, inspection JSON NOT NULL, candidates JSON NOT NULL, "
+            "validation JSON NOT NULL, result JSON NOT NULL, error TEXT NOT NULL, "
+            "created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL)"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO import_jobs "
+            "(id, campaign_id, system_id, kind, state, revision, artifact, "
+            "artifact_checksum, parser_profile, parser_version, payload, inspection, "
+            "candidates, validation, result, error, created_at, updated_at) VALUES "
+            "('job-1', 'campaign-1', 'dnd5e', 'module', 'review_required', 4, "
+            "'module.pdf', 'checksum', 'pdf', '1', ?, '{}', ?, '{}', '{}', '', "
+            "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            (
+                json.dumps({"source_text": "repeated evidence " * 1000}),
+                json.dumps([{"id": "candidate-1", "review_status": "pending"}]),
+            ),
+        )
+
+    command.stamp(config, "20260815_31")
+    command.upgrade(config, "head")
+    try:
+        inspector = inspect(database.engine)
+        columns = {column["name"] for column in inspector.get_columns("import_jobs")}
+        assert {
+            "document_codec",
+            "document_uncompressed_size",
+            "document_checksum",
+            "compressed_document",
+        }.issubset(columns)
+        assert not {
+            "payload",
+            "inspection",
+            "candidates",
+            "validation",
+            "result",
+        }.intersection(columns)
+        with database.engine.connect() as connection:
+            codec, raw_size, compressed = connection.exec_driver_sql(
+                "SELECT document_codec, document_uncompressed_size, "
+                "length(compressed_document) FROM import_jobs WHERE id='job-1'"
+            ).one()
         assert codec == "zlib-1"
         assert compressed < raw_size
     finally:
