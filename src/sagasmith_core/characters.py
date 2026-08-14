@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -83,12 +84,13 @@ class CharacterService:
         campaign_id: str | None = None,
         player_name: str | None = None,
         name: str | None = None,
+        assets_by_key: Mapping[str, Mapping[str, Any]] | None = None,
         principal_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> CharacterInfo:
         """Create a fresh runtime actor from a v3 package-owned actor card."""
 
-        actor = validate_actor_card(actor)
+        actor = validate_actor_card(actor, assets_by_key=assets_by_key)
         arguments = {
             "system_id": str(actor["system_id"]),
             "name": name if name is not None else str(actor["name"]),

@@ -7,6 +7,7 @@ import zipfile
 import pytest
 
 from sagasmith_core.campaigns import CampaignService
+from sagasmith_core.characters import CharacterService
 from sagasmith_core.content_pack import (
     ContentPackageError,
     blob_descriptor,
@@ -110,6 +111,24 @@ def _package() -> tuple[dict, dict[str, bytes]]:
         document_asset["checksum"]: document_blob,
         image_asset["checksum"]: image,
     }
+
+
+def test_image_bearing_content_actor_imports_with_package_assets(database) -> None:
+    package, _blobs = _package()
+    assets_by_key = {item["asset_key"]: item for item in package["assets"]}
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Actor import")
+    characters = CharacterService(database)
+
+    template = characters.import_content_actor(
+        package["actors"][0],
+        assets_by_key=assets_by_key,
+    )
+    instance = characters.instantiate(template.id, campaign_id=campaign.id)
+
+    assert template.campaign_id is None
+    assert instance.template_id == template.id
+    assert instance.campaign_id == campaign.id
+    assert instance.sheet == package["actors"][0]["sheet"]
 
 
 def _module_package() -> tuple[dict, dict[str, bytes]]:
