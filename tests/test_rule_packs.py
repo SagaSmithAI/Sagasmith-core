@@ -1,4 +1,5 @@
 import pytest
+from sqlalchemy import func, select
 
 from sagasmith_core import (
     CampaignService,
@@ -10,7 +11,9 @@ from sagasmith_core import (
     SnapshotService,
 )
 from sagasmith_core.branches import BranchService
+from sagasmith_core.models import RulePackPayload
 from sagasmith_core.rule_packs import RulePackError, RulesetUnavailableError
+from sagasmith_core.state_document_storage import StateDocumentStorageError
 
 
 def _pack(pack_id: str = "dnd5e.xgte", *, dependencies=None, conflicts=None):
@@ -88,6 +91,23 @@ def test_rule_pack_keeps_advice_without_blocking_validation(database) -> None:
         "errors": [],
         "warnings": ["declarative tests do not cover optional behavior"],
     }
+
+
+def test_rule_pack_payload_replacement_removes_orphan_and_corruption_fails_closed(
+    database,
+) -> None:
+    packs = RulePackService(database)
+    packs.save_draft(manifest=_pack(), additional_warnings=["first review"])
+    packs.save_draft(manifest=_pack(), additional_warnings=["second review"])
+
+    with database.transaction() as session:
+        assert session.scalar(select(func.count()).select_from(RulePackPayload)) == 1
+        payload = session.scalar(select(RulePackPayload))
+        assert payload is not None
+        payload.compressed_payload += b"trailing"
+
+    with pytest.raises(StateDocumentStorageError, match="decompressed size"):
+        packs.list_versions()
 
 
 def test_rule_profile_cannot_diverge_while_runtime_locked(database) -> None:

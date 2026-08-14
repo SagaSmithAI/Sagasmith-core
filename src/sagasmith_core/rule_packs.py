@@ -22,6 +22,10 @@ from sagasmith_core.models import (
     RulePack,
     RulePackVersion,
 )
+from sagasmith_core.rule_pack_payloads import (
+    persist_rule_pack_payload,
+    remove_unreferenced_rule_pack_payload,
+)
 from sagasmith_core.runtime_locks import require_mutation_unlocked
 
 PACK_ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)+$")
@@ -139,19 +143,34 @@ class RulePackService:
                 # Re-submitting the same checksum is an idempotent read.
                 return self._version_info(row)
             was_installed = row is not None and row.status == "installed"
+            old_payload_id = row.payload_document_id if row is not None else None
+            payload_document = persist_rule_pack_payload(
+                session,
+                {
+                    "manifest": manifest,
+                    "artifacts": artifacts,
+                    "mechanics": mechanics,
+                    "provenance": dict(provenance or manifest.get("provenance") or {}),
+                    "validation_report": report,
+                },
+            )
             if row is None:
-                row = RulePackVersion(pack_id=pack_id, version=version)
+                row = RulePackVersion(
+                    pack_id=pack_id,
+                    version=version,
+                    payload_document=payload_document,
+                )
                 session.add(row)
-            row.manifest = manifest
-            row.artifacts = artifacts
-            row.mechanics = mechanics
-            row.provenance = dict(provenance or manifest.get("provenance") or {})
+            else:
+                row.payload_document = payload_document
+                row.__dict__.pop("_decoded_rule_pack_payload", None)
             row.checksum = checksum
             row.status = (
                 "installed" if was_installed else ("validated" if report["valid"] else "rejected")
             )
-            row.validation_report = report
             session.flush()
+            if old_payload_id != payload_document.id:
+                remove_unreferenced_rule_pack_payload(session, old_payload_id)
             return self._version_info(row)
 
     def install(self, pack_id: str, version: str) -> RulePackVersionInfo:
@@ -225,8 +244,10 @@ class RulePackService:
                 raise RulePackError(
                     "a rule-pack version referenced by a snapshot cannot be removed"
                 )
+            payload_document_id = row.payload_document_id
             session.delete(row)
             session.flush()
+            remove_unreferenced_rule_pack_payload(session, payload_document_id)
             remaining = session.scalar(
                 select(func.count())
                 .select_from(RulePackVersion)

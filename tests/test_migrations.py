@@ -28,9 +28,18 @@ def test_bundled_migration_builds_schema(tmp_path: Path) -> None:
         assert "state_documents" in inspector.get_table_names()
         assert "template_id" in {column["name"] for column in inspector.get_columns("characters")}
         assert "rule_pack_versions" in inspector.get_table_names()
-        assert "provenance" in {
+        rule_pack_version_columns = {
             column["name"] for column in inspector.get_columns("rule_pack_versions")
         }
+        assert "payload_document_id" in rule_pack_version_columns
+        assert not {
+            "manifest",
+            "artifacts",
+            "mechanics",
+            "provenance",
+            "validation_report",
+        }.intersection(rule_pack_version_columns)
+        assert "rule_pack_payloads" in inspector.get_table_names()
         assert "campaign_rule_activations" in inspector.get_table_names()
         assert "rule_resolution_receipts" in inspector.get_table_names()
         assert "revision" in {column["name"] for column in inspector.get_columns("import_jobs")}
@@ -196,6 +205,64 @@ def test_state_documents_migrate_and_deduplicate_v29_revision_payloads(tmp_path:
         assert document_count == 2
         assert references[0] == references[1]
         assert all(references[0])
+    finally:
+        database.dispose()
+
+
+def test_rule_pack_payloads_migrate_v30_json_columns(tmp_path: Path) -> None:
+    database = Database(sqlite_database_url(tmp_path / "rule-pack-payloads.db"))
+    config = alembic_config(database.url)
+    manifest = {"id": "dnd5e.legacy", "system_id": "dnd5e", "version": "1.0.0"}
+    with database.engine.begin() as connection:
+        connection.exec_driver_sql(
+            "CREATE TABLE rule_pack_versions ("
+            "pack_id VARCHAR(200) NOT NULL, version VARCHAR(64) NOT NULL, "
+            "manifest JSON NOT NULL, artifacts JSON NOT NULL, mechanics JSON NOT NULL, "
+            "provenance JSON NOT NULL, checksum VARCHAR(64) NOT NULL, "
+            "status VARCHAR(32) NOT NULL, validation_report JSON NOT NULL, "
+            "created_at DATETIME NOT NULL, PRIMARY KEY (pack_id, version))"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO rule_pack_versions "
+            "(pack_id, version, manifest, artifacts, mechanics, provenance, checksum, "
+            "status, validation_report, created_at) VALUES "
+            "(?, '1.0.0', ?, ?, ?, ?, 'checksum', 'validated', ?, CURRENT_TIMESTAMP)",
+            (
+                "dnd5e.legacy",
+                json.dumps(manifest),
+                json.dumps([{"id": "artifact-1", "body": "x" * 1000}]),
+                json.dumps([{"id": "dnd5e.legacy.mechanic"}]),
+                json.dumps({"source": "legacy"}),
+                json.dumps({"valid": True, "errors": [], "warnings": []}),
+            ),
+        )
+
+    command.stamp(config, "20260815_30")
+    command.upgrade(config, "head")
+    try:
+        inspector = inspect(database.engine)
+        columns = {
+            column["name"] for column in inspector.get_columns("rule_pack_versions")
+        }
+        assert "payload_document_id" in columns
+        assert not {
+            "manifest",
+            "artifacts",
+            "mechanics",
+            "provenance",
+            "validation_report",
+        }.intersection(columns)
+        with database.engine.connect() as connection:
+            count = connection.exec_driver_sql(
+                "SELECT count(*) FROM rule_pack_payloads"
+            ).scalar_one()
+            codec, raw_size, compressed = connection.exec_driver_sql(
+                "SELECT payload_codec, uncompressed_size, length(compressed_payload) "
+                "FROM rule_pack_payloads"
+            ).one()
+        assert count == 1
+        assert codec == "zlib-1"
+        assert compressed < raw_size
     finally:
         database.dispose()
 
@@ -427,13 +494,22 @@ def test_rule_pack_version_provenance_migration_backfills_existing_rows(
 ) -> None:
     database = Database(sqlite_database_url(tmp_path / "rule-pack-provenance.db"))
     config = alembic_config(database.url)
-    command.upgrade(config, "20260802_25")
     with database.engine.begin() as connection:
-        columns = {
-            column["name"] for column in inspect(connection).get_columns("rule_pack_versions")
-        }
-        if "provenance" in columns:
-            connection.exec_driver_sql("ALTER TABLE rule_pack_versions DROP COLUMN provenance")
+        connection.exec_driver_sql(
+            "CREATE TABLE rule_packs ("
+            "id VARCHAR(200) PRIMARY KEY, system_id VARCHAR(64) NOT NULL, "
+            "title VARCHAR(300) NOT NULL, namespace VARCHAR(200) NOT NULL, "
+            "provenance JSON NOT NULL, created_at DATETIME NOT NULL, "
+            "updated_at DATETIME NOT NULL)"
+        )
+        connection.exec_driver_sql(
+            "CREATE TABLE rule_pack_versions ("
+            "pack_id VARCHAR(200) NOT NULL, version VARCHAR(64) NOT NULL, "
+            "manifest JSON NOT NULL, artifacts JSON NOT NULL, mechanics JSON NOT NULL, "
+            "checksum VARCHAR(64) NOT NULL, status VARCHAR(32) NOT NULL, "
+            "validation_report JSON NOT NULL, created_at DATETIME NOT NULL, "
+            "PRIMARY KEY (pack_id, version))"
+        )
         connection.exec_driver_sql(
             "INSERT INTO rule_packs "
             "(id, system_id, title, namespace, provenance, created_at, updated_at) "
@@ -449,7 +525,8 @@ def test_rule_pack_version_provenance_migration_backfills_existing_rows(
             "'validated', '{}', CURRENT_TIMESTAMP)"
         )
 
-    database.upgrade_schema()
+    command.stamp(config, "20260802_25")
+    command.upgrade(config, "20260802_26")
 
     try:
         with database.engine.connect() as connection:

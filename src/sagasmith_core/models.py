@@ -17,7 +17,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from sagasmith_core.clock import operational_utcnow
 
@@ -314,6 +314,20 @@ class RulePack(TimestampMixin, Base):
     provenance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+class RulePackPayload(Base):
+    """One canonical compressed payload shared by exact rule-pack versions."""
+
+    __tablename__ = "rule_pack_payloads"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    payload_codec: Mapped[str] = mapped_column(String(32), nullable=False)
+    uncompressed_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    compressed_payload: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=operational_utcnow
+    )
+
+
 class RulePackVersion(Base):
     """One content-addressed, validated rule-pack version."""
 
@@ -323,16 +337,49 @@ class RulePackVersion(Base):
         ForeignKey("rule_packs.id", ondelete="CASCADE"), primary_key=True
     )
     version: Mapped[str] = mapped_column(String(64), primary_key=True)
-    manifest: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    artifacts: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
-    mechanics: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
-    provenance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    payload_document_id: Mapped[str] = mapped_column(
+        ForeignKey("rule_pack_payloads.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    payload_document: Mapped[RulePackPayload] = relationship(lazy="joined")
     checksum: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(32), default="draft", index=True)
-    validation_report: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=operational_utcnow
     )
+
+    def _decoded_payload(self) -> dict[str, Any]:
+        from sagasmith_core.state_document_storage import decode_state_document
+
+        cached = self.__dict__.get("_decoded_rule_pack_payload")
+        if cached is None:
+            cached = decode_state_document(
+                document_id=self.payload_document.id,
+                payload_codec=self.payload_document.payload_codec,
+                uncompressed_size=self.payload_document.uncompressed_size,
+                compressed_payload=bytes(self.payload_document.compressed_payload),
+            )
+            self.__dict__["_decoded_rule_pack_payload"] = cached
+        return cached
+
+    @property
+    def manifest(self) -> dict[str, Any]:
+        return dict(self._decoded_payload()["manifest"])
+
+    @property
+    def artifacts(self) -> list[dict[str, Any]]:
+        return [dict(item) for item in self._decoded_payload()["artifacts"]]
+
+    @property
+    def mechanics(self) -> list[dict[str, Any]]:
+        return [dict(item) for item in self._decoded_payload()["mechanics"]]
+
+    @property
+    def provenance(self) -> dict[str, Any]:
+        return dict(self._decoded_payload()["provenance"])
+
+    @property
+    def validation_report(self) -> dict[str, Any]:
+        return dict(self._decoded_payload()["validation_report"])
 
 
 class CampaignRuleActivation(TimestampMixin, Base):
