@@ -63,8 +63,11 @@ change reviewed semantics or silently discard evidence.
 All PCs, NPCs, and monsters are `sagasmith.actor-card.v3` records distinguished
 by `actor_type`. A card contains the complete system-owned sheet, narrative
 notes, provenance, bindings, and metadata. It may reference one `actor_image`
-asset by `asset_key`; image bytes are package assets and are never copied into a
-campaign actor instance or snapshot.
+asset by `asset_key`; actor import validates that reference against the owning
+package's asset index. Image bytes are package assets and are never copied into
+a campaign actor instance or snapshot. A system MCP may project a managed
+portrait reference into its runtime character notes while the archive remains
+the byte authority.
 
 Source-backed portrait extraction requires a statblock heading, exact candidate
 pages from actor evidence, a low-text visual region, and the configured
@@ -103,8 +106,12 @@ Review schemas carried by other Pack kinds remain system-owned, while core still
 checks every embedded source reference.
 
 Module import validates every blob before opening the database transaction and
-then persists the module, assets, and reviews in one transaction. A failure
-cannot leave a partially imported database graph.
+then persists the module, assets, reviews, runtime actor instances, actor
+bindings, and idempotency receipt in one ambient transaction. A failure cannot
+leave a partially imported database graph. Content-addressed archive or image
+files written before a failed commit are safe orphans rather than database
+authority; a separate reference-aware garbage collector may remove them after
+a grace period.
 
 ## Required invariants
 

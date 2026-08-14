@@ -10,6 +10,11 @@ integrity verification, and export all pass through the same bounded decode
 boundary. No operation replays ancestor payloads, and deleting a snapshot does
 not make another snapshot undecodable.
 
+Integrity verification also checks that every activated module revision is
+still available in the snapshot's campaign, independently of whether the
+snapshot has addon locks. Restore repeats this authority check before changing
+module activation state.
+
 The current database contract is singular: `campaign_snapshots` must match the
 schema-v8 model and every stored row must use schema version 8 and codec
 `zlib-1`. Core does not provide alternate decoders, compatibility aliases, or

@@ -116,3 +116,9 @@ System packages choose which fields their profile writes and translate their
 own visibility vocabulary to the canonical scopes before ingestion. A profile
 that omits an enrichment is not an error; consumers inspect `profile_data`
 instead of relying on a fixed cross-system superset.
+
+## Operational evidence
+
+See [DATABASE_END_TO_END_AUDIT.md](DATABASE_END_TO_END_AUDIT.md) for the current
+cross-repository integrity evidence, incremental-storage boundaries, measured
+bottlenecks, migration rules, and performance acceptance gates.
