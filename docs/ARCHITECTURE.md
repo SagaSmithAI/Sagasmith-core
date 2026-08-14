@@ -67,6 +67,26 @@ custom-system ─┘
 Core has no Agent-platform adapter. Agent hosts use a system-specific MCP
 server as the authority and the MCP server composes these Core services.
 
+## Storage protocol
+
+The current SQLite schema is v32. Hot identity, authority, status, revision,
+and binding fields remain relational and indexable. Large canonical documents
+use bounded checksummed `zlib-1` storage at their owning boundary:
+
+- snapshots are self-contained full payloads; parent links express lineage but
+  are never required for decode;
+- StateRevision before/after values reference deduplicated immutable documents;
+- RulePackVersion references one immutable content-addressed payload;
+- ImportJob keeps one mutable compressed review document under its relational
+  compare-and-swap revision;
+- oversized idempotency responses use a compressed replay envelope.
+
+These are not byte-delta chains. Corruption fails closed at decode, and delete
+or restore does not require replaying an unbounded ancestor sequence. SQLite
+connections use foreign keys, WAL, and a 5-second busy timeout. A live database
+backup must checkpoint/include WAL state; schema rollback restores a matched
+database and runtime because v30-v32 deliberately have no downgrade protocol.
+
 ## Continuity ownership
 
 `CampaignMemory` stores objective world facts. Every new integration should

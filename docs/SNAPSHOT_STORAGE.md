@@ -10,6 +10,12 @@ integrity verification, and export all pass through the same bounded decode
 boundary. No operation replays ancestor payloads, and deleting a snapshot does
 not make another snapshot undecodable.
 
+Each public operation decodes a stored payload once and passes that verified
+object through clean-state checks and apply. Integrity verification batch-loads
+lineage, fact/revision, knowledge/revision, event, and participant rows. Query
+count is therefore bounded by collection type; a 1,000-event fixture must use no
+more than 25 integrity statements.
+
 Integrity verification also checks that every activated module revision is
 still available in the snapshot's campaign, independently of whether the
 snapshot has addon locks. Restore repeats this authority check before changing
@@ -20,6 +26,13 @@ schema-v8 model and every stored row must use schema version 8 and codec
 `zlib-1`. Core does not provide alternate decoders, compatibility aliases, or
 format conversion paths. A database that does not satisfy the current contract
 must not be opened by the runtime.
+
+Measured retained data does not justify an incremental payload chain. Across 60
+databases, 268 snapshots occupy 3.541 MiB compressed, while the Avernus sample
+verifies in 14.571 ms with 13 SQL statements. An unbounded delta DAG would add
+ancestor availability, chain-depth, deletion, corruption, and migration risks
+without addressing the measured capacity bottlenecks. State revisions and Rule
+Pack/import documents are compressed at their own correct boundaries instead.
 
 Before replacing a database or runtime build, stop all writers and take a
 consistent database backup. Rollback restores the database and runtime as one

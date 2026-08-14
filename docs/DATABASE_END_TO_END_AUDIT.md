@@ -4,10 +4,12 @@ Audit date: 2026-08-14
 
 ## Technical summary
 
-The current v29 databases are structurally healthy and the public persistence
-paths remain functional across Core, D&D, CoC, and Narrative MCP. Sixty
-accessible runtime databases passed SQLite `quick_check`, foreign-key checks,
-cross-table authority checks, and all 268 public snapshot integrity checks.
+The current v32 databases are structurally healthy and the public persistence
+paths remain functional across Core, D&D, CoC, and Narrative MCP. All 60
+accessible retained databases were upgraded from v29 to v32, compacted, and
+passed SQLite `quick_check`, foreign-key checks, compressed-document checksum
+checks, cross-table authority checks, and all 268 public snapshot integrity
+checks.
 
 Four write-boundary defects were found and fixed:
 
@@ -22,9 +24,11 @@ Four write-boundary defects were found and fixed:
 
 The evidence does not support replacing self-contained compressed snapshots
 with an unbounded incremental DAG. Current snapshots occupy only 3.541 MiB
-compressed across the retained corpus. The dominant avoidable storage and write
-costs are full before/after state revision documents and repeated immutable rule
-Pack JSON.
+compressed across the retained corpus. The actual bottlenecks have instead been
+removed: StateRevision now references deduplicated compressed documents,
+RulePackVersion references a compressed immutable payload, ImportJob keeps its
+large review document compressed, and SQLite uses WAL with an explicit busy
+timeout.
 
 ## Scope and evidence
 
@@ -38,9 +42,11 @@ The audit covered these current repositories on `main`:
 - `SagaSmith-narrative-mcp`
 
 The retained database cohort contains 23 `ttrpgbase.db` files and 37
-`narrative.db` files, totaling 1,753.281 MiB. All 60 report Alembic head
-`20260814_29`. A further 157 historical temporary directories are unreadable
-because of Windows ACLs and are excluded rather than assumed healthy.
+`narrative.db` files. Before the storage work they totaled 1,753.281 MiB at
+Alembic head `20260814_29`. All 60 now report the single supported head
+`20260815_32`; compaction reduced their physical total to 1,025.250 MiB. A
+further 157 historical temporary directories are unreadable because of Windows
+ACLs and remain excluded rather than assumed healthy.
 
 | Grain | Retained count | Checks |
 | --- | ---: | --- |
@@ -52,12 +58,14 @@ because of Windows ACLs and are excluded rather than assumed healthy.
 | Memory identities / revisions | 95 / 119 | revision parents and branch heads valid |
 | Actor knowledge identities / revisions | 188 / 188 | revision parents and actor ownership valid |
 | Events | 633 | bindings and snapshot payloads agree |
-| State revisions | 10,974 | branch and mutation-group references valid |
+| State revisions | 10,974 | branch/mutation-group and document references valid |
 | Snapshots | 268 | all decode and pass public `SnapshotService.verify` |
 | Idempotency records | 5,995 | current schema and campaign references valid |
 | Import jobs | 55 | current revisioned job schema |
 
-The complete Ruff and test suites passed in all six repositories. Focused
+The complete Ruff and test suites passed in all six repositories after the v32
+change. Narrative MCP's one hard-coded v29 test assertion was advanced to the
+current single head; no compatibility path was added. Focused
 failure-injection tests additionally prove that a module Pack interruption
 after actor binding leaves neither a module nor a character in the database.
 
@@ -74,8 +82,10 @@ after actor binding leaves neither a module nor a character in the database.
 | Long-term memory | stable identity plus immutable MemoryRevision | true fact-level revision chain and branch head |
 | Actor knowledge | stable identity plus immutable knowledge revision | true knowledge-level revision chain and branch head |
 | Events | CampaignEvent ledger | append-only |
-| Undo/redo | MutationGroup plus StateRevision | operation-level append, but full entity before/after documents |
+| Undo/redo | MutationGroup plus StateRevision | operation-level append; before/after are hashes of deduplicated compressed documents |
 | Snapshot DAG | full canonical payload compressed with `zlib-1` | parent is lineage only; restore never replays ancestors |
+| Rule Pack version | RulePackVersion identity/status plus immutable payload hash | full compressed version document, not byte delta |
+| Import review | ImportJob hot state/revision plus compressed mutable document | whole document replaced under compare-and-swap, not a delta chain |
 | Vector/FTS indexes | derived retrieval structures | rebuildable, not persistence authority |
 
 Character templates and campaign instances are distinct but not mandatory
@@ -130,7 +140,7 @@ agree on revision `1`.
 
 Across all 60 retained databases, 268 snapshots contain 20.823 MiB of canonical
 JSON and 3.541 MiB of compressed payload. This is an 83.0% reduction and only a
-small fraction of the 1,753.281 MiB retained database footprint.
+small fraction of the 1,753.281 MiB pre-migration retained database footprint.
 
 An Avernus v29 temporary-copy profile measured its largest current snapshot at
 238,738 uncompressed bytes and 33,892 compressed bytes:
@@ -140,7 +150,8 @@ An Avernus v29 temporary-copy profile measured its largest current snapshot at
 | zlib decode | 0.306 ms median |
 | SHA-256 payload checksum | 0.103 ms median |
 | JSON decode | 1.091 ms median |
-| complete integrity verification | 18.591 ms, 57 SQL statements |
+| complete integrity verification before P1 | 18.591 ms, 57 SQL statements |
+| complete integrity verification after P1 | 14.571 ms, 13 SQL statements |
 | live-state capture | 10.080 ms, 15 SQL statements |
 | payload apply followed by rollback | 17.963 ms, 15 SQL statements |
 
@@ -149,19 +160,19 @@ active branch had unsaved changes. The historical 4.49-4.59 second checkout
 record belongs to the deleted extreme stress database and has no phase profile;
 it must not be attributed to JSON decoding.
 
-### Snapshot integrity has an N+1 query shape
+### Snapshot integrity no longer has an N+1 query shape
 
-Integrity verification currently loads each fact identity and revision, each
-knowledge identity and revision, and each event plus its participants in
-separate queries. The Avernus sample needed 42 event/event-participant queries
-for 21 bound events. This is linear in ledger size and is the best explanation
-for stress-case latency, even though current ordinary databases remain fast.
+Integrity verification now decodes a stored payload once and batch-loads
+lineage, memory/revision, knowledge/revision, event, and participant records.
+The Avernus sample fell from 57 to 13 SQL statements. A 1,000-event regression
+fixture enforces a maximum of 25 statements, so ledger growth no longer makes
+the integrity query count linear.
 
-### State revision documents dominate mutable-history write amplification
+### State revision write amplification is removed
 
 The 10,974 StateRevision rows contain 21,948 before/after JSON values totaling
 332.150 MiB. Of those revisions, 5,965 store identical before and after
-documents. Offline estimates on current data are:
+documents. The pre-migration estimates were:
 
 | Storage form | Estimated size |
 | --- | ---: |
@@ -169,119 +180,133 @@ documents. Offline estimates on current data are:
 | independent zlib per value | 53.510 MiB |
 | content-addressed unique compressed documents | 26.307 MiB |
 
+v30 implements the content-addressed design without a delta chain. Across the
+60 upgraded databases, 5,342 unique per-database documents represent 147.266
+MiB of canonical JSON in 28.218 MiB of compressed bytes. Equal before/after
+states share hashes, branch clones share references, and undo/redo decodes the
+exact referenced document with bounded size and checksum verification.
+
 Narrative shows the same effect most clearly: a representative 73,961-byte
 Campaign state at revision 126 produces a 14.668 MiB `state_revisions` table.
 
-### Immutable rule Pack JSON is repeated across runtime databases
+### Immutable rule Pack and import JSON are compressed
 
 RulePackVersion JSON fields total 410.175 MiB in the retained corpus, but only
 34 distinct field values exist. Independent zlib would reduce them to 29.687
-MiB; a global content-addressed estimate is 2.234 MiB. This duplication is more
-material than snapshot storage.
+MiB; a global content-addressed estimate is 2.234 MiB. This duplication was more
+material than snapshot storage. v31 now combines the five immutable
+RulePackVersion JSON fields into one content-addressed compressed payload. The
+upgraded corpus stores 392.305 MiB of canonical payload in 28.982 MiB compressed
+across 110 per-database documents. Version identity, status, checksum, and
+campaign activation remain hot relational fields.
 
 Rule chunks, sections, and FTS indexes are also repeated per MCP home. In the
 largest current Waterdeep database, rule Pack versions use 19.418 MiB and rule
 chunks/sections/FTS use another 41.227 MiB. These rows are valid and make local
 search self-contained, but repeated test/runtime homes multiply the cost.
 
-### Idempotency and import review bodies need size budgets
+### Idempotency and import review bodies are bounded and compressed
 
-Idempotency response JSON totals 44.941 MiB. The largest retained response is
-1,303,097 bytes and duplicates import-job inspection/candidate data already
-stored elsewhere. ImportJob JSON totals 11.739 MiB and compresses offline to an
-estimated 1.827 MiB.
+Large idempotency responses already use a checksummed bounded `zlib` envelope
+above 64 KiB while preserving exact replay and request-hash conflicts. v32 keeps
+ImportJob identity, lifecycle state, revision, source bindings, parser metadata,
+and errors as hot columns, while its five large review fields form one bounded
+compressed document updated by the existing compare-and-swap. The upgraded
+corpus stores 10.645 MiB of canonical import documents in 1.755 MiB compressed.
 
-### SQLite settings favor durability over read/write concurrency
+### SQLite now uses measured WAL concurrency
 
-All 23 `ttrpgbase.db` files use rollback-journal `delete` mode and
-`synchronous=FULL`. This is a valid durability default. It should not be changed
-to WAL globally without multi-process, crash, backup, and restart evidence.
-Freelist space is only 17.523 MiB across those databases, so automatic VACUUM is
-not justified.
+Three Avernus temporary-copy runs compared rollback journal and WAL with a
+5-second busy timeout under two concurrent readers, campaign writes, snapshots,
+online backup, restart, and integrity checks. WAL reduced update p50 from
+4.9-5.3 ms to 2.4-3.1 ms, snapshot p50 from 41-45 ms to 15-16 ms, and total
+elapsed time by 19%-34%. Neither mode produced lock errors; every backup,
+restart, and `quick_check` passed. SQLite connections therefore now set WAL,
+`foreign_keys=ON`, and `busy_timeout=5000`; `synchronous` remains the SQLite
+durability default.
 
-## Recommended implementation order
+## Completed implementation order and acceptance
 
-### P0: preserve the repaired write boundaries
+### P0: repaired write boundaries — complete
 
-- Keep failure-injection tests for module actor binding and idempotent retry.
-- Add the 60-database integrity scan to release qualification.
-- Keep one current schema and no v7/v8 dual readers or compatibility aliases.
+The module-integrity, package-asset, atomic Pack-import, and Narrative revision
+fixes remain covered by failure injection and public-facade tests. The runtime
+has one current protocol and no v7/v8 snapshot aliases or dual readers.
 
-### P1: remove avoidable snapshot latency without changing its format
+### P1: bounded snapshot verification — complete
 
-1. Decode each snapshot payload once per public operation and pass the verified
-   object through integrity, clean-check, and apply.
-2. Batch-load memory/revision, knowledge/revision, event/participant, and lineage
-   rows.
-3. Add query-count and elapsed-phase metrics.
+Every public path decodes once and reuses the verified object. Integrity queries
+are batched by collection type. The 1,000-event query-count gate and the complete
+restart, restore, checkout, undo/redo, and branch suites pass. The retained
+Avernus sample verifies in 14.571 ms with 13 statements. A historical
+4.49-4.59-second checkout cannot be used as an acceptance baseline because its
+stress database was deleted and no phase profile exists.
 
-Acceptance gates:
+### P2: compressed StateDocument references — complete
 
-- integrity SQL count is bounded by collection type rather than row count;
-- a fixture with 1,000 events performs no more than 25 integrity statements;
-- a 1 MiB snapshot verifies below 250 ms and branch checkout below 1 second on
-  the reference Windows host;
-- corruption, restart, restore, checkout, undo/redo, and branch tests remain
-  unchanged.
+Migration v30 backfills hashes, validates canonical bytes, replaces the two JSON
+columns with foreign keys, and drops the retired columns. Runtime reads only the
+new protocol. The retained compressed corpus is 28.218 MiB, below the 35 MiB
+gate. Deduplication, corruption failure, branch sharing, undo/redo, fork, and
+snapshot restore tests pass.
 
-### P2: replace StateRevision JSON duplication with immutable state documents
+### P3: compressed Pack/import/idempotency payloads — complete
 
-Add a content-addressed table containing canonical JSON checksum, codec,
-uncompressed size, and compressed bytes. StateRevision points to before and
-after document hashes; equal before/after states share one record. This is not a
-delta chain, so undo/redo never depends on replaying ancestors.
+Migration v31 replaces five RulePackVersion JSON columns with an immutable
+payload reference and removes unreferenced payloads when mutable drafts are
+replaced or deleted. Migration v32 replaces five ImportJob JSON columns with one
+compressed compare-and-swap document. Existing large-response idempotency
+compression was retained rather than duplicated. Exact replay, corruption,
+migration, Pack lock, archive, restart, and downstream MCP tests pass. The Rule
+Pack compressed corpus is 28.982 MiB, below the 40 MiB gate; ImportJob is 1.755
+MiB compressed.
 
-Use a one-time migration only:
+### P4: WAL after concurrency evidence — complete
 
-1. stop writers and take a consistent backup;
-2. create and backfill compressed state documents;
-3. verify every hash and replay undo/redo on sampled and stress databases;
-4. switch all readers/writers to the new columns;
-5. remove old JSON columns in the same supported migration line;
-6. rollback only by restoring the matched pre-migration database and runtime.
+The measured WAL result justified the change. Every SQLite connection now uses
+WAL and a 5-second busy timeout. The benchmark covered concurrent reads, writes,
+snapshots, online backup, restart, and integrity. No fallback journal protocol
+or configuration flag was added.
 
-Acceptance gates:
+### P5: authority split — rejected for now
 
-- current 332.150 MiB corpus falls below 35 MiB;
-- identical before/after state writes one document reference;
-- no unbounded reconstruction chain;
-- undo/redo, fork, snapshot restore, and audit-log identity remain exact.
+Snapshots remain self-contained compressed nodes. Facts and actor knowledge
+remain true revision chains. StateRevision uses immutable document references,
+not deltas. Rule Pack payloads deduplicate inside one database, but Core does not
+gain a cross-database global catalog: there is still no demonstrated independent
+runtime consumer with a defined atomic backup/export boundary. Narrative Pack
+documents stay campaign-local because retained hot documents and settlement
+profiles do not cross the 1 MiB / 100 ms escalation threshold. This is an
+evidence-based boundary decision, not a permanent compatibility commitment.
 
-### P3: compress and deduplicate immutable Pack/import payloads
+## Migration, compatibility, and rollback boundary
 
-- Store RulePackVersion payloads once per checksum in a compressed immutable
-  payload table; version rows retain identity/status/provenance bindings.
-- Store terminal ImportJob review bodies as compressed immutable artifacts and
-  keep only bounded summaries in hot rows.
-- Replace oversized idempotency responses with compact stable result handles or
-  compressed replay payloads; never weaken request-hash conflict detection.
-- Add response-size limits and a reference-aware, grace-period garbage collector
-  for orphaned content-addressed files.
+- v30, v31, and v32 are one-way migrations. Their downgrade functions fail
+  explicitly; rollback restores the matching pre-migration database and runtime.
+- All 60 accessible v29 databases were backed up consistently, upgraded, and
+  verified at v32. An all-upgraded-set rollback was available until verification
+  completed. No database below v7 was present, so none was deleted.
+- The migrations drop retired StateRevision, RulePackVersion, and ImportJob JSON
+  columns. Runtime code contains no old-column read, alias, feature flag, or
+  conversion endpoint.
+- Migration temporarily raised physical size to 1,889.879 MiB because SQLite
+  retained freed pages. Per-database backed-up `VACUUM` compacted the verified
+  set to 1,025.250 MiB, reclaiming 864.629 MiB and leaving zero freelist pages.
+- Future rollback must restore a consistent SQLite backup, including WAL
+  checkpointing, rather than copying a live main file alone.
 
-Acceptance gates:
+## Next performance work, in order
 
-- retained RulePackVersion JSON falls below 40 MiB without changing exact locks;
-- normal idempotency responses remain below 256 KiB unless they return an
-  explicit artifact handle;
-- replay responses remain byte-equivalent at the public facade;
-- archive export works after process restart with no external network source.
-
-### P4: benchmark SQLite concurrency before changing journal mode
-
-On temporary copies, compare the current rollback journal with WAL plus an
-explicit busy timeout under concurrent read, settlement, snapshot, restart, and
-backup workloads. Adopt WAL only if it eliminates lock failures and improves
-p95 latency without weakening crash recovery or portable backup behavior.
-
-### P5: split authorities only when profiles justify it
-
-- Keep self-contained compressed Snapshot DAG nodes.
-- Keep fact/knowledge revisions incremental.
-- Consider a shared immutable rule/content catalog only after measuring more
-  than one real runtime consumer and defining backup/export behavior.
-- Move Narrative finalized Packs or records out of Campaign state only if the
-  hot document exceeds 1 MiB or p95 settlement exceeds 100 ms. Do not normalize
-  them speculatively.
+1. Add the 60-database v32 integrity scan and WAL backup/restart benchmark to
+   release qualification so schema drift is detected before distribution.
+2. Profile rule chunks, sections, and FTS duplication with at least two genuine
+   runtime homes. Consider a shared immutable catalog only if atomic local
+   export/backup and offline retrieval remain exact.
+3. Add production telemetry for transaction p50/p95, busy-timeout failures,
+   compressed-document decode failures, and snapshot statement counts. Do not
+   add an orchestration layer; expose bounded counters at current facades.
+4. Re-evaluate Narrative Pack extraction only if a real campaign crosses the
+   1 MiB hot-document or 100 ms settlement threshold.
 
 ## Limitations and open product decisions
 
