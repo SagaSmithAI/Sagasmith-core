@@ -1093,7 +1093,6 @@ class SnapshotService:
             "schema_version": row.schema_version,
             "payload": cls._materialize(row),
             "recap": dict(row.recap) if row.recap else None,
-            "storage_mode": "full",
             "valid": cls._is_valid(session, row),
         }
 
@@ -1108,10 +1107,6 @@ class SnapshotService:
     @classmethod
     def _assert_integrity(cls, session, row: CampaignSnapshot) -> None:
         """Verify the full payload, DAG ancestry, and indexed continuity bindings."""
-        if row.schema_version != cls.SCHEMA_VERSION:
-            raise SnapshotIntegrityError(
-                "snapshot schema is unsupported; create a new snapshot with the current runtime"
-            )
         payload = cls._materialize(row)
         required = {
             "campaign",

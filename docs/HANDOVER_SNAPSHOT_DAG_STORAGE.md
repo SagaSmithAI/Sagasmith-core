@@ -28,8 +28,8 @@ Phase 1 is implemented by snapshot schema v8 and Alembic revision
 - the record checksum covers the compressed bytes plus schema, snapshot,
   campaign, branch, parent, slot, codec, size, and document checksum identities;
 - every service obtains full state through one bounded `_materialize` boundary;
-- public `get` and `export` still return the complete JSON document with logical
-  `storage_mode: full`;
+- public `get` and `export` still return the complete JSON document; the removed
+  `storage_mode` discriminator no longer advertises a nonexistent dual protocol;
 - the one-time migration accepts complete checksum-valid schema-v7 payloads and
   rejects v3–v6 instead of adding a runtime compatibility path;
 - downgrade is deliberately unavailable; rollback restores the pre-migration
@@ -229,16 +229,14 @@ binding writes, recap comparison, or the much larger state/audit ledgers.
 
 ### Integrity
 
-Current integrity requires exactly schema v7, verifies the canonical payload
-checksum, validates required shapes and installed module/rule/add-on references,
-walks parent ids for cycles and cross-campaign ancestry, and compares full
-memory/event/knowledge/cursor documents with their indexed rows.
-
-The checksum authenticates the payload but not `parent_id`; ancestry is checked
-structurally, and ancestor payload checksums are not recursively verified. A new
-record format must bind the parent identity in a record checksum. A fully
-incremental format would additionally make every ancestor's data and decoder
-part of leaf integrity, increasing both latency and corruption blast radius.
+Current integrity accepts exactly schema v8 and crosses the single bounded
+`_materialize` boundary. The record checksum authenticates the compressed bytes
+and schema, snapshot, campaign, branch, parent, slot, codec, size, and canonical
+document checksum identities. Integrity then validates required shapes and
+installed module/rule/add-on references, walks parent ids for cycles and
+cross-campaign ancestry, and compares full memory/event/knowledge/cursor
+documents with their indexed rows. Ancestor payloads are not replayed or made
+part of a leaf's decode dependency.
 
 ### Restore and checkout
 
@@ -251,10 +249,9 @@ reusing the captured concurrency token.
 
 Checkout first proves the current branch equals its head (apart from the live
 campaign revision), validates the target, changes the active ref, and applies
-the target atomically. A future storage implementation needs one narrow internal
-`materialize(snapshot)` boundary used by Snapshot and Branch services; direct
-`dict(snapshot.payload)` reads must not become a scattered codec or delta
-compatibility layer.
+the target atomically. Snapshot, Branch, access, rule-pack, add-on, and
+continuity services all use the same narrow `_materialize(snapshot)` boundary;
+there are no direct legacy `snapshot.payload` reads or alternate decoders.
 
 ### Delete and export
 
@@ -264,10 +261,11 @@ Delta storage would turn ancestry into a data dependency and require reachabilit
 and garbage-collection rules in addition to the current history rules.
 
 Export calls `get`, verifies the snapshot, and writes a full JSON document with
-metadata, recap, payload, `storage_mode`, and validity. It exports state, not the
-installed rule/module artifacts required to apply that state. A compressed
-internal format can preserve this public full-document export. A delta format
-would have to materialize all ancestors or emit the whole dependency closure.
+metadata, recap, payload, schema version, and validity. It exports state, not
+the installed rule/module artifacts required to apply that state. Compression
+remains internal and does not add a public storage-mode discriminator. A delta
+format would have to materialize all ancestors or emit the whole dependency
+closure.
 
 ## Separate problem statements
 
@@ -283,7 +281,7 @@ would have to materialize all ancestors or emit the whole dependency closure.
 | Option | Capacity / writes | Read latency | Reliability, delete, export, migration | Decision |
 |---|---|---|---|---|
 | Keep full JSON | No improvement | Constant-hop; current decode is cheap | Simplest and most isolated | Safe baseline, but leaves an easy 83% payload reduction unused |
-| Self-contained compressed payload | Strong measured reduction in blob bytes | Still constant-hop; measured decompression is under 1.5 ms per stress node | Almost the same failure domain; export decodes one record; one bounded migration | **Prototype first** |
+| Self-contained compressed payload | Strong measured reduction in blob bytes | Still constant-hop; measured decompression is under 1.5 ms per stress node | Almost the same failure domain; export decodes one record; one bounded migration | **Implemented** |
 | Immutable character and cursor bindings | Targets 76% of raw payload without ancestor chains | Bounded direct joins, but cursor identity/materialization must be fixed | More shared-row dependencies and GC rules; still ancestor-independent | **Conditional second phase** |
 | Periodic checkpoint plus typed delta | Potential reduction between checkpoints | Bounded by checkpoint interval and accumulated delta bytes | Typed schema, compaction, reachability, corruption, and migration complexity | Defer unless earlier phases miss explicit gates |
 | Fully incremental DAG | Maximum theoretical de-duplication | Unbounded replay and ancestor validation | One bad/missing/obsolete ancestor can lose a subtree; hardest delete, export, GC, and upgrade | **Reject** |
@@ -313,11 +311,12 @@ record, verify length and both checksums, decode the document, and pass the same
 typed value to integrity/apply/export. Do not add a generic codec registry; the
 new schema has one current codec and one current protocol.
 
-Prototype codec selection should compare the standard-library zlib baseline
-with any proposed dependency on ratio, p95 capture overhead, p95 materialization
-overhead, deterministic output, maintenance, and corruption behavior. The
-on-disk checksum remains over canonical uncompressed state so codec changes do
-not redefine state identity.
+`zlib-1` is the selected codec. Any future replacement must cross another
+explicit one-time schema cutover after comparing ratio, p95 capture and
+materialization overhead, deterministic output, maintenance, and corruption
+behavior. Do not add a registry, dual decoder, or codec negotiation path. The
+document checksum remains over canonical uncompressed state so a future cutover
+would not redefine state identity.
 
 Independently of compression, batch integrity reads for ancestry, facts,
 knowledge, events/participants, and cursor ids. This is a query-shape change,
@@ -359,25 +358,19 @@ reachability and cannot remove a reachable checkpoint or delta.
 
 ## Migration and compatibility boundary
 
-The future format change must have one current runtime protocol, not permanent
-dual reads, aliases, fallback decoding, or dual writes.
+Revision `20260814_29` is the only v7-to-v8 boundary. The current runtime has no
+dual reads, aliases, fallback decoding, codec negotiation, or dual writes.
 
-1. Stop writers and create a byte-for-byte database backup plus a manifest of
-   database hash, schema revision, snapshot count, branch refs, and snapshot
-   checksums.
-2. Preflight every source snapshot through the **current v7** integrity contract.
-   Any unsupported or invalid record blocks migration; the migrator must not
-   guess missing semantics.
-3. Write the new records to a staging table in deterministic slot order. Decode
-   each staged record and compare its canonical full document, public export,
-   checksum, parent, branch, and recap with the source.
-4. Re-run branch-head, ancestry, binding, restore/checkout, and reachability
-   checks against the staged representation.
-5. Perform one transactional schema cutover (or an equivalently atomic database
-   replacement), rebuild storage so freed pages are actually reclaimable, then
-   start only the new runtime.
-6. Remove the old table/columns in the same release boundary once validation and
-   backup retention requirements are satisfied. There is no runtime fallback.
+1. The operator stops writers and creates a consistent database backup before
+   launching the new runtime.
+2. The migration preflights every source row before its first schema mutation;
+   only complete, checksum-valid schema-v7 documents are accepted.
+3. It canonicalizes and compresses records in deterministic slot order, binds
+   their immutable identities in the record checksum, and writes the v8 fields.
+4. It makes the v8 envelope non-null and removes the old JSON `payload` column
+   in the same Alembic revision.
+5. Only the new runtime starts against the migrated database. Real-copy and
+   public recovery tests verify materialization, export, restore, and checkout.
 
 The schema-v3 regression databases are analytical fixtures, not valid inputs to
 that v7 migration. If product requirements demand recovery of older released
@@ -387,15 +380,16 @@ Do not reintroduce the removed schema-3/4/5/6 compatibility branches.
 
 ## Rollback
 
-- Before cutover, any mismatch rolls back the staging transaction and leaves the
-  source untouched.
+- A preflight mismatch occurs before schema mutation and leaves the source
+  protocol selectable by its matching runtime.
 - After cutover, rollback restores the byte-for-byte pre-migration database and
   the matching old runtime. Do not attempt lossy down-conversion or keep a
   shadow writer.
-- Keep the migration manifest and backup until the full public recovery matrix
-  passes and the operator explicitly closes the rollback window.
-- Interrupted compaction or migration must leave either the old database or the
-  fully validated new database selectable, never a mixed table set.
+- Keep the backup and recorded preflight evidence until the full public recovery
+  matrix passes and the operator explicitly closes the rollback window.
+- If migration is interrupted, do not introduce a mixed-protocol recovery path
+  or let either runtime guess the state; restore the pre-migration backup and
+  rerun the single cutover.
 
 ## Acceptance gates
 
@@ -407,8 +401,8 @@ Do not reintroduce the removed schema-3/4/5/6 compatibility branches.
   added p95 decompress-plus-decode time is at most 10 ms on the same host class.
 - End-to-end current-schema create, restore, and checkout p95 does not regress by
   more than 10%; report stage timings rather than only a total.
-- Decode reproduces byte-identical canonical state and unchanged public export
-  for every migrated snapshot.
+- Decode reproduces byte-identical canonical state plus the required current
+  export metadata for every migrated snapshot.
 - Corruption tests cover truncated/compressed garbage, decompression-size limit,
   document checksum mismatch, parent substitution, wrong campaign, missing
   binding, and interrupted migration.

@@ -3077,7 +3077,7 @@ def test_snapshot_is_full_and_validates_actor_knowledge_bindings(database) -> No
     saved = snapshots.create(campaign.id, label="Complete state")
     document = snapshots.get(campaign.id, saved.slot)
 
-    assert document["storage_mode"] == "full"
+    assert "storage_mode" not in document
     assert document["payload"]["campaign"]["name"] == "Full save"
     assert document["payload"]["characters"][0]["sheet"] == {"hp": 7}
     assert document["payload"]["actor_knowledge"][0]["knowledge_key"] == "sealed-door"
@@ -3128,7 +3128,7 @@ def test_snapshot_storage_is_self_contained_compressed_and_parent_bound(database
         assert row.schema_version == 8
 
     document = snapshots.get(campaign.id, child.slot)
-    assert document["storage_mode"] == "full"
+    assert "storage_mode" not in document
     assert document["payload"]["campaign"]["state"] == {"repeated": "x" * 20_000}
     assert document["valid"] is True
 
