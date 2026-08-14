@@ -40,6 +40,7 @@ class CampaignEventInfo:
     sequence: int
     event_type: str
     summary: str
+    retrieval_text: str
     payload: dict[str, Any]
     audience_scope: str
     created_at: str
@@ -56,6 +57,7 @@ class EventService:
         *,
         event_type: str = "narrative",
         summary: str,
+        retrieval_text: str | None = None,
         payload: dict[str, Any] | None = None,
         audience_scope: str = "dm",
         participants: list[dict[str, str]] | None = None,
@@ -78,6 +80,7 @@ class EventService:
                 branch.id,
                 event_type=event_type,
                 summary=summary,
+                retrieval_text=retrieval_text,
                 payload=payload,
                 audience_scope=audience_scope,
                 participants=participants,
@@ -101,6 +104,7 @@ class EventService:
         proposition: str,
         event_type: str = "narrative",
         payload: dict[str, Any] | None = None,
+        retrieval_text: str | None = None,
         audience_scope: str = "dm",
         disclosure_scope: str = "owner",
         participants: list[dict[str, str]] | None = None,
@@ -161,6 +165,7 @@ class EventService:
                 branch.id,
                 event_type=event_type,
                 summary=summary,
+                retrieval_text=retrieval_text,
                 payload=payload,
                 audience_scope=audience_scope,
                 participants=participants,
@@ -208,12 +213,18 @@ class EventService:
         *,
         event_type: str,
         summary: str,
+        retrieval_text: str | None,
         payload: dict[str, Any] | None,
         audience_scope: str,
         participants: list[dict[str, str]] | None = None,
     ) -> CampaignEventInfo:
         if audience_scope not in EVENT_AUDIENCE_SCOPES:
             raise ValueError(f"invalid event audience scope: {audience_scope}")
+        normalized_retrieval_text = (
+            summary if retrieval_text is None else str(retrieval_text).strip()
+        )
+        if len(normalized_retrieval_text) > 16_000:
+            raise ValueError("event retrieval_text exceeds 16000 characters")
         sequence = session.scalar(
             update(Campaign)
             .where(Campaign.id == campaign.id)
@@ -228,6 +239,7 @@ class EventService:
             sequence=int(sequence),
             event_type=event_type,
             summary=summary,
+            retrieval_text=normalized_retrieval_text,
             payload=payload or {},
             audience_scope=audience_scope,
             branch_id=branch_id,
@@ -459,6 +471,7 @@ class EventService:
             sequence=row.sequence,
             event_type=row.event_type,
             summary=row.summary,
+            retrieval_text=row.retrieval_text,
             payload=dict(row.payload),
             audience_scope=row.audience_scope,
             created_at=row.created_at.isoformat(),

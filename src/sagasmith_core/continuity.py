@@ -362,7 +362,7 @@ class ContinuityService:
                 lexical_score(
                     query or " ",
                     title=str(item.get("event_type") or ""),
-                    content=str(item.get("summary") or ""),
+                    content=str(item.get("retrieval_text") or item.get("summary") or ""),
                 )
                 + (index + 1) / max(1, len(events)) / 10
             )

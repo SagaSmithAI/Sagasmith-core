@@ -2436,6 +2436,46 @@ def test_actor_scoped_events_follow_visible_actor_knowledge(database) -> None:
     assert unscoped_player_log == []
 
 
+def test_event_retrieval_text_drives_shared_budget_selection(database) -> None:
+    campaign = CampaignService(database).create(system_id="neutral", name="Event retrieval")
+    events = EventService(database)
+    relevant = events.add(
+        campaign.id,
+        event_type="npc_conversation",
+        summary="A conversation occurred.",
+        retrieval_text="The obsidian key is hidden beneath the bridge.",
+    )
+    stored = events.list(campaign.id)[0]
+    assert stored.retrieval_text == "The obsidian key is hidden beneath the bridge."
+
+    padding = "x" * 700
+    selected, _ = ContinuityService._apply_budget(
+        query="obsidian key",
+        facts=[],
+        knowledge=[],
+        events=[
+            {
+                "id": relevant.id,
+                "sequence": 1,
+                "event_type": "npc_conversation",
+                "summary": "A conversation occurred.",
+                "retrieval_text": "The obsidian key is hidden beneath the bridge.",
+                "padding": padding,
+            },
+            {
+                "id": "irrelevant",
+                "sequence": 2,
+                "event_type": "npc_conversation",
+                "summary": "Another conversation occurred.",
+                "retrieval_text": "Nothing related was discussed.",
+                "padding": padding,
+            },
+        ],
+        budget_chars=1_000,
+    )
+    assert [item["id"] for item in selected["events"]] == [relevant.id]
+
+
 def test_actor_scoped_events_follow_explicit_participants_without_fake_knowledge(
     database,
 ) -> None:

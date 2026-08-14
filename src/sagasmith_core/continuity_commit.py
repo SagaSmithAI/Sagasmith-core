@@ -146,6 +146,7 @@ class ContinuityCommitService:
                 branch.id,
                 event_type=str(event.get("event_type", "narrative")),
                 summary=self._required_text(event, "summary"),
+                retrieval_text=event.get("retrieval_text"),
                 payload=dict(event.get("payload") or {}),
                 audience_scope=str(event.get("audience_scope", "dm")),
                 participants=list(event.get("participants") or []),

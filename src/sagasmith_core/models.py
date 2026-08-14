@@ -477,6 +477,7 @@ class CampaignEvent(Base):
     sequence: Mapped[int] = mapped_column(Integer, nullable=False)
     event_type: Mapped[str] = mapped_column(String(64), default="narrative")
     summary: Mapped[str] = mapped_column(Text, default="")
+    retrieval_text: Mapped[str] = mapped_column(Text, default="")
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     audience_scope: Mapped[str] = mapped_column(String(200), default="dm")
     branch_id: Mapped[str | None] = mapped_column(
