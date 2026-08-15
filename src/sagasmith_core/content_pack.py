@@ -17,6 +17,7 @@ import zipfile
 from typing import Any, Mapping, Sequence
 
 from sagasmith_core.integrity import canonical_json
+from sagasmith_core.visibility import MODULE_VISIBILITY_SCOPES
 
 CONTENT_PACKAGE_FORMAT = "sagasmith.content-package"
 CONTENT_PACKAGE_SCHEMA_VERSION = 2
@@ -779,6 +780,12 @@ def validate_content_package(value: Mapping[str, Any]) -> dict[str, Any]:
                 raise ContentPackageError(
                     f"{field}.metadata has profile fields outside profile_data: "
                     + ", ".join(unknown_metadata)
+                )
+            visibility = metadata.get("visibility", "restricted")
+            if visibility not in MODULE_VISIBILITY_SCOPES:
+                raise ContentPackageError(
+                    f"{field}.metadata.visibility must be one of "
+                    f"{sorted(MODULE_VISIBILITY_SCOPES)}"
                 )
             profile_data = metadata.get("profile_data", {})
             if not isinstance(profile_data, dict):

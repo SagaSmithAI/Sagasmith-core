@@ -494,3 +494,12 @@ def test_module_package_rejects_profile_fields_outside_profile_data() -> None:
 
     with pytest.raises(ContentPackageError, match="outside profile_data: stress"):
         validate_content_package(package)
+
+
+def test_module_package_rejects_obsolete_scene_visibility() -> None:
+    package, _blobs = _module_package()
+    package["content"]["scene_atlas"][0]["metadata"] = {"visibility": "keeper"}
+    package["checksum"] = content_package_checksum(package)
+
+    with pytest.raises(ContentPackageError, match="metadata.visibility must be one of"):
+        validate_content_package(package)
