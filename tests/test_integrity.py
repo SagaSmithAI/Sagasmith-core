@@ -3,7 +3,9 @@ from sagasmith_core.idempotency import request_hash
 from sagasmith_core.integrity import (
     canonical_json,
     json_sha256,
+    sign_canonical_envelope,
     unique_retired_source_key,
+    verify_canonical_envelope,
 )
 
 
@@ -36,3 +38,25 @@ def test_retired_source_keys_share_one_collision_contract() -> None:
 
 def test_document_importers_share_one_supported_suffix_contract() -> None:
     assert DOCUMENT_SOURCE_SUFFIXES == {".md", ".markdown", ".pdf", ".txt"}
+
+
+def test_canonical_hmac_envelope_detects_tampering() -> None:
+    signed = sign_canonical_envelope({"kind": "context", "revision": 4}, b"secret")
+    assert verify_canonical_envelope(
+        signed,
+        b"secret",
+        missing_error="missing",
+        invalid_error="invalid",
+    ) == {"kind": "context", "revision": 4}
+    signed["revision"] = 5
+    try:
+        verify_canonical_envelope(
+            signed,
+            b"secret",
+            missing_error="missing",
+            invalid_error="invalid",
+        )
+    except ValueError as error:
+        assert str(error) == "invalid"
+    else:
+        raise AssertionError("tampered envelope was accepted")
