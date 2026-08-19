@@ -7,6 +7,15 @@ from sagasmith_core.actor_lifecycle import (
     InitialActorGrant,
 )
 from sagasmith_core.addons import AddonError, AddonService
+from sagasmith_core.auth_context import (
+    AUTH_CONTEXT_META_KEY,
+    AUTH_CONTEXT_RECEIPT_META_KEY,
+    AUTH_CONTEXT_SCHEMA,
+    AuthContext,
+    AuthContextNonceGuard,
+    sign_auth_context,
+    verify_auth_context,
+)
 from sagasmith_core.branches import BranchService
 from sagasmith_core.campaigns import CampaignService
 from sagasmith_core.characters import CharacterService
@@ -120,6 +129,11 @@ __all__ = [
     "AddonService",
     "AccessDeniedError",
     "AccessService",
+    "AUTH_CONTEXT_META_KEY",
+    "AUTH_CONTEXT_RECEIPT_META_KEY",
+    "AUTH_CONTEXT_SCHEMA",
+    "AuthContext",
+    "AuthContextNonceGuard",
     "BranchService",
     "CampaignService",
     "CascadingOcrProvider",
@@ -190,9 +204,11 @@ __all__ = [
     "request_hash",
     "render_pdf_page",
     "source_ref",
+    "sign_auth_context",
     "validate_content_package",
     "validate_content_actor_card",
     "validate_subject_context_fact",
+    "verify_auth_context",
 ]
 
 __version__ = "0.2.0"
