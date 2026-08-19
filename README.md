@@ -34,6 +34,17 @@ flowchart TB
 
 Core 不负责主持风格、MCP 工具暴露或具体规则裁决。Agent Skills 负责工作流，系统运行时负责规则，MCP 服务负责能力与存储边界，Core 负责一致的数据语义。
 
+## 当前领域实现
+
+| 领域 | 当前仓库 | 同仓版本化组件 |
+|---|---|---|
+| D&D 5e | [`sagasmith-dnd`](https://github.com/SagaSmithAI/sagasmith-dnd) | Domain、MCP、Skills、UI、模组生成流程 |
+| Call of Cthulhu 7e | [`sagasmith-coc`](https://github.com/SagaSmithAI/sagasmith-coc) | Domain、MCP、Skills、UI、模组生成流程 |
+| Narrative | [`sagasmith-narrative`](https://github.com/SagaSmithAI/sagasmith-narrative) | Domain、MCP、Skills、项目生成流程 |
+
+以上三个垂直仓库是当前唯一源码入口。原独立 MCP、Skills、UI 与通用 Module
+Generator 仓库已归档，只保留只读历史；新集成不得依赖其分支、发布或文档。
+
 ## 可分享内容格式
 
 `sagasmith.content-package` v2 是唯一公开交换格式，文件扩展名为
