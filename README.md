@@ -45,6 +45,18 @@ Core 不负责主持风格、MCP 工具暴露或具体规则裁决。Agent Skill
 以上三个垂直仓库是当前唯一源码入口。原独立 MCP、Skills、UI 与通用 Module
 Generator 仓库已归档，只保留只读历史；新集成不得依赖其分支、发布或文档。
 
+## 2026-08-20 集成基线
+
+当前主线已经用最新 Agent、Service 与三个领域仓库完成真实 Host 回归：Service
+签发 `sagasmith.auth-context/v1` principal context，Agent 将其交给会话作用域 MCP，
+领域服务仍在调用边界重新校验 campaign、actor、role 与 revision。D&D 与 CoC
+参考战役已在同一托管栈中并发运行且未发现回归缺口；D&D 路径额外记录了一个合法
+结局。内容目录 runner 会发现当前全部模组并保存机器可读 exclusion，而不会把未执行
+路径伪装成已覆盖。
+
+这条证据不改变 Core 的职责：签名身份、动态工具暴露与主持语义仍分别属于
+Service/Agent、MCP 和 Agent Skills；Core 只提供系统无关的持久化与事务保证。
+
 ## 可分享内容格式
 
 `sagasmith.content-package` v2 是唯一公开交换格式，文件扩展名为
