@@ -32,6 +32,18 @@ flowchart TB
 
 Core does not decide GM style, MCP exposure, or system-specific rules. Skills own operating guidance, system runtimes own rules, MCP servers own the capability/storage boundary, and Core owns consistent data semantics.
 
+## Current domain implementations
+
+| Domain | Current repository | Components versioned together |
+|---|---|---|
+| D&D 5e | [`sagasmith-dnd`](https://github.com/SagaSmithAI/sagasmith-dnd) | Domain, MCP, Skills, UI, module authoring |
+| Call of Cthulhu 7e | [`sagasmith-coc`](https://github.com/SagaSmithAI/sagasmith-coc) | Domain, MCP, Skills, UI, scenario authoring |
+| Narrative | [`sagasmith-narrative`](https://github.com/SagaSmithAI/sagasmith-narrative) | Domain, MCP, Skills, project authoring |
+
+These vertical repositories are the only current source entry points. The former
+standalone MCP, Skills, UI, and generic Module Generator repositories are
+archived read-only history and must not be used for new integrations.
+
 ## Shareable content formats
 
 `sagasmith.content-package` v2 is the only public exchange format and uses the
