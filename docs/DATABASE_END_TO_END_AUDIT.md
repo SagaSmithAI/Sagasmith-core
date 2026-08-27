@@ -57,14 +57,17 @@ timeout.
 
 ## Scope and evidence
 
-The audit covered these current repositories on `main`:
+The audit covered the following repositories at the recorded baseline. The first three remain
+current sources; the standalone MCP repositories are archived historical evidence only. They are
+not release inputs or compatibility fallbacks, and current authority lives in the corresponding
+vertical domain repository:
 
 - `sagasmith-core`
 - `sagasmith-dnd`
 - `sagasmith-coc`
-- `SagaSmith-dnd-mcp`
-- `SagaSmith-coc-mcp`
-- `SagaSmith-narrative-mcp`
+- `SagaSmith-dnd-mcp` (archived; current authority: `sagasmith-dnd`)
+- `SagaSmith-coc-mcp` (archived; current authority: `sagasmith-coc`)
+- `SagaSmith-narrative-mcp` (archived; current authority: `sagasmith-narrative`)
 
 The retained database cohort contains 23 `ttrpgbase.db` files and 37
 `narrative.db` files. Before the storage work they totaled 1,753.281 MiB at
