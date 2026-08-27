@@ -208,7 +208,7 @@ class _PersistentEmbeddingCache:
 
     _SCHEMA = 2
     _QUERY_CHUNK = 400
-    _path_locks: ClassVar[dict[Path, threading.Lock]] = {}
+    _path_locks: ClassVar[dict[Path, threading.RLock]] = {}
     _path_locks_guard: ClassVar[threading.Lock] = threading.Lock()
 
     def __init__(
@@ -232,9 +232,9 @@ class _PersistentEmbeddingCache:
         self.busy_timeout_ms = busy_timeout_ms
         self._initialized = False
         with self._path_locks_guard:
-            self._initialize_lock = self._path_locks.setdefault(
+            self._database_lock = self._path_locks.setdefault(
                 self.path,
-                threading.Lock(),
+                threading.RLock(),
             )
 
     @classmethod
@@ -281,7 +281,7 @@ class _PersistentEmbeddingCache:
         try:
             connection.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")
             if not self._initialized:
-                with self._initialize_lock:
+                with self._database_lock:
                     if not self._initialized:
                         current_mode = str(
                             connection.execute("PRAGMA journal_mode").fetchone()[0]
@@ -425,7 +425,10 @@ class _PersistentEmbeddingCache:
             )
         if not rows:
             return
-        with closing(self._connect()) as connection:
+        # SQLite serializes writers across processes. Serialize writers that
+        # this process owns as well, so they wait on the path lock instead of
+        # consuming the short external-lock busy timeout and failing open.
+        with self._database_lock, closing(self._connect()) as connection:
             connection.executemany(
                 """
                 INSERT INTO embedding_cache (
