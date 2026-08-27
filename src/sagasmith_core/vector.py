@@ -72,10 +72,11 @@ class VectorStore:
         expected = {
             "hnsw:space": "cosine",
             "sagasmith_system": self.namespace,
-            "embedding_model": profile.model_name,
+            "embedding_model": profile.storage_model_id,
+            "embedding_revision": profile.revision or "unversioned",
             "embedding_dimensions": profile.dimensions,
             "embedding_language": profile.language,
-            "embedding_index_version": 1,
+            "embedding_index_version": 2,
         }
         if scoped not in self._collections:
             collection = self._connect().get_or_create_collection(

@@ -25,7 +25,7 @@ from sagasmith_core.documents import (
     normalize_document,
     strip_page_markers,
 )
-from sagasmith_core.embeddings import Embedder
+from sagasmith_core.embeddings import Embedder, embedding_model_identity
 from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
 from sagasmith_core.integrity import json_sha256, unique_retired_source_key
 from sagasmith_core.models import (
@@ -768,7 +768,9 @@ class ModuleService:
                                 page_end=chunk.metadata.get("page_end"),
                                 chunk_type=chunk.metadata.get("chunk_type", "narrative"),
                                 content_hash=chunk.metadata.get("content_hash", ""),
-                                embedding_model=embedder.model_name if embedder else None,
+                                embedding_model=(
+                                    embedding_model_identity(embedder) if embedder else None
+                                ),
                                 embedding_json=vector,
                                 metadata_json=chunk.metadata,
                             )
@@ -793,7 +795,7 @@ class ModuleService:
                                     payload={
                                         "document": chunk.content,
                                         "metadata": vector_metadata,
-                                        "embedding_model": embedder.model_name,
+                                        "embedding_model": embedding_model_identity(embedder),
                                     },
                                 )
                             )
@@ -2860,6 +2862,7 @@ class ModuleService:
                     vector_store,
                     system_id=rows[0].ModuleSource.system_id,
                     collection="modules",
+                    embedding_model=embedding_model_identity(embedder),
                     profile=getattr(embedder, "profile", None),
                 )
                 rankings["dense"] = [
@@ -2881,7 +2884,7 @@ class ModuleService:
                             row,
                         )
                         for row in rows
-                        if row.ModuleChunk.embedding_model == embedder.model_name
+                        if row.ModuleChunk.embedding_model == embedding_model_identity(embedder)
                     ),
                     key=lambda item: -item[0],
                 )
