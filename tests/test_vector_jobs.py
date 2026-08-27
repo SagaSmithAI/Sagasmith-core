@@ -1,3 +1,4 @@
+import pytest
 from sqlalchemy import select
 
 from sagasmith_core.campaigns import CampaignService
@@ -15,6 +16,11 @@ class FakeEmbedder:
 
     def encode(self, texts):
         return [[1.0, 0.0] if "grapple" in text.casefold() else [0.0, 1.0] for text in texts]
+
+
+class RevisionedFakeEmbedder(FakeEmbedder):
+    def __init__(self, embedding_model_id: str) -> None:
+        self.embedding_model_id = embedding_model_id
 
 
 class FakeVectorStore:
@@ -164,6 +170,7 @@ def test_failed_vector_delivery_is_retry_safe(database) -> None:
         store,
         system_id="dnd5e",
         collection="rules",
+        embedding_model="fake",
     )
 
     jobs_after_failure = vector_jobs(database)
@@ -178,6 +185,7 @@ def test_failed_vector_delivery_is_retry_safe(database) -> None:
         store,
         system_id="dnd5e",
         collection="rules",
+        embedding_model="fake",
     )
 
     jobs_after_retry = vector_jobs(database)
@@ -185,3 +193,56 @@ def test_failed_vector_delivery_is_retry_safe(database) -> None:
     assert jobs_after_retry[0].status == "completed"
     assert jobs_after_retry[0].attempts == 2
     assert store.upserts[1]["ids"] == stable_ids
+
+
+def test_vector_flush_never_crosses_embedding_revisions(database) -> None:
+    store = FakeVectorStore()
+    service = RuleService(database)
+    service.ingest(
+        system_id="dnd5e",
+        source_key="revision-one",
+        title="Revision one",
+        content="# First\nOriginal revision.",
+        embedder=RevisionedFakeEmbedder("fake@" + "1" * 40),
+        vector_store=store,
+    )
+    service.ingest(
+        system_id="dnd5e",
+        source_key="revision-two",
+        title="Revision two",
+        content="# Second\nReplacement revision.",
+        embedder=RevisionedFakeEmbedder("fake@" + "2" * 40),
+        vector_store=store,
+    )
+
+    result = VectorIndexJobService(database).flush(
+        store,
+        system_id="dnd5e",
+        collection="rules",
+        embedding_model="fake@" + "2" * 40,
+    )
+
+    jobs = vector_jobs(database)
+    assert (result.attempted, result.completed, result.failed) == (1, 1, 0)
+    assert len(store.upserts) == 1
+    assert {
+        (job.payload["embedding_model"], job.status)
+        for job in jobs
+    } == {
+        ("fake@" + "1" * 40, "pending"),
+        ("fake@" + "2" * 40, "completed"),
+    }
+
+
+def test_vector_flush_rejects_a_mismatched_profile_revision(database) -> None:
+    class Profile:
+        storage_model_id = "fake@" + "1" * 40
+
+    with pytest.raises(ValueError, match="profile does not match"):
+        VectorIndexJobService(database).flush(
+            FakeVectorStore(),
+            system_id="dnd5e",
+            collection="rules",
+            embedding_model="fake@" + "2" * 40,
+            profile=Profile(),
+        )

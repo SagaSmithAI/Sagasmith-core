@@ -91,6 +91,32 @@ pip install "sagasmith-core[embedding]"  # sentence-transformers
 pip install "sagasmith-core[all]"
 ```
 
+Long-lived local runtimes can enable a persistent embedding cache per domain
+prefix. For D&D, for example:
+
+```bash
+export DND5E_EMBEDDING_CACHE_DIR="/absolute/private/user-cache/sagasmith/dnd5e"
+```
+
+Choose an OS application-cache directory outside source checkouts and restrict it
+to the current user. `BgeEmbedder` checks its process-local LRU first and then the
+SQLite cache there. Its identity binds an immutable model revision, profile,
+dimensions, inference epoch, and source-text digest; vectors are integrity-checked
+float32 values. Built-in BGE profiles pin Hugging Face commits, while a custom
+profile must also provide an immutable `model_revision` as a 40-character commit
+SHA. This prevents SQL, Chroma, or the cache from reusing old vectors after a moving
+ref changes. Damaged rows become misses and are replaced after inference; lock
+contention falls back to ordinary inference after one bounded cache attempt (50 ms
+by default). Newly created POSIX cache directories and database files are restricted
+to the current user automatically.
+
+Hard defaults cap the cache at 50,000 entries and 256 MiB of logical data, evicting
+the oldest writes when needed. Configure these through
+`<PREFIX>_EMBEDDING_CACHE_MAX_ENTRIES`, `<PREFIX>_EMBEDDING_CACHE_MAX_BYTES`,
+`<PREFIX>_EMBEDDING_CACHE_BUSY_TIMEOUT_MS`, and `<PREFIX>_EMBEDDING_CACHE_EPOCH`;
+inspect current usage with `embedder.persistent_cache_stats()`. Other runtimes use
+their own prefix, and users or tenants must never share one cache directory.
+
 ```python
 from sagasmith_core import CampaignService, Database, SystemRegistry
 
@@ -125,6 +151,11 @@ The package supplies its profile, character schema, module parser, and rules eng
 - Document caches are checksum- and profile-bound. Corrupt cache entries are ignored, and
   parser-version changes can reuse verified PDF page extraction/OCR without accepting stale
   normalized structure.
+- The persistent embedding cache is a rebuildable performance layer, never authoritative
+  retrieval or campaign state. It is disabled by default and stores only model/text digests
+  plus integrity-checked float32 vectors, not source text. Digests of low-entropy text can
+  still be guessed and embeddings are sensitive derived data: keep the directory private,
+  out of Git and public backups, and isolated per tenant.
 - This is an Alpha project. Current migrations serve the current mainline schema and do not promise legacy database compatibility.
 
 ## Development

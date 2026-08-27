@@ -31,12 +31,18 @@ class VectorIndexJobService:
         *,
         system_id: str,
         collection: str,
+        embedding_model: str,
         profile: Any = None,
         job_ids: Sequence[str] | None = None,
         limit: int = 1_000,
     ) -> VectorFlushResult:
         if limit < 1:
             raise ValueError("vector job limit must be positive")
+        if not embedding_model.strip():
+            raise ValueError("embedding_model must identify one immutable model revision")
+        profile_model = getattr(profile, "storage_model_id", None)
+        if profile_model is not None and str(profile_model) != embedding_model:
+            raise ValueError("vector profile does not match the requested embedding_model")
         selected_ids = tuple(dict.fromkeys(str(item) for item in job_ids or ()))
         with self.database.transaction() as session:
             statement = (
@@ -46,6 +52,8 @@ class VectorIndexJobService:
                     VectorIndexJob.collection == collection,
                     VectorIndexJob.operation == "upsert",
                     VectorIndexJob.status.in_(("pending", "failed")),
+                    VectorIndexJob.payload["embedding_model"].as_string()
+                    == embedding_model,
                 )
                 .order_by(VectorIndexJob.created_at, VectorIndexJob.id)
                 .limit(limit)

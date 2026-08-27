@@ -106,6 +106,26 @@ pip install "sagasmith-core[embedding]"  # sentence-transformers
 pip install "sagasmith-core[all]"
 ```
 
+本地常驻运行时可为每个领域前缀配置持久 embedding cache。例如 D&D 使用：
+
+```bash
+export DND5E_EMBEDDING_CACHE_DIR="/absolute/private/user-cache/sagasmith/dnd5e"
+```
+
+请选择源码 checkout 之外、仅当前用户可读写的 OS 应用缓存目录。`BgeEmbedder` 会先查进程内
+LRU，再查其中的 SQLite cache；cache identity 绑定固定模型 revision、profile、维度、推理
+epoch 与原始文本 digest，向量按 float32 保存且带完整性校验。内置 BGE profile 已固定到
+Hugging Face commit；所有自定义 profile 也必须提供 40 位 commit SHA 形式的不可变
+`model_revision`，避免 SQL、Chroma 或 cache 在移动 ref 后复用旧向量。损坏记录会被当作
+miss 并在下一次推理后替换；锁竞争经过一次有界 cache 尝试后降级为普通推理，默认等待
+50 ms。POSIX 上新建 cache 目录和数据库会自动收紧为仅当前用户可访问。
+
+默认硬上限为 50,000 项和 256 MiB 逻辑数据，写入时按最早写入顺序淘汰。可使用
+`<PREFIX>_EMBEDDING_CACHE_MAX_ENTRIES`、`<PREFIX>_EMBEDDING_CACHE_MAX_BYTES`、
+`<PREFIX>_EMBEDDING_CACHE_BUSY_TIMEOUT_MS` 与 `<PREFIX>_EMBEDDING_CACHE_EPOCH` 调整，
+并通过 `embedder.persistent_cache_stats()` 查看当前用量。CoC 等运行时使用自己的 prefix，
+不得让不同用户或 tenant 共用同一目录。
+
 最小服务构造：
 
 ```python
@@ -141,6 +161,10 @@ my_system = "my_package.system:get_system"
 - 玩家读取只允许当前可见分支、场景作用域和角色知识；GM 权限需要显式 principal/role。
 - 最终统一 Pack 从不充当存档或权限载体；导入 actor 必须使用新身份，主观知识必须在目标战役中重新获得或合理传递；导入规则 Pack 也不能自动启用。
 - 文档解析结果保留来源、页码、质量警告和 parser profile；调用方必须处理缺失的富元数据。
+- 持久 embedding cache 只是可重建的性能层，不是权威检索或 campaign 状态；默认不启用，
+  配置目录后也不保存原始文本，只保存 model/text digest 和校验过的 float32 向量。但 digest
+  可能被低熵文本字典猜测，embedding 本身也是敏感派生数据；目录必须采用私有权限，不得提交到
+  Git、备份到公共位置或跨 tenant 共享。
 - 这是 Alpha 项目；主线迁移会保留当前已发布 schema 的数据，但不承诺任意旧实验版本或 downgrade 路径。
 
 ## 开发

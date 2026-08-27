@@ -23,7 +23,7 @@ from sagasmith_core.documents import (
     normalize_document,
     strip_page_markers,
 )
-from sagasmith_core.embeddings import Embedder
+from sagasmith_core.embeddings import Embedder, embedding_model_identity
 from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
 from sagasmith_core.indexed_source import (
     rule_chunk_key,
@@ -214,7 +214,9 @@ class RuleService:
                             heading_path=list(chunk.heading_path),
                             content=chunk_text,
                             token_count=max(1, len(chunk_text) // 4),
-                            embedding_model=embedder.model_name if embedder else None,
+                            embedding_model=(
+                                embedding_model_identity(embedder) if embedder else None
+                            ),
                             embedding_json=vector,
                             metadata_json={
                                 **chunk.metadata,
@@ -249,7 +251,7 @@ class RuleService:
                                 payload={
                                     "document": chunk_text,
                                     "metadata": vector_metadata,
-                                    "embedding_model": embedder.model_name,
+                                    "embedding_model": embedding_model_identity(embedder),
                                 },
                             )
                         )
@@ -477,6 +479,7 @@ class RuleService:
                     vector_store,
                     system_id=system_id,
                     collection="rules",
+                    embedding_model=embedding_model_identity(embedder),
                     profile=getattr(embedder, "profile", None),
                 )
                 filters: list[dict[str, Any]] = [{"system_id": system_id}]
@@ -504,7 +507,7 @@ class RuleService:
                             row,
                         )
                         for row in rows
-                        if row.RuleChunk.embedding_model == embedder.model_name
+                        if row.RuleChunk.embedding_model == embedding_model_identity(embedder)
                     ),
                     key=lambda item: -item[0],
                 )
@@ -1047,7 +1050,9 @@ class RuleService:
                             heading_path=list(chunk["heading_path"]),
                             content=chunk["content"],
                             token_count=chunk["token_count"],
-                            embedding_model=(embedder.model_name if embedder else None),
+                            embedding_model=(
+                                embedding_model_identity(embedder) if embedder else None
+                            ),
                             embedding_json=vector,
                             metadata_json=dict(chunk["metadata"]),
                         )
@@ -1071,7 +1076,7 @@ class RuleService:
                                         "source_id": source_id,
                                         "section_id": section_id,
                                     },
-                                    "embedding_model": embedder.model_name,
+                                    "embedding_model": embedding_model_identity(embedder),
                                 },
                             )
                         )
