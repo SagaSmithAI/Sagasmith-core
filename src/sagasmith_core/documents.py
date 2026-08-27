@@ -19,6 +19,7 @@ from statistics import median
 from threading import RLock
 from typing import Any, Protocol
 from uuid import uuid4
+from weakref import WeakValueDictionary
 
 DOCUMENT_NORMALIZER_VERSION = "37"
 _MAX_STRUCTURAL_HEADING_CHARS = 200
@@ -30,6 +31,8 @@ _OCR_PAGE_CACHE_SCHEMA = 1
 _BOOKMARK_OCR_MAX_NON_WHITESPACE = 800
 _RAPIDOCR_ENGINES: dict[str, tuple[Any, RLock]] = {}
 _RAPIDOCR_ENGINES_LOCK = RLock()
+_NORMALIZATION_CACHE_LOCKS: WeakValueDictionary[Path, RLock] = WeakValueDictionary()
+_NORMALIZATION_CACHE_LOCKS_GUARD = RLock()
 
 
 class DocumentQualityError(RuntimeError):
@@ -2834,57 +2837,75 @@ def _cache_path(cache_dir: Path, checksum: str, profile: str) -> Path:
     return cache_dir / checksum[:2] / f"{checksum}-{profile_hash}.json"
 
 
-def normalize_document(
-    path: str | Path,
+def _normalization_cache_lock(target: Path) -> RLock:
+    """Return the process-local in-flight lock for one immutable cache key."""
+    with _NORMALIZATION_CACHE_LOCKS_GUARD:
+        lock = _NORMALIZATION_CACHE_LOCKS.get(target)
+        if lock is None:
+            lock = RLock()
+            _NORMALIZATION_CACHE_LOCKS[target] = lock
+        return lock
+
+
+def _read_normalized_document_cache(
+    target: Path,
     *,
-    ocr_provider: OcrProvider | None = None,
-    cache_dir: str | Path | None = None,
-    expected_checksum: str | None = None,
-    layout_profile: DocumentLayoutProfile = GENERIC_DOCUMENT_LAYOUT_PROFILE,
+    source: Path,
+    checksum: str,
+    profile: str,
+) -> NormalizedDocument | None:
+    if not target.is_file():
+        return None
+    try:
+        value = json.loads(target.read_text(encoding="utf-8"))
+        content = str(value["content"])
+        if (
+            value.get("schema") == _DOCUMENT_CACHE_SCHEMA
+            and value.get("checksum") == checksum
+            and value.get("profile") == profile
+            and value.get("content_checksum")
+            == hashlib.sha256(content.encode("utf-8")).hexdigest()
+        ):
+            return NormalizedDocument(
+                content=content,
+                media_type=str(value["media_type"]),
+                source_path=str(source),
+                checksum=checksum,
+                page_count=int(value.get("page_count", 1)),
+                bookmarks=tuple(
+                    DocumentBookmark(str(item["title"]), int(item["page"]), int(item["depth"]))
+                    for item in value.get("bookmarks", [])
+                ),
+                warnings=tuple(str(item) for item in value.get("warnings", [])),
+                metadata={
+                    **dict(value.get("metadata") or {}),
+                    "normalization_cache_hit": True,
+                },
+            )
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        pass
+    return None
+
+
+def _normalize_document_with_cache(
+    source: Path,
+    *,
+    checksum: str,
+    profile: str,
+    target: Path | None,
+    ocr_provider: OcrProvider | None,
+    cache_dir: str | Path | None,
+    layout_profile: DocumentLayoutProfile,
 ) -> NormalizedDocument:
-    """Convert a document once and reuse a content-addressed normalized form."""
-    source = Path(path).expanduser().resolve()
-    checksum = file_sha256(source)
-    if expected_checksum and checksum != expected_checksum:
-        raise DocumentQualityError(
-            "source_checksum_mismatch",
-            "managed document checksum no longer matches its staged import job",
+    if target is not None:
+        cached = _read_normalized_document_cache(
+            target,
+            source=source,
+            checksum=checksum,
+            profile=profile,
         )
-    profile = _cache_profile(source, ocr_provider, layout_profile)
-    target = (
-        _cache_path(Path(cache_dir).expanduser().resolve(), checksum, profile)
-        if cache_dir is not None
-        else None
-    )
-    if target is not None and target.is_file():
-        try:
-            value = json.loads(target.read_text(encoding="utf-8"))
-            content = str(value["content"])
-            if (
-                value.get("schema") == _DOCUMENT_CACHE_SCHEMA
-                and value.get("checksum") == checksum
-                and value.get("profile") == profile
-                and value.get("content_checksum")
-                == hashlib.sha256(content.encode("utf-8")).hexdigest()
-            ):
-                return NormalizedDocument(
-                    content=content,
-                    media_type=str(value["media_type"]),
-                    source_path=str(source),
-                    checksum=checksum,
-                    page_count=int(value.get("page_count", 1)),
-                    bookmarks=tuple(
-                        DocumentBookmark(str(item["title"]), int(item["page"]), int(item["depth"]))
-                        for item in value.get("bookmarks", [])
-                    ),
-                    warnings=tuple(str(item) for item in value.get("warnings", [])),
-                    metadata={
-                        **dict(value.get("metadata") or {}),
-                        "normalization_cache_hit": True,
-                    },
-                )
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-            pass
+        if cached is not None:
+            return cached
 
     document = converter_for(
         source,
@@ -2923,6 +2944,58 @@ def normalize_document(
         }
         _write_json_atomic(target, value)
     return document
+
+
+def normalize_document(
+    path: str | Path,
+    *,
+    ocr_provider: OcrProvider | None = None,
+    cache_dir: str | Path | None = None,
+    expected_checksum: str | None = None,
+    layout_profile: DocumentLayoutProfile = GENERIC_DOCUMENT_LAYOUT_PROFILE,
+) -> NormalizedDocument:
+    """Convert a document once and reuse a content-addressed normalized form."""
+    source = Path(path).expanduser().resolve()
+    checksum = file_sha256(source)
+    if expected_checksum and checksum != expected_checksum:
+        raise DocumentQualityError(
+            "source_checksum_mismatch",
+            "managed document checksum no longer matches its staged import job",
+        )
+    profile = _cache_profile(source, ocr_provider, layout_profile)
+    target = (
+        _cache_path(Path(cache_dir).expanduser().resolve(), checksum, profile)
+        if cache_dir is not None
+        else None
+    )
+    if target is None:
+        return _normalize_document_with_cache(
+            source,
+            checksum=checksum,
+            profile=profile,
+            target=None,
+            ocr_provider=ocr_provider,
+            cache_dir=cache_dir,
+            layout_profile=layout_profile,
+        )
+    cached = _read_normalized_document_cache(
+        target,
+        source=source,
+        checksum=checksum,
+        profile=profile,
+    )
+    if cached is not None:
+        return cached
+    with _normalization_cache_lock(target):
+        return _normalize_document_with_cache(
+            source,
+            checksum=checksum,
+            profile=profile,
+            target=target,
+            ocr_provider=ocr_provider,
+            cache_dir=cache_dir,
+            layout_profile=layout_profile,
+        )
 
 
 def render_pdf_page(

@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import zlib
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier, Event, Lock
 from types import SimpleNamespace
 
 import pytest
@@ -212,6 +214,90 @@ def test_rapidocr_engine_is_shared_by_model_not_render_scale(monkeypatch) -> Non
     assert small_low._engine_lock is small_high._engine_lock
     assert created == ["small", "medium"]
     documents._RAPIDOCR_ENGINES.clear()
+
+
+def test_normalize_document_coalesces_concurrent_cache_misses(monkeypatch, tmp_path) -> None:
+    import sagasmith_core.documents as documents
+
+    source = tmp_path / "shared.md"
+    source.write_text("# Shared source\n", encoding="utf-8")
+    cache_dir = tmp_path / "cache"
+    first_started = Event()
+    release_first = Event()
+    duplicate_started = Event()
+    calls_lock = Lock()
+    calls = 0
+
+    class BlockingConverter:
+        def convert(self, path, *, source_checksum=None):
+            nonlocal calls
+            with calls_lock:
+                calls += 1
+                call_number = calls
+            if call_number == 1:
+                first_started.set()
+                assert release_first.wait(timeout=5)
+            else:
+                duplicate_started.set()
+            return NormalizedDocument(
+                content="# Normalized once\n",
+                media_type="text/markdown",
+                source_path=str(path),
+                checksum=str(source_checksum),
+            )
+
+    monkeypatch.setattr(documents, "converter_for", lambda *args, **kwargs: BlockingConverter())
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(normalize_document, source, cache_dir=cache_dir)
+        assert first_started.wait(timeout=5)
+        second = pool.submit(normalize_document, source, cache_dir=cache_dir)
+        try:
+            assert not duplicate_started.wait(timeout=0.25)
+        finally:
+            release_first.set()
+        results = [first.result(timeout=5), second.result(timeout=5)]
+
+    assert calls == 1
+    assert [result.content for result in results] == [
+        "# Normalized once\n",
+        "# Normalized once\n",
+    ]
+    assert sorted(result.metadata["normalization_cache_hit"] for result in results) == [
+        False,
+        True,
+    ]
+
+
+def test_normalize_document_keeps_distinct_cache_keys_parallel(monkeypatch, tmp_path) -> None:
+    import sagasmith_core.documents as documents
+
+    sources = [tmp_path / "one.md", tmp_path / "two.md"]
+    for source in sources:
+        source.write_text(f"# {source.stem}\n", encoding="utf-8")
+    conversion_barrier = Barrier(len(sources))
+
+    class ParallelConverter:
+        def convert(self, path, *, source_checksum=None):
+            conversion_barrier.wait(timeout=5)
+            return NormalizedDocument(
+                content=f"# {Path(path).stem}\n",
+                media_type="text/markdown",
+                source_path=str(path),
+                checksum=str(source_checksum),
+            )
+
+    monkeypatch.setattr(documents, "converter_for", lambda *args, **kwargs: ParallelConverter())
+
+    with ThreadPoolExecutor(max_workers=len(sources)) as pool:
+        results = list(
+            pool.map(
+                lambda source: normalize_document(source, cache_dir=tmp_path / "cache"),
+                sources,
+            )
+        )
+
+    assert [result.content for result in results] == ["# one\n", "# two\n"]
 
 
 def test_rapidocr_page_cache_survives_provider_restart_and_rejects_tampering(
