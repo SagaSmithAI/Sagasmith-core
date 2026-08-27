@@ -2,7 +2,8 @@ import os
 import sqlite3
 import stat
 from concurrent.futures import ThreadPoolExecutor
-from time import perf_counter
+from threading import Barrier, Event
+from time import perf_counter, sleep
 
 import numpy as np
 import pytest
@@ -383,7 +384,7 @@ def test_persistent_cache_requires_immutable_revision_and_explicit_dir_wins(
     assert explicit.persistent_cache.path.parent == (tmp_path / "explicit").resolve()
 
 
-def test_parallel_embedders_share_cache_initialization_lock(monkeypatch, tmp_path) -> None:
+def test_parallel_embedders_share_cache_path_lock(monkeypatch, tmp_path) -> None:
     class FakeModel:
         def encode(self, texts, **_kwargs):
             return np.asarray(
@@ -408,14 +409,44 @@ def test_parallel_embedders_share_cache_initialization_lock(monkeypatch, tmp_pat
         )
         for _ in range(16)
     ]
+    first_cache = embedders[0].persistent_cache
+    assert first_cache is not None
+
+    write_barrier = Barrier(len(embedders))
+    first_write_started = Event()
+    release_first_write = Event()
+    cache_type = type(first_cache)
+    original_prune = cache_type._prune
+    original_put_many = cache_type.put_many
+    held_write = False
+
+    def synchronize_writes(cache, *args, **kwargs):
+        write_barrier.wait(timeout=5)
+        return original_put_many(cache, *args, **kwargs)
+
+    def hold_first_write(cache, connection):
+        nonlocal held_write
+        removed = original_prune(cache, connection)
+        if not held_write:
+            held_write = True
+            first_write_started.set()
+            assert release_first_write.wait(timeout=5)
+        return removed
+
+    monkeypatch.setattr(cache_type, "put_many", synchronize_writes)
+    monkeypatch.setattr(cache_type, "_prune", hold_first_write)
 
     with ThreadPoolExecutor(max_workers=16) as pool:
-        values = list(
-            pool.map(
-                lambda item: item[0].encode([f"text-{item[1]}"]),
-                zip(embedders, range(16), strict=True),
-            )
-        )
+        futures = [
+            pool.submit(embedder.encode, [f"text-{index}"])
+            for index, embedder in enumerate(embedders)
+        ]
+        try:
+            assert first_write_started.wait(timeout=5)
+            sleep(0.1)
+        finally:
+            release_first_write.set()
+        values = [future.result(timeout=5) for future in futures]
 
     assert len(values) == 16
     assert all(embedder.persistent_cache_errors == 0 for embedder in embedders)
