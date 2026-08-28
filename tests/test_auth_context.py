@@ -3,9 +3,11 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from sagasmith_core.auth_context import (
+    AUTH_CONTEXT_DELEGATION_SCHEMA,
     AUTH_CONTEXT_SCHEMA,
     AuthContextNonceGuard,
     sign_auth_context,
+    sign_delegated_auth_context,
     verify_auth_context,
 )
 
@@ -83,3 +85,103 @@ def test_nonce_guard_rejects_replay_without_blocking_another_actor() -> None:
     guard.remember(second, now=NOW)
     with pytest.raises(ValueError, match="already used"):
         guard.remember(first, now=NOW)
+
+
+def delegated(**overrides):
+    values = {
+        "secret": SECRET,
+        "issuer": "sagasmith-web",
+        "target_service": "sagasmith-coc-mcp",
+        "caller_principal": "workload:web:room-worker",
+        "workload_identity": "spiffe://sagasmith/web/room-worker",
+        "requester_principal": "discord:user:123",
+        "resource_owner_principal": "discord:user:owner",
+        "acting_host_principal": "campaign:keeper",
+        "acting_character_id": "investigator-7",
+        "authorized_audience": "player",
+        "allowed_operations": ["campaign_query", "investigation_check"],
+        "conversation_principal": "discord:group:456",
+        "tenant_id": "tenant-1",
+        "campaign_id": "campaign-9",
+        "room_turn_id": "turn-18",
+        "base_revision": 17,
+        "issued_at": NOW,
+        "expires_at": NOW + timedelta(minutes=5),
+        "nonce": "delegation-1",
+    }
+    values.update(overrides)
+    return sign_delegated_auth_context(**values)
+
+
+def test_delegated_auth_context_round_trip_and_receipt() -> None:
+    envelope = delegated()
+    assert envelope["schema"] == AUTH_CONTEXT_DELEGATION_SCHEMA
+    assert envelope["allowed_operations"] == ["campaign_query", "investigation_check"]
+
+    context = verify_auth_context(
+        envelope,
+        SECRET,
+        now=NOW,
+        expected_actor="discord:user:123",
+        expected_campaign="campaign-9",
+        expected_service="sagasmith-coc-mcp",
+        expected_operation="investigation_check",
+        expected_audience="player",
+        expected_room_turn="turn-18",
+        expected_base_revision=17,
+        expected_resource_owner="discord:user:owner",
+        expected_acting_character="investigator-7",
+    )
+
+    receipt = context.audit_receipt(tool="investigation_check", revision=18)
+    assert receipt["workload_identity"] == "spiffe://sagasmith/web/room-worker"
+    assert receipt["room_turn_id"] == "turn-18"
+    assert receipt["base_revision"] == 17
+    assert receipt["revision"] == 18
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"expected_service": "sagasmith-dnd-mcp"}, "target service"),
+        ({"expected_operation": "combat_start"}, "operation"),
+        ({"expected_audience": "dm"}, "audience"),
+        ({"expected_room_turn": "turn-other"}, "room turn"),
+        ({"expected_base_revision": 16}, "revision"),
+        ({"expected_resource_owner": "discord:user:other"}, "resource owner"),
+        ({"expected_acting_character": "investigator-other"}, "acting character"),
+    ],
+)
+def test_delegated_auth_context_rejects_wrong_authority_binding(kwargs, message) -> None:
+    with pytest.raises(ValueError, match=message):
+        verify_auth_context(delegated(), SECRET, now=NOW, **kwargs)
+
+
+def test_delegated_auth_context_rejects_expiry_and_excessive_lifetime() -> None:
+    with pytest.raises(ValueError, match="expired"):
+        verify_auth_context(
+            delegated(),
+            SECRET,
+            now=NOW + timedelta(minutes=5),
+        )
+    with pytest.raises(ValueError, match="15 minutes"):
+        delegated(expires_at=NOW + timedelta(minutes=16))
+
+
+def test_legacy_context_cannot_satisfy_modern_authority_checks() -> None:
+    with pytest.raises(ValueError, match="v2 is required"):
+        verify_auth_context(
+            signed(),
+            SECRET,
+            now=NOW,
+            expected_service="sagasmith-coc-mcp",
+        )
+
+
+def test_delegation_rejects_wildcards_and_token_passthrough_fields() -> None:
+    with pytest.raises(ValueError, match="concrete operations"):
+        delegated(allowed_operations=["*"])
+
+    envelope = {**delegated(), "access_token": "must-not-cross-the-boundary"}
+    with pytest.raises(ValueError, match="fields do not match"):
+        verify_auth_context(envelope, SECRET, now=NOW)
