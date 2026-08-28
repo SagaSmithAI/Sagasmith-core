@@ -8,12 +8,14 @@ from sagasmith_core.actor_lifecycle import (
 )
 from sagasmith_core.addons import AddonError, AddonService
 from sagasmith_core.auth_context import (
+    AUTH_CONTEXT_DELEGATION_SCHEMA,
     AUTH_CONTEXT_META_KEY,
     AUTH_CONTEXT_RECEIPT_META_KEY,
     AUTH_CONTEXT_SCHEMA,
     AuthContext,
     AuthContextNonceGuard,
     sign_auth_context,
+    sign_delegated_auth_context,
     verify_auth_context,
 )
 from sagasmith_core.branches import BranchService
@@ -134,6 +136,7 @@ __all__ = [
     "AUTH_CONTEXT_SCHEMA",
     "AuthContext",
     "AuthContextNonceGuard",
+    "AUTH_CONTEXT_DELEGATION_SCHEMA",
     "BranchService",
     "CampaignService",
     "CascadingOcrProvider",
@@ -205,6 +208,7 @@ __all__ = [
     "render_pdf_page",
     "source_ref",
     "sign_auth_context",
+    "sign_delegated_auth_context",
     "validate_content_package",
     "validate_content_actor_card",
     "validate_subject_context_fact",
