@@ -63,6 +63,10 @@ no-op 写入不得伪造 cache 失效。Core 的向量、页面与 embedding cac
 以上三个垂直仓库是当前唯一源码入口。原独立 MCP、Skills、UI 与通用 Module
 Generator 仓库已归档，只保留只读历史；新集成不得依赖其分支、发布或文档。
 
+权威历史读取在服务边界保持有界。`EventService.list*` 与
+`RevisionService.history` 接受经过校验的 `limit` 和 `offset`，让领域 MCP
+可以用 opaque continuation cursor 翻过前 100 条记录，而不必把完整战役历史加载到公开工具响应。
+
 ## MCP 2026 身份基线
 
 现代 Host 使用 `sagasmith.auth-context/v2` 逐请求委托，不依赖隐藏 transport session。

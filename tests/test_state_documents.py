@@ -2536,6 +2536,27 @@ def test_event_and_all_witness_knowledge_commit_or_rollback_together(database) -
     assert knowledge.list(campaign.id, actor_id=third.id) == []
 
 
+def test_event_history_pages_beyond_first_hundred_without_full_history_load(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Long event log")
+    events = EventService(database)
+    for index in range(125):
+        events.add(campaign.id, summary=f"Event {index:03d}")
+
+    newest = events.list(campaign.id, limit=10)
+    prior = events.list(campaign.id, limit=10, offset=10)
+    beyond_one_hundred = events.list(campaign.id, limit=10, offset=100)
+
+    assert [item.summary for item in newest] == [f"Event {index:03d}" for index in range(115, 125)]
+    assert [item.summary for item in prior] == [f"Event {index:03d}" for index in range(105, 115)]
+    assert [item.summary for item in beyond_one_hundred] == [
+        f"Event {index:03d}" for index in range(15, 25)
+    ]
+    assert events.list(campaign.id, limit=10, offset=125) == []
+
+    with pytest.raises(ValueError, match="offset"):
+        events.list(campaign.id, offset=-1)
+
+
 def test_actor_scoped_events_follow_visible_actor_knowledge(database) -> None:
     campaign = CampaignService(database).create(system_id="dnd5e", name="Separate witnesses")
     characters = CharacterService(database)
@@ -4238,6 +4259,38 @@ def test_state_mutation_persists_exact_replay_response_atomically(database) -> N
     history = RevisionService(database).history(campaign.id)
     assert history[0].idempotency_key == "atomic-replay"
     assert history[0].request_hash == request_hash(public_request)
+
+
+def test_revision_history_pages_beyond_first_hundred(database) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Long revision log")
+    revisions = RevisionService(database)
+    for index in range(125):
+        revisions.record(
+            campaign.id,
+            operation=f"test.history.{index:03d}",
+            entity_type="campaign",
+            entity_id=campaign.id,
+            before={"index": index},
+            after={"index": index + 1},
+        )
+
+    newest = revisions.history(campaign.id, limit=10)
+    prior = revisions.history(campaign.id, limit=10, offset=10)
+    beyond_one_hundred = revisions.history(campaign.id, limit=10, offset=100)
+
+    assert [item.operation for item in newest] == [
+        f"test.history.{index:03d}" for index in range(124, 114, -1)
+    ]
+    assert [item.operation for item in prior] == [
+        f"test.history.{index:03d}" for index in range(114, 104, -1)
+    ]
+    assert [item.operation for item in beyond_one_hundred] == [
+        f"test.history.{index:03d}" for index in range(24, 14, -1)
+    ]
+    assert revisions.history(campaign.id, limit=10, offset=125) == []
+
+    with pytest.raises(ValueError, match="offset"):
+        revisions.history(campaign.id, offset=-1)
 
 
 def test_state_mutation_rolls_back_when_atomic_replay_response_cannot_be_built(

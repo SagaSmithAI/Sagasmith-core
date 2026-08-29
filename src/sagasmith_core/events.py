@@ -264,7 +264,12 @@ class EventService:
         return self._info(row, normalized_participants)
 
     def list(
-        self, campaign_id: str, *, limit: int = 50, branch_id: str | None = None
+        self,
+        campaign_id: str,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        branch_id: str | None = None,
     ) -> list[CampaignEventInfo]:
         with self.database.transaction() as session:
             campaign = session.get(Campaign, campaign_id)
@@ -272,7 +277,7 @@ class EventService:
                 raise CampaignNotFoundError(campaign_id)
             branch = resolve_branch(session, campaign, branch_id)
             rows = self._branch_rows(session, campaign_id, branch)
-            rows = rows[-max(1, min(limit, 500)) :]
+            rows = self._recent_page(rows, limit=limit, offset=offset)
             participants = self._participant_map(session, [row.id for row in rows])
             return [self._info(row, participants.get(row.id, [])) for row in rows]
 
@@ -285,6 +290,7 @@ class EventService:
         knowledge_disclosure_scopes: set[str] | frozenset[str] | None = None,
         audience: str | None = None,
         limit: int = 50,
+        offset: int = 0,
         branch_id: str | None = None,
     ) -> list[CampaignEventInfo]:
         """List visible branch events explicitly indexed to one actor."""
@@ -315,7 +321,7 @@ class EventService:
                 if row.id in actor_event_ids
             ]
             rows = self._actor_audience_rows(rows, audience=audience)
-            rows = rows[-max(1, min(limit, 500)) :]
+            rows = self._recent_page(rows, limit=limit, offset=offset)
             participants = self._participant_map(session, [row.id for row in rows])
             return [self._info(row, participants.get(row.id, [])) for row in rows]
 
@@ -475,6 +481,7 @@ class EventService:
         audience: str,
         actor_id: str | None = None,
         limit: int = 50,
+        offset: int = 0,
         branch_id: str | None = None,
     ) -> list[CampaignEventInfo]:
         """List branch events through the one authoritative audience policy."""
@@ -529,9 +536,34 @@ class EventService:
                     if row.audience_scope in PLAYER_EVENT_AUDIENCE_SCOPES
                     or (row.audience_scope == "actor" and row.id in actor_event_ids)
                 ]
-            rows = rows[-max(1, min(limit, 500)) :]
+            rows = self._recent_page(rows, limit=limit, offset=offset)
             participants = self._participant_map(session, [row.id for row in rows])
             return [self._info(row, participants.get(row.id, [])) for row in rows]
+
+    @staticmethod
+    def _recent_page(
+        rows: list[CampaignEvent], *, limit: int, offset: int
+    ) -> list[CampaignEvent]:
+        """Return a bounded newest-first window while preserving chronological output.
+
+        ``offset`` counts backwards from the newest visible event.  Keeping it in
+        the authority service lets MCP cursors traverse beyond the first bounded
+        facade page without asking callers to load the complete campaign history.
+        """
+
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
+            raise ValueError("limit must be an integer between 1 and 500")
+        if (
+            isinstance(offset, bool)
+            or not isinstance(offset, int)
+            or not 0 <= offset <= 100_000
+        ):
+            raise ValueError("offset must be an integer between 0 and 100000")
+        stop = len(rows) - offset
+        if stop <= 0:
+            return []
+        start = max(0, stop - limit)
+        return rows[start:stop]
 
     @staticmethod
     def _branch_rows(session, campaign_id: str, branch) -> list[CampaignEvent]:
