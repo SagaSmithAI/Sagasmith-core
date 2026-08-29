@@ -2663,6 +2663,52 @@ def test_actor_event_search_recalls_an_old_relevant_episode_and_respects_branche
     ] == []
 
 
+def test_actor_event_search_includes_only_permitted_knowledge_source_events(
+    database,
+) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Known history")
+    actor = CharacterService(database).create(
+        system_id="dnd5e", campaign_id=campaign.id, name="Witness", character_type="pc"
+    )
+    events = EventService(database)
+    source_event, _knowledge_ids = events.add_with_actor_knowledge(
+        campaign.id,
+        summary="The ferryman taught the silver cicada passphrase.",
+        retrieval_text="silver cicada passphrase at the old ferry",
+        actor_ids=[actor.id],
+        knowledge_key="silver-cicada-passphrase",
+        proposition="The old ferry passphrase is silver cicada.",
+        disclosure_scope="owner",
+    )
+
+    assert (
+        events.search_for_actor(
+            campaign.id,
+            actor_id=actor.id,
+            query="silver cicada old ferry",
+        )
+        == []
+    )
+    assert [
+        item.id
+        for item in events.search_for_actor(
+            campaign.id,
+            actor_id=actor.id,
+            query="silver cicada old ferry",
+            knowledge_disclosure_scopes={"owner"},
+        )
+    ] == [source_event.id]
+    assert (
+        events.search_for_actor(
+            campaign.id,
+            actor_id=actor.id,
+            query="silver cicada old ferry",
+            knowledge_disclosure_scopes={"dm"},
+        )
+        == []
+    )
+
+
 def test_continuity_commit_snapshots_event_participants_and_detects_index_tampering(
     database,
 ) -> None:

@@ -322,10 +322,11 @@ class EventService:
         actor_id: str,
         query: str,
         roles: set[str] | frozenset[str] | None = None,
+        knowledge_disclosure_scopes: set[str] | frozenset[str] | None = None,
         limit: int = 50,
         branch_id: str | None = None,
     ) -> list[CampaignEventInfo]:
-        """Search every branch-visible event explicitly indexed to one actor."""
+        """Search branch-visible participant and permitted knowledge-source events."""
 
         normalized_query = str(query or "").strip()
         if not normalized_query:
@@ -334,6 +335,20 @@ class EventService:
         unknown_roles = selected_roles - EVENT_PARTICIPANT_ROLES
         if unknown_roles:
             raise ValueError(f"invalid event participant roles: {sorted(unknown_roles)}")
+        selected_disclosure_scopes = (
+            None
+            if knowledge_disclosure_scopes is None
+            else set(knowledge_disclosure_scopes)
+        )
+        if selected_disclosure_scopes is not None:
+            unknown_scopes = (
+                selected_disclosure_scopes - ACTOR_KNOWLEDGE_DISCLOSURE_SCOPES
+            )
+            if unknown_scopes:
+                raise ValueError(
+                    "invalid actor-knowledge disclosure scopes: "
+                    f"{sorted(unknown_scopes)}"
+                )
         with self.database.transaction() as session:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
@@ -350,10 +365,36 @@ class EventService:
                     )
                 )
             )
+            knowledge_event_ids: set[str] = set()
+            if selected_disclosure_scopes:
+                knowledge_event_ids = {
+                    str(source_event_id)
+                    for source_event_id in session.scalars(
+                        select(ActorKnowledgeRevision.source_event_id)
+                        .join(
+                            BranchActorKnowledgeHead,
+                            BranchActorKnowledgeHead.revision_id
+                            == ActorKnowledgeRevision.id,
+                        )
+                        .join(
+                            ActorKnowledge,
+                            ActorKnowledge.id == BranchActorKnowledgeHead.knowledge_id,
+                        )
+                        .where(
+                            BranchActorKnowledgeHead.branch_id == branch.id,
+                            ActorKnowledge.actor_id == actor_id,
+                            ActorKnowledgeRevision.source_event_id.is_not(None),
+                            ActorKnowledgeRevision.disclosure_scope.in_(
+                                selected_disclosure_scopes
+                            ),
+                        )
+                    )
+                }
+            actor_event_ids = participant_event_ids | knowledge_event_ids
             rows = [
                 row
                 for row in self._branch_rows(session, campaign_id, branch)
-                if row.id in participant_event_ids
+                if row.id in actor_event_ids
             ]
             scored = [
                 (
