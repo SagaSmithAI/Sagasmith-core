@@ -22,6 +22,7 @@ from sagasmith_core.models import (
     Character,
     SnapshotEventBinding,
 )
+from sagasmith_core.retrieval import lexical_score
 from sagasmith_core.visibility import (
     ACTOR_KNOWLEDGE_DISCLOSURE_SCOPES,
     CONTINUITY_AUDIENCES,
@@ -313,6 +314,68 @@ class EventService:
             ][-max(1, min(limit, 500)) :]
             participants = self._participant_map(session, [row.id for row in rows])
             return [self._info(row, participants.get(row.id, [])) for row in rows]
+
+    def search_for_actor(
+        self,
+        campaign_id: str,
+        *,
+        actor_id: str,
+        query: str,
+        roles: set[str] | frozenset[str] | None = None,
+        limit: int = 50,
+        branch_id: str | None = None,
+    ) -> list[CampaignEventInfo]:
+        """Search every branch-visible event explicitly indexed to one actor."""
+
+        normalized_query = str(query or "").strip()
+        if not normalized_query:
+            raise ValueError("event search query must not be blank")
+        selected_roles = set(roles or EVENT_PARTICIPANT_ROLES)
+        unknown_roles = selected_roles - EVENT_PARTICIPANT_ROLES
+        if unknown_roles:
+            raise ValueError(f"invalid event participant roles: {sorted(unknown_roles)}")
+        with self.database.transaction() as session:
+            campaign = session.get(Campaign, campaign_id)
+            if campaign is None:
+                raise CampaignNotFoundError(campaign_id)
+            actor = session.get(Character, actor_id)
+            if actor is None or actor.campaign_id != campaign_id:
+                raise LookupError(actor_id)
+            branch = resolve_branch(session, campaign, branch_id)
+            participant_event_ids = set(
+                session.scalars(
+                    select(CampaignEventParticipant.event_id).where(
+                        CampaignEventParticipant.actor_id == actor_id,
+                        CampaignEventParticipant.role.in_(selected_roles),
+                    )
+                )
+            )
+            rows = [
+                row
+                for row in self._branch_rows(session, campaign_id, branch)
+                if row.id in participant_event_ids
+            ]
+            scored = [
+                (
+                    lexical_score(
+                        normalized_query,
+                        title=row.event_type,
+                        content=row.retrieval_text or row.summary,
+                    ),
+                    row,
+                )
+                for row in rows
+            ]
+            ranked = [
+                row
+                for score, row in sorted(
+                    scored,
+                    key=lambda item: (-item[0], -item[1].sequence, item[1].id),
+                )
+                if score > 0
+            ][: max(1, min(limit, 500))]
+            participants = self._participant_map(session, [row.id for row in ranked])
+            return [self._info(row, participants.get(row.id, [])) for row in ranked]
 
     def list_for_audience(
         self,

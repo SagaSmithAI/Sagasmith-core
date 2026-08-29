@@ -2614,6 +2614,55 @@ def test_actor_scoped_events_follow_explicit_participants_without_fake_knowledge
     )
 
 
+def test_actor_event_search_recalls_an_old_relevant_episode_and_respects_branches(
+    database,
+) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Long memory")
+    actor = CharacterService(database).create(
+        system_id="dnd5e", campaign_id=campaign.id, name="Witness", character_type="npc"
+    )
+    events = EventService(database)
+    relevant = events.add(
+        campaign.id,
+        summary="The ferryman shared a passphrase.",
+        retrieval_text="silver cicada passphrase at the old ferry",
+        participants=[{"actor_id": actor.id, "role": "listener"}],
+    )
+    snapshots = SnapshotService(database)
+    before_noise = snapshots.create(campaign.id, label="Before uneventful days")
+    for index in range(200):
+        events.add(
+            campaign.id,
+            summary=f"Uneventful market day {index}.",
+            participants=[{"actor_id": actor.id, "role": "witness"}],
+        )
+    snapshots.create(campaign.id, label="After uneventful days")
+    alternate = BranchService(database).create(
+        campaign.id,
+        name="never-met-ferryman",
+        from_snapshot_id=before_noise.id,
+    )
+
+    assert [
+        item.id
+        for item in events.search_for_actor(
+            campaign.id,
+            actor_id=actor.id,
+            query="silver cicada old ferry",
+            limit=1,
+        )
+    ] == [relevant.id]
+    assert [
+        item.id
+        for item in events.search_for_actor(
+            campaign.id,
+            actor_id=actor.id,
+            query="market day 199",
+            branch_id=alternate.id,
+        )
+    ] == []
+
+
 def test_continuity_commit_snapshots_event_participants_and_detects_index_tampering(
     database,
 ) -> None:
