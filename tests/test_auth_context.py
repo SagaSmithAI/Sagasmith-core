@@ -46,6 +46,10 @@ def test_signed_auth_context_round_trip_and_audit_receipt() -> None:
         expected_session="session-18",
     )
 
+    assert context.actor_principal == "discord:user:123"
+    assert context.authority_principal == "discord:user:123"
+    assert context.authorization_principal == "discord:user:123"
+
     assert context.conversation_principal == "discord:group:456"
     assert context.audit_receipt(tool="combat_start", revision=8) == {
         "schema": AUTH_CONTEXT_SCHEMA,
@@ -122,7 +126,8 @@ def test_delegated_auth_context_round_trip_and_receipt() -> None:
         envelope,
         SECRET,
         now=NOW,
-        expected_actor="discord:user:123",
+        expected_actor="campaign:keeper",
+        expected_requester="discord:user:123",
         expected_campaign="campaign-9",
         expected_service="sagasmith-coc-mcp",
         expected_operation="investigation_check",
@@ -132,6 +137,10 @@ def test_delegated_auth_context_round_trip_and_receipt() -> None:
         expected_resource_owner="discord:user:owner",
         expected_acting_character="investigator-7",
     )
+
+    assert context.actor_principal == "campaign:keeper"
+    assert context.authority_principal == "campaign:keeper"
+    assert context.authorization_principal == "discord:user:123"
 
     receipt = context.audit_receipt(tool="investigation_check", revision=18)
     assert receipt["workload_identity"] == "spiffe://sagasmith/web/room-worker"
@@ -143,6 +152,7 @@ def test_delegated_auth_context_round_trip_and_receipt() -> None:
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
+        ({"expected_actor": "discord:user:123"}, "actor"),
         ({"expected_service": "sagasmith-dnd-mcp"}, "target service"),
         ({"expected_operation": "combat_start"}, "operation"),
         ({"expected_audience": "dm"}, "audience"),
@@ -150,6 +160,7 @@ def test_delegated_auth_context_round_trip_and_receipt() -> None:
         ({"expected_base_revision": 16}, "revision"),
         ({"expected_resource_owner": "discord:user:other"}, "resource owner"),
         ({"expected_acting_character": "investigator-other"}, "acting character"),
+        ({"expected_requester": "discord:user:other"}, "requester"),
     ],
 )
 def test_delegated_auth_context_rejects_wrong_authority_binding(kwargs, message) -> None:

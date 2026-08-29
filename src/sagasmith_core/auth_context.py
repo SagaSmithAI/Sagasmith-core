@@ -121,7 +121,12 @@ def _allowed_operations(value: Any) -> tuple[str, ...]:
 
 @dataclass(frozen=True)
 class AuthContext:
-    """One verified caller/conversation binding supplied outside model arguments."""
+    """One verified caller/conversation binding supplied outside model arguments.
+
+    ``actor_principal`` is the authority that executes an operation. It is the
+    legacy caller for v1 and the acting Host for v2. ``authorization_principal``
+    remains the human requester whose campaign role is evaluated.
+    """
 
     host: str
     channel: str
@@ -200,13 +205,16 @@ class AuthContext:
         if expires_at - issued_at > _MAX_DELEGATION_TTL:
             raise ValueError("delegated auth context lifetime exceeds 15 minutes")
         requester = _required_text(value.get("requester_principal"), "requester_principal")
+        acting_host = _required_text(
+            value.get("acting_host_principal"), "acting_host_principal"
+        )
         room_turn_id = _required_text(value.get("room_turn_id"), "room_turn_id")
         base_revision = _non_negative_integer(value.get("base_revision"), "base_revision")
         issuer = _required_text(value.get("issuer"), "issuer")
         return cls(
             host=issuer,
             channel="hosted",
-            actor_principal=requester,
+            actor_principal=acting_host,
             conversation_principal=_required_text(
                 value.get("conversation_principal"), "conversation_principal"
             ),
@@ -226,9 +234,7 @@ class AuthContext:
             resource_owner_principal=_required_text(
                 value.get("resource_owner_principal"), "resource_owner_principal"
             ),
-            acting_host_principal=_required_text(
-                value.get("acting_host_principal"), "acting_host_principal"
-            ),
+            acting_host_principal=acting_host,
             acting_character_id=_optional_text(
                 value.get("acting_character_id"), "acting_character_id"
             ),
@@ -240,6 +246,18 @@ class AuthContext:
             base_revision=base_revision,
             expires_at=expires_at,
         )
+
+    @property
+    def authority_principal(self) -> str:
+        """Return the principal that performs the authoritative operation."""
+
+        return self.actor_principal
+
+    @property
+    def authorization_principal(self) -> str:
+        """Return the human/service requester whose campaign access is checked."""
+
+        return self.requester_principal or self.actor_principal
 
     def unsigned_payload(self) -> dict[str, Any]:
         if self.schema == AUTH_CONTEXT_DELEGATION_SCHEMA:
@@ -443,6 +461,7 @@ def verify_auth_context(
     expected_base_revision: int | None = None,
     expected_resource_owner: str | None = None,
     expected_acting_character: str | None = None,
+    expected_requester: str | None = None,
 ) -> AuthContext:
     """Verify signature, freshness, and any server-owned call bindings."""
 
@@ -481,6 +500,7 @@ def verify_auth_context(
             expected_base_revision,
             expected_resource_owner,
             expected_acting_character,
+            expected_requester,
         )
     )
     if modern_expectations and context.schema != AUTH_CONTEXT_DELEGATION_SCHEMA:
@@ -505,6 +525,11 @@ def verify_auth_context(
         and context.acting_character_id != expected_acting_character
     ):
         raise ValueError("auth context acting character does not match the tool call")
+    if (
+        expected_requester is not None
+        and context.requester_principal != expected_requester
+    ):
+        raise ValueError("auth context requester does not match the tool caller")
     return context
 
 

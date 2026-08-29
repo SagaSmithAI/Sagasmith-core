@@ -45,17 +45,18 @@ Core 不负责主持风格、MCP 工具暴露或具体规则裁决。Agent Skill
 以上三个垂直仓库是当前唯一源码入口。原独立 MCP、Skills、UI 与通用 Module
 Generator 仓库已归档，只保留只读历史；新集成不得依赖其分支、发布或文档。
 
-## 2026-08-20 集成基线
+## MCP 2026 身份基线
 
-当前主线已经用最新 Agent、Service 与三个领域仓库完成真实 Host 回归：Service
-签发 `sagasmith.auth-context/v1` principal context，Agent 将其交给会话作用域 MCP，
-领域服务仍在调用边界重新校验 campaign、actor、role 与 revision。D&D 与 CoC
-参考战役已在同一托管栈中并发运行且未发现回归缺口；D&D 路径额外记录了一个合法
-结局。内容目录 runner 会发现当前全部模组并保存机器可读 exclusion，而不会把未执行
-路径伪装成已覆盖。
+现代 Host 使用 `sagasmith.auth-context/v2` 逐请求委托，不依赖隐藏 transport session。
+Core 会分别保留 requester、resource owner、acting Host/character、audience、具体操作、
+room turn 与 base revision。v2 的 `actor_principal`/`authority_principal` 明确表示实际执行
+权威操作的 acting Host；`authorization_principal` 则表示接受 campaign role 校验的
+requester。两者不得互相冒充，审计 receipt 会保留原始身份字段。v1 只留在显式 legacy
+兼容路径，其 `actor_principal` 继续同时表示调用者与授权主体。
 
-这条证据不改变 Core 的职责：签名身份、动态工具暴露与主持语义仍分别属于
-Service/Agent、MCP 和 Agent Skills；Core 只提供系统无关的持久化与事务保证。
+这条边界不改变 Core 的职责：Host 负责签发委托，领域 MCP 负责每次调用重新校验
+campaign、requester role、authority、revision 与幂等性；Core 只提供系统无关的身份
+解析、持久化与事务保证。
 
 ## 可分享内容格式
 

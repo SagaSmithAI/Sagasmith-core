@@ -44,6 +44,17 @@ These vertical repositories are the only current source entry points. The former
 standalone MCP, Skills, UI, and generic Module Generator repositories are
 archived read-only history and must not be used for new integrations.
 
+## MCP 2026 identity baseline
+
+Modern Hosts use a per-request `sagasmith.auth-context/v2` delegation without a
+hidden transport session. Core preserves the requester, resource owner, acting
+Host/character, audience, exact operations, room turn, and base revision as
+separate facts. For v2, `actor_principal`/`authority_principal` is the acting Host
+that performs the authoritative operation, while `authorization_principal` is the
+requester whose campaign role is evaluated. Neither identity may impersonate the
+other, and audit receipts retain the original fields. Explicit legacy v1 keeps its
+single caller/authorization-subject interpretation.
+
 ## Shareable content formats
 
 `sagasmith.content-package` v2 is the only public exchange format and uses the
