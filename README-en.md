@@ -1,10 +1,23 @@
 # SagaSmith Core
 
-[中文](README.md) · [English](README-en.md) · [Website](https://sagasmithai.github.io) · [Platform overview](https://github.com/SagaSmithAI/.github/blob/main/profile/README.md) · [Hosted service](https://github.com/SagaSmithAI/SagaSmith-service) · [Content catalog](https://github.com/SagaSmithAI/SagaSmith-dnd-content-library)
+[中文](README.md) · [English](README-en.md) · [Website](https://sagasmithai.github.io) · [Platform overview](https://github.com/SagaSmithAI/.github/blob/main/profile/README.md) · [SagaSmith Web](https://github.com/SagaSmithAI/SagaSmith-Web) · [Content catalog](https://github.com/SagaSmithAI/SagaSmith-dnd-content-library)
 
 **The system-neutral runtime for an AI-native TTRPG platform.** `sagasmith-core` gives rules systems, MCP servers, and clients persistent campaigns, actor knowledge, branching timelines, content ingestion, rule packs, and retrieval. It contains no D&D or Call of Cthulhu rules.
 
 > World state should be verifiable, timelines should branch, and every actor should know only what they actually know.
+
+## Choose a path
+
+| Goal | Start here |
+|---|---|
+| Use Core from a system package | `pip install sagasmith-core`, then see the minimal service construction below |
+| Integrate a current rules system | [D&D](https://github.com/SagaSmithAI/sagasmith-dnd) · [CoC](https://github.com/SagaSmithAI/sagasmith-coc) · [Narrative](https://github.com/SagaSmithAI/sagasmith-narrative) |
+| Understand data and transaction boundaries | [Architecture](docs/ARCHITECTURE.md) · [Quickstart](docs/QUICKSTART.md) |
+| Build or import content packages | [Content Packages](docs/CONTENT_PACKAGES.md) |
+| Configure retrieval and caches | [Retrieval](docs/RETRIEVAL.md) |
+
+Python 3.11+ is required. Most end users should install a system MCP/Local Kit
+instead of accessing Core's database directly.
 
 ## What it provides
 
@@ -32,6 +45,13 @@ flowchart TB
 
 Core does not decide GM style, MCP exposure, or system-specific rules. Skills own operating guidance, system runtimes own rules, MCP servers own the capability/storage boundary, and Core owns consistent data semantics.
 
+SagaSmith Web never reads authoritative D&D, CoC, or Narrative tables directly.
+After a domain MCP commits successfully, a rebuildable revisioned projection or
+receipt boundary may feed Web read models; failed, rolled-back, and no-op writes
+must not fabricate cache invalidation. Core vector, page, and embedding caches are
+also rebuildable performance layers, never authorities for revisions, events,
+facts, actor knowledge, or snapshots.
+
 ## Current domain implementations
 
 | Domain | Current repository | Components versioned together |
@@ -54,6 +74,13 @@ that performs the authoritative operation, while `authorization_principal` is th
 requester whose campaign role is evaluated. Neither identity may impersonate the
 other, and audit receipts retain the original fields. Explicit legacy v1 keeps its
 single caller/authorization-subject interpretation.
+
+This does not make Core an MCP Host or server. Hosts mint delegation, domain MCPs
+revalidate campaign role, authority, revision, and idempotency on every call, and
+Core provides system-neutral parsing, persistence, and transactions. Stable tool
+catalogs, bounded Host projection, stdio/HTTP adaptation, and tool-call policy
+belong above Core; never store a connection-bound principal or campaign session
+here.
 
 ## Shareable content formats
 
@@ -176,6 +203,21 @@ pip install -e ".[all,dev]"
 pytest --cov
 ruff check .
 ```
+
+## Upgrade and rollback
+
+Before deployment, stop writers and take a consistent backup after the SQLite
+WAL settles, or use the external database's native consistent backup. Startup
+should run `Database.upgrade_schema()`/Alembic to the current head. Snapshot
+schema v8 full-document records have no in-place downgrade. A data rollback
+restores the backup, Core, the matching Domain/MCP components, and the upstream
+component lock as one compatible set. Rolling back only the MCP SDK or replacing
+only the database is not a supported recovery.
+
+Tests and fixtures must not use production campaigns, real credentials, or paid
+external services. Install document, OCR, vector, and embedding extras explicitly
+for the capability exercised by CI or deployment; a missing optional dependency
+is not data corruption.
 
 Further reading: [Architecture](docs/ARCHITECTURE.md) · [Quickstart](docs/QUICKSTART.md) · [Retrieval](docs/RETRIEVAL.md)
 
