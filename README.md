@@ -1,10 +1,23 @@
 # SagaSmith Core
 
-[中文](README.md) · [English](README-en.md) · [官网](https://sagasmithai.github.io) · [平台总览](https://github.com/SagaSmithAI/.github/blob/main/profile/README.md) · [托管服务](https://github.com/SagaSmithAI/SagaSmith-service) · [内容目录](https://github.com/SagaSmithAI/SagaSmith-dnd-content-library)
+[中文](README.md) · [English](README-en.md) · [官网](https://sagasmithai.github.io) · [平台总览](https://github.com/SagaSmithAI/.github/blob/main/profile/README.md) · [SagaSmith Web](https://github.com/SagaSmithAI/SagaSmith-Web) · [内容目录](https://github.com/SagaSmithAI/SagaSmith-dnd-content-library)
 
 **AI 原生 TTRPG 平台的系统无关运行时。** `sagasmith-core` 为规则系统、MCP 服务和 UI 提供持久化战役、角色知识、分支时间线、内容导入、规则包与检索能力；它本身不包含 D&D 或 CoC 规则。
 
 > 世界状态应当可验证，时间线应当可分支，每个角色只应知道自己真正知道的事。
+
+## 从这里开始
+
+| 目标 | 入口 |
+|---|---|
+| 在系统包中使用 Core | `pip install sagasmith-core`，再看下方最小服务构造 |
+| 接入当前规则系统 | [D&D](https://github.com/SagaSmithAI/sagasmith-dnd) · [CoC](https://github.com/SagaSmithAI/sagasmith-coc) · [Narrative](https://github.com/SagaSmithAI/sagasmith-narrative) |
+| 理解数据与事务边界 | [Architecture](docs/ARCHITECTURE.md) · [Quickstart](docs/QUICKSTART.md) |
+| 创建或导入内容包 | [Content Packages](docs/CONTENT_PACKAGES.md) |
+| 配置检索与 cache | [Retrieval](docs/RETRIEVAL.md) |
+
+需要 Python 3.11+。大多数最终用户应安装对应的系统 MCP/Local Kit，而不是直接操作
+Core 数据库。
 
 ## 它解决什么
 
@@ -34,6 +47,11 @@ flowchart TB
 
 Core 不负责主持风格、MCP 工具暴露或具体规则裁决。Agent Skills 负责工作流，系统运行时负责规则，MCP 服务负责能力与存储边界，Core 负责一致的数据语义。
 
+SagaSmith Web 不直接读取 D&D、CoC 或 Narrative 的权威表。领域 MCP 成功提交后可以通过
+可重建的 revisioned projection/receipt 边界为 Web 提供读取模型；failed、rolled-back 或
+no-op 写入不得伪造 cache 失效。Core 的向量、页面与 embedding cache 同样只是可重建性能层，
+不能替代 revision、事件、事实、角色知识或 Snapshot 权威。
+
 ## 当前领域实现
 
 | 领域 | 当前仓库 | 同仓版本化组件 |
@@ -57,6 +75,10 @@ requester。两者不得互相冒充，审计 receipt 会保留原始身份字�
 这条边界不改变 Core 的职责：Host 负责签发委托，领域 MCP 负责每次调用重新校验
 campaign、requester role、authority、revision 与幂等性；Core 只提供系统无关的身份
 解析、持久化与事务保证。
+
+Core 不是 MCP Host、MCP server，也不管理 `tools/list`。稳定目录、Host 端小型工具投影、
+stdio/HTTP 协议适配与每次工具调用授权都属于各领域 MCP/Agent；不要在 Core 中引入连接级
+principal 或 campaign session。
 
 ## 可分享内容格式
 
@@ -175,6 +197,17 @@ pip install -e ".[all,dev]"
 pytest --cov
 ruff check .
 ```
+
+## 升级与回滚
+
+部署前先停止写入，并在 SQLite WAL 收敛后创建一致性数据库备份；外部数据库使用其原生
+一致性备份。应用启动应通过 `Database.upgrade_schema()`/Alembic 升级到当前 head。
+Snapshot schema v8 的完整文档记录没有原地 downgrade；需要数据回滚时，必须把备份、Core、
+领域 Domain/MCP 与上游 component lock 恢复为匹配的一组。只回滚 MCP SDK 或只替换数据库
+都不是受支持的恢复方式。
+
+测试与 fixture 不应使用生产战役、真实凭据或付费外部服务。文档、OCR、向量与 embedding
+extras 在 CI/部署中应按实际能力显式安装，不能把缺少可选依赖误报成数据损坏。
 
 更多资料：[Architecture](docs/ARCHITECTURE.md) · [Quickstart](docs/QUICKSTART.md) · [Retrieval](docs/RETRIEVAL.md)
 
