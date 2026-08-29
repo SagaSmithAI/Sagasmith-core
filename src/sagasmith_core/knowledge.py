@@ -286,7 +286,20 @@ class ActorKnowledgeService:
         actor_id: str,
         branch_id: str | None = None,
         include_inactive: bool = False,
+        disclosure_scopes: set[str] | frozenset[str] | None = None,
     ) -> list[ActorKnowledgeInfo]:
+        selected_disclosure_scopes = (
+            None if disclosure_scopes is None else set(disclosure_scopes)
+        )
+        if selected_disclosure_scopes is not None:
+            unknown_scopes = (
+                selected_disclosure_scopes - ACTOR_KNOWLEDGE_DISCLOSURE_SCOPES
+            )
+            if unknown_scopes:
+                raise ValueError(
+                    "invalid actor-knowledge disclosure scopes: "
+                    f"{sorted(unknown_scopes)}"
+                )
         with self.database.transaction() as session:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
@@ -312,6 +325,12 @@ class ActorKnowledgeService:
                 statement = statement.where(
                     ActorKnowledgeRevision.epistemic_status.not_in(
                         INACTIVE_ACTOR_KNOWLEDGE_STATUSES
+                    )
+                )
+            if selected_disclosure_scopes is not None:
+                statement = statement.where(
+                    ActorKnowledgeRevision.disclosure_scope.in_(
+                        selected_disclosure_scopes
                     )
                 )
             rows = session.execute(statement)
@@ -346,12 +365,14 @@ class ActorKnowledgeService:
         branch_id: str | None = None,
         limit: int = 8,
         include_inactive: bool = False,
+        disclosure_scopes: set[str] | frozenset[str] | None = None,
     ) -> list[ActorKnowledgeInfo]:
         values = self.list(
             campaign_id,
             actor_id=actor_id,
             branch_id=branch_id,
             include_inactive=include_inactive,
+            disclosure_scopes=disclosure_scopes,
         )
         ranked = sorted(
             values,

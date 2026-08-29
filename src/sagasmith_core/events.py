@@ -282,15 +282,18 @@ class EventService:
         *,
         actor_id: str,
         roles: set[str] | frozenset[str] | None = None,
+        knowledge_disclosure_scopes: set[str] | frozenset[str] | None = None,
+        audience: str | None = None,
         limit: int = 50,
         branch_id: str | None = None,
     ) -> list[CampaignEventInfo]:
         """List visible branch events explicitly indexed to one actor."""
 
-        selected_roles = set(roles or EVENT_PARTICIPANT_ROLES)
-        unknown_roles = selected_roles - EVENT_PARTICIPANT_ROLES
-        if unknown_roles:
-            raise ValueError(f"invalid event participant roles: {sorted(unknown_roles)}")
+        selected_roles, selected_disclosure_scopes = self._actor_filters(
+            roles=roles,
+            knowledge_disclosure_scopes=knowledge_disclosure_scopes,
+            audience=audience,
+        )
         with self.database.transaction() as session:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
@@ -299,19 +302,20 @@ class EventService:
             if actor is None or actor.campaign_id != campaign_id:
                 raise LookupError(actor_id)
             branch = resolve_branch(session, campaign, branch_id)
-            participant_event_ids = set(
-                session.scalars(
-                    select(CampaignEventParticipant.event_id).where(
-                        CampaignEventParticipant.actor_id == actor_id,
-                        CampaignEventParticipant.role.in_(selected_roles),
-                    )
-                )
+            actor_event_ids = self._actor_event_ids(
+                session,
+                branch_id=branch.id,
+                actor_id=actor_id,
+                roles=selected_roles,
+                knowledge_disclosure_scopes=selected_disclosure_scopes,
             )
             rows = [
                 row
                 for row in self._branch_rows(session, campaign_id, branch)
-                if row.id in participant_event_ids
-            ][-max(1, min(limit, 500)) :]
+                if row.id in actor_event_ids
+            ]
+            rows = self._actor_audience_rows(rows, audience=audience)
+            rows = rows[-max(1, min(limit, 500)) :]
             participants = self._participant_map(session, [row.id for row in rows])
             return [self._info(row, participants.get(row.id, [])) for row in rows]
 
@@ -323,6 +327,7 @@ class EventService:
         query: str,
         roles: set[str] | frozenset[str] | None = None,
         knowledge_disclosure_scopes: set[str] | frozenset[str] | None = None,
+        audience: str | None = None,
         limit: int = 50,
         branch_id: str | None = None,
     ) -> list[CampaignEventInfo]:
@@ -331,24 +336,11 @@ class EventService:
         normalized_query = str(query or "").strip()
         if not normalized_query:
             raise ValueError("event search query must not be blank")
-        selected_roles = set(roles or EVENT_PARTICIPANT_ROLES)
-        unknown_roles = selected_roles - EVENT_PARTICIPANT_ROLES
-        if unknown_roles:
-            raise ValueError(f"invalid event participant roles: {sorted(unknown_roles)}")
-        selected_disclosure_scopes = (
-            None
-            if knowledge_disclosure_scopes is None
-            else set(knowledge_disclosure_scopes)
+        selected_roles, selected_disclosure_scopes = self._actor_filters(
+            roles=roles,
+            knowledge_disclosure_scopes=knowledge_disclosure_scopes,
+            audience=audience,
         )
-        if selected_disclosure_scopes is not None:
-            unknown_scopes = (
-                selected_disclosure_scopes - ACTOR_KNOWLEDGE_DISCLOSURE_SCOPES
-            )
-            if unknown_scopes:
-                raise ValueError(
-                    "invalid actor-knowledge disclosure scopes: "
-                    f"{sorted(unknown_scopes)}"
-                )
         with self.database.transaction() as session:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
@@ -357,45 +349,19 @@ class EventService:
             if actor is None or actor.campaign_id != campaign_id:
                 raise LookupError(actor_id)
             branch = resolve_branch(session, campaign, branch_id)
-            participant_event_ids = set(
-                session.scalars(
-                    select(CampaignEventParticipant.event_id).where(
-                        CampaignEventParticipant.actor_id == actor_id,
-                        CampaignEventParticipant.role.in_(selected_roles),
-                    )
-                )
+            actor_event_ids = self._actor_event_ids(
+                session,
+                branch_id=branch.id,
+                actor_id=actor_id,
+                roles=selected_roles,
+                knowledge_disclosure_scopes=selected_disclosure_scopes,
             )
-            knowledge_event_ids: set[str] = set()
-            if selected_disclosure_scopes:
-                knowledge_event_ids = {
-                    str(source_event_id)
-                    for source_event_id in session.scalars(
-                        select(ActorKnowledgeRevision.source_event_id)
-                        .join(
-                            BranchActorKnowledgeHead,
-                            BranchActorKnowledgeHead.revision_id
-                            == ActorKnowledgeRevision.id,
-                        )
-                        .join(
-                            ActorKnowledge,
-                            ActorKnowledge.id == BranchActorKnowledgeHead.knowledge_id,
-                        )
-                        .where(
-                            BranchActorKnowledgeHead.branch_id == branch.id,
-                            ActorKnowledge.actor_id == actor_id,
-                            ActorKnowledgeRevision.source_event_id.is_not(None),
-                            ActorKnowledgeRevision.disclosure_scope.in_(
-                                selected_disclosure_scopes
-                            ),
-                        )
-                    )
-                }
-            actor_event_ids = participant_event_ids | knowledge_event_ids
             rows = [
                 row
                 for row in self._branch_rows(session, campaign_id, branch)
                 if row.id in actor_event_ids
             ]
+            rows = self._actor_audience_rows(rows, audience=audience)
             scored = [
                 (
                     lexical_score(
@@ -417,6 +383,90 @@ class EventService:
             ][: max(1, min(limit, 500))]
             participants = self._participant_map(session, [row.id for row in ranked])
             return [self._info(row, participants.get(row.id, [])) for row in ranked]
+
+    @staticmethod
+    def _actor_filters(
+        *,
+        roles: set[str] | frozenset[str] | None,
+        knowledge_disclosure_scopes: set[str] | frozenset[str] | None,
+        audience: str | None,
+    ) -> tuple[set[str], set[str] | None]:
+        selected_roles = set(roles or EVENT_PARTICIPANT_ROLES)
+        unknown_roles = selected_roles - EVENT_PARTICIPANT_ROLES
+        if unknown_roles:
+            raise ValueError(f"invalid event participant roles: {sorted(unknown_roles)}")
+        selected_disclosure_scopes = (
+            None
+            if knowledge_disclosure_scopes is None
+            else set(knowledge_disclosure_scopes)
+        )
+        if selected_disclosure_scopes is not None:
+            unknown_scopes = selected_disclosure_scopes - ACTOR_KNOWLEDGE_DISCLOSURE_SCOPES
+            if unknown_scopes:
+                raise ValueError(
+                    "invalid actor-knowledge disclosure scopes: "
+                    f"{sorted(unknown_scopes)}"
+                )
+        if audience is not None and audience not in CONTINUITY_AUDIENCES:
+            raise ValueError("audience must be 'dm' or 'player'")
+        if audience == "player" and selected_disclosure_scopes is not None:
+            selected_disclosure_scopes &= PLAYER_OWNED_ACTOR_DISCLOSURE_SCOPES
+        return selected_roles, selected_disclosure_scopes
+
+    @staticmethod
+    def _actor_event_ids(
+        session,
+        *,
+        branch_id: str,
+        actor_id: str,
+        roles: set[str],
+        knowledge_disclosure_scopes: set[str] | None,
+    ) -> set[str]:
+        event_ids = set(
+            session.scalars(
+                select(CampaignEventParticipant.event_id).where(
+                    CampaignEventParticipant.actor_id == actor_id,
+                    CampaignEventParticipant.role.in_(roles),
+                )
+            )
+        )
+        if knowledge_disclosure_scopes:
+            event_ids.update(
+                str(source_event_id)
+                for source_event_id in session.scalars(
+                    select(ActorKnowledgeRevision.source_event_id)
+                    .join(
+                        BranchActorKnowledgeHead,
+                        BranchActorKnowledgeHead.revision_id == ActorKnowledgeRevision.id,
+                    )
+                    .join(
+                        ActorKnowledge,
+                        ActorKnowledge.id == BranchActorKnowledgeHead.knowledge_id,
+                    )
+                    .where(
+                        BranchActorKnowledgeHead.branch_id == branch_id,
+                        ActorKnowledge.actor_id == actor_id,
+                        ActorKnowledgeRevision.source_event_id.is_not(None),
+                        ActorKnowledgeRevision.disclosure_scope.in_(
+                            knowledge_disclosure_scopes
+                        ),
+                    )
+                )
+            )
+        return event_ids
+
+    @staticmethod
+    def _actor_audience_rows(
+        rows: list[CampaignEvent], *, audience: str | None
+    ) -> list[CampaignEvent]:
+        if audience != "player":
+            return rows
+        return [
+            row
+            for row in rows
+            if row.audience_scope in PLAYER_EVENT_AUDIENCE_SCOPES
+            or row.audience_scope == "actor"
+        ]
 
     def list_for_audience(
         self,
