@@ -2416,6 +2416,84 @@ def test_branch_scoped_facts_events_and_actor_knowledge_do_not_leak(database) ->
     ].proposition.endswith("guard room.")
 
 
+def test_actor_knowledge_list_and_search_filter_disclosure_scopes_per_branch(
+    database,
+) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Scoped beliefs")
+    actor = CharacterService(database).create(
+        system_id="dnd5e", campaign_id=campaign.id, name="Witness", character_type="pc"
+    )
+    knowledge = ActorKnowledgeService(database)
+    snapshots = SnapshotService(database)
+
+    for scope in ("owner", "public"):
+        knowledge.add(
+            campaign.id,
+            actor_id=actor.id,
+            knowledge_key=f"{scope}-marker",
+            proposition=f"The {scope} branch marker is remembered.",
+            disclosure_scope=scope,
+        )
+    base = snapshots.create(campaign.id, label="Shared knowledge")
+    main = BranchService(database).current(campaign.id)
+    alternate = BranchService(database).create(
+        campaign.id,
+        name="private-knowledge",
+        from_snapshot_id=base.id,
+        checkout=True,
+    )
+    snapshots.checkout_branch(campaign.id, alternate.id)
+    for scope in ("dm", "player"):
+        knowledge.add(
+            campaign.id,
+            actor_id=actor.id,
+            knowledge_key=f"{scope}-marker",
+            proposition=f"The {scope} branch marker is remembered.",
+            disclosure_scope=scope,
+        )
+
+    assert {
+        item.disclosure_scope
+        for item in knowledge.list(
+            campaign.id,
+            actor_id=actor.id,
+            branch_id=alternate.id,
+            disclosure_scopes={"owner", "player"},
+        )
+    } == {"owner", "player"}
+    assert {
+        item.disclosure_scope
+        for item in knowledge.search(
+            campaign.id,
+            actor_id=actor.id,
+            branch_id=alternate.id,
+            query="branch marker",
+            limit=10,
+            disclosure_scopes={"dm", "public"},
+        )
+    } == {"dm", "public"}
+    assert knowledge.list(
+        campaign.id,
+        actor_id=actor.id,
+        branch_id=main.id,
+        disclosure_scopes={"dm", "player"},
+    ) == []
+    assert {
+        item.disclosure_scope
+        for item in knowledge.list(
+            campaign.id,
+            actor_id=actor.id,
+            branch_id=alternate.id,
+        )
+    } == {"dm", "owner", "player", "public"}
+    with pytest.raises(ValueError, match="invalid actor-knowledge disclosure scopes"):
+        knowledge.list(
+            campaign.id,
+            actor_id=actor.id,
+            disclosure_scopes={"facilitator"},
+        )
+
+
 def test_event_and_all_witness_knowledge_commit_or_rollback_together(database) -> None:
     campaign = CampaignService(database).create(system_id="dnd5e", name="Atomic witnesses")
     characters = CharacterService(database)
@@ -2707,6 +2785,113 @@ def test_actor_event_search_includes_only_permitted_knowledge_source_events(
         )
         == []
     )
+
+
+def test_actor_event_list_and_search_apply_event_audience_after_actor_indexing(
+    database,
+) -> None:
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Private history")
+    actor = CharacterService(database).create(
+        system_id="dnd5e", campaign_id=campaign.id, name="Witness", character_type="pc"
+    )
+    events = EventService(database)
+    direct_dm = events.add(
+        campaign.id,
+        summary="Direct participant secret marker.",
+        audience_scope="dm",
+        participants=[{"actor_id": actor.id, "role": "witness"}],
+    )
+    direct_actor = events.add(
+        campaign.id,
+        summary="Direct participant actor marker.",
+        audience_scope="actor",
+        participants=[{"actor_id": actor.id, "role": "witness"}],
+    )
+    owner_actor, _ = events.add_with_actor_knowledge(
+        campaign.id,
+        summary="Owner knowledge actor marker.",
+        actor_ids=[actor.id],
+        knowledge_key="owner-actor-marker",
+        proposition="The owner may recall this actor-scoped event.",
+        audience_scope="actor",
+        disclosure_scope="owner",
+    )
+    dm_actor, _ = events.add_with_actor_knowledge(
+        campaign.id,
+        summary="DM knowledge actor marker.",
+        actor_ids=[actor.id],
+        knowledge_key="dm-actor-marker",
+        proposition="Only the DM may use this knowledge source.",
+        audience_scope="actor",
+        disclosure_scope="dm",
+    )
+    owner_dm, _ = events.add_with_actor_knowledge(
+        campaign.id,
+        summary="Owner knowledge DM marker.",
+        actor_ids=[actor.id],
+        knowledge_key="owner-dm-marker",
+        proposition="The knowledge is owner-visible but its source event is DM-only.",
+        audience_scope="dm",
+        disclosure_scope="owner",
+    )
+
+    player_filters = {
+        "audience": "player",
+        "knowledge_disclosure_scopes": {"owner", "party", "public", "player"},
+    }
+    dm_filters = {
+        "audience": "dm",
+        "knowledge_disclosure_scopes": {"dm", "owner", "party", "public", "player"},
+    }
+    expected_player_ids = {direct_actor.id, owner_actor.id}
+    expected_dm_ids = {
+        direct_dm.id,
+        direct_actor.id,
+        owner_actor.id,
+        dm_actor.id,
+        owner_dm.id,
+    }
+
+    assert {
+        item.id
+        for item in events.list_for_actor(campaign.id, actor_id=actor.id, **player_filters)
+    } == expected_player_ids
+    assert {
+        item.id
+        for item in events.search_for_actor(
+            campaign.id,
+            actor_id=actor.id,
+            query="marker",
+            **player_filters,
+        )
+    } == expected_player_ids
+    assert {
+        item.id
+        for item in events.list_for_actor(campaign.id, actor_id=actor.id, **dm_filters)
+    } == expected_dm_ids
+    assert {
+        item.id
+        for item in events.search_for_actor(
+            campaign.id,
+            actor_id=actor.id,
+            query="marker",
+            **dm_filters,
+        )
+    } == expected_dm_ids
+    assert {
+        item.id
+        for item in events.list_for_actor(
+            campaign.id,
+            actor_id=actor.id,
+            audience="player",
+            knowledge_disclosure_scopes={"dm"},
+        )
+    } == {direct_actor.id}
+
+    # Existing callers remain participant-only and unfiltered until they opt in.
+    assert {
+        item.id for item in events.list_for_actor(campaign.id, actor_id=actor.id)
+    } == {direct_dm.id, direct_actor.id}
 
 
 def test_continuity_commit_snapshots_event_participants_and_detects_index_tampering(
