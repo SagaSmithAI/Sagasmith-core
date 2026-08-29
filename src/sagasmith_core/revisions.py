@@ -344,7 +344,17 @@ class RevisionService:
             )
             return result
 
-    def history(self, campaign_id: str, *, limit: int = 100) -> list[RevisionInfo]:
+    def history(
+        self, campaign_id: str, *, limit: int = 100, offset: int = 0
+    ) -> list[RevisionInfo]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
+            raise ValueError("limit must be an integer between 1 and 500")
+        if (
+            isinstance(offset, bool)
+            or not isinstance(offset, int)
+            or not 0 <= offset <= 100_000
+        ):
+            raise ValueError("offset must be an integer between 0 and 100000")
         with self.database.transaction() as session:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
@@ -358,7 +368,8 @@ class RevisionService:
                     self._visible_branch_revision_clause(session, campaign),
                 )
                 .order_by(StateRevision.sequence.desc())
-                .limit(max(1, min(limit, 500)))
+                .offset(offset)
+                .limit(limit)
             )
             return [
                 self._info(revision, mutation_group=mutation_group)

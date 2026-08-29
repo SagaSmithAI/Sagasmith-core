@@ -52,6 +52,11 @@ must not fabricate cache invalidation. Core vector, page, and embedding caches a
 also rebuildable performance layers, never authorities for revisions, events,
 facts, actor knowledge, or snapshots.
 
+Authority history reads are bounded at the service boundary. `EventService.list*`
+and `RevisionService.history` accept a validated `limit` plus `offset`, so domain
+MCPs can implement opaque continuation cursors beyond the first 100 records
+without loading the complete campaign history into a public tool response.
+
 ## Current domain implementations
 
 | Domain | Current repository | Components versioned together |
