@@ -69,6 +69,8 @@ Generator 仓库已归档，只保留只读历史；新集成不得依赖其分�
 可以用 opaque continuation cursor 翻过前 100 条记录，而不必把完整战役历史加载到公开工具响应。
 Continuity 会同步推进事实、事件和角色认知的候选窗口，并在
 `retrieval.pagination` 中返回逐流前瞻状态与 `next_offset`。
+`EventService.list_for_actor_event_ids` 可按同一分支、参与者、认知来源与 audience
+规则精确解析最多 128 个旧事件引用，避免持久 scene/actor ref 被近期历史窗口遮蔽。
 
 ## MCP 2026 身份基线
 

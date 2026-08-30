@@ -3039,6 +3039,78 @@ def test_actor_scoped_events_follow_explicit_participants_without_fake_knowledge
     )
 
 
+def test_exact_actor_event_refs_recall_old_authorized_events_without_leaking(database) -> None:
+    campaign = CampaignService(database).create(system_id="neutral", name="Exact event refs")
+    characters = CharacterService(database)
+    actor = characters.create(
+        system_id="neutral",
+        campaign_id=campaign.id,
+        name="Long-memory actor",
+        character_type="npc",
+    )
+    other = characters.create(
+        system_id="neutral",
+        campaign_id=campaign.id,
+        name="Unrelated actor",
+        character_type="npc",
+    )
+    events = EventService(database)
+    old = events.add(
+        campaign.id,
+        summary="The actor heard the first warning.",
+        audience_scope="actor",
+        participants=[{"actor_id": actor.id, "role": "listener"}],
+    )
+    knowledge_source = events.add(
+        campaign.id,
+        summary="A private source established a lasting belief.",
+        audience_scope="actor",
+    )
+    ActorKnowledgeService(database).add(
+        campaign.id,
+        actor_id=actor.id,
+        knowledge_key="private-source",
+        proposition="The source established this belief.",
+        source_event_id=knowledge_source.id,
+        disclosure_scope="owner",
+    )
+    for index in range(200):
+        events.add(
+            campaign.id,
+            summary=f"Later event {index}.",
+            audience_scope="actor",
+            participants=[{"actor_id": actor.id, "role": "witness"}],
+        )
+
+    assert old.id not in {
+        item.id
+        for item in events.list_for_actor(campaign.id, actor_id=actor.id, limit=200)
+    }
+    exact = events.list_for_actor_event_ids(
+        campaign.id,
+        actor_id=actor.id,
+        event_ids=[old.id, knowledge_source.id],
+        knowledge_disclosure_scopes={"owner"},
+        audience="player",
+    )
+    assert [item.id for item in exact] == [old.id, knowledge_source.id]
+    assert events.list_for_actor_event_ids(
+        campaign.id,
+        actor_id=other.id,
+        event_ids=[old.id, knowledge_source.id],
+        knowledge_disclosure_scopes={"owner"},
+        audience="player",
+    ) == []
+    with pytest.raises(ValueError, match="between 1 and 128"):
+        events.list_for_actor_event_ids(campaign.id, actor_id=actor.id, event_ids=[])
+    with pytest.raises(ValueError, match="between 1 and 128"):
+        events.list_for_actor_event_ids(
+            campaign.id,
+            actor_id=actor.id,
+            event_ids=[f"event-{index}" for index in range(129)],
+        )
+
+
 def test_actor_event_search_recalls_an_old_relevant_episode_and_respects_branches(
     database,
 ) -> None:

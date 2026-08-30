@@ -59,6 +59,9 @@ MCPs can implement opaque continuation cursors beyond the first 100 records
 without loading the complete campaign history into a public tool response.
 Continuity advances fact, event, and actor-knowledge candidate windows together and
 reports per-stream lookahead plus `next_offset` under `retrieval.pagination`.
+`EventService.list_for_actor_event_ids` resolves up to 128 old event references
+through the same branch, participant, knowledge-source, and audience policy, so a
+durable scene/actor ref does not disappear behind a recent-history window.
 
 ## Current domain implementations
 
