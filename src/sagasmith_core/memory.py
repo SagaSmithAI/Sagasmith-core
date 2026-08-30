@@ -53,7 +53,7 @@ class MemoryInfo:
     updated_at: str
 
 
-_STATUSES = {"active", "superseded", "retracted"}
+_STATUSES = {"active", "superseded", "retracted", "forgotten"}
 SUBJECT_CONTEXT_KIND_PREFIXES = {
     "actor_state": "actor",
     "faction_state": "faction",
