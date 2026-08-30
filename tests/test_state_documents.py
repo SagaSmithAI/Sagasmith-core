@@ -2032,6 +2032,19 @@ def test_campaign_memory_hides_inactive_heads_by_default(database) -> None:
     assert [item.revision_id for item in inactive] == [retracted.revision_id]
     assert [item.status for item in inactive] == ["retracted"]
 
+    forgotten = memories.revise(
+        created.id,
+        content=retracted.content,
+        status="forgotten",
+        expected_revision_id=retracted.revision_id,
+    )
+
+    assert memories.list(campaign.id) == []
+    assert memories.search(campaign.id, "bell") == []
+    inactive = memories.list(campaign.id, include_inactive=True)
+    assert [item.revision_id for item in inactive] == [forgotten.revision_id]
+    assert [item.status for item in inactive] == ["forgotten"]
+
 
 def test_continuity_commit_persists_event_facts_knowledge_and_snapshot_atomically(
     database,
