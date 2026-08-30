@@ -113,6 +113,10 @@ selection happens inside it. The response exposes per-stream lookahead and the
 next offset under `retrieval.pagination`, allowing domain MCPs to wrap the state
 in opaque cursors without duplicating branch, disclosure, scene-projection, or
 pinned-module-evidence policy.
+Actor-centric projections that already hold stable `event:<id>` references use
+`EventService.list_for_actor_event_ids` rather than widening a recent-history
+window or querying tables directly. The bounded exact read reuses branch,
+participant-role, actor-knowledge-source, disclosure, and audience authority.
 
 At a scene boundary, `ContinuityCommitService` is the preferred write path. It
 allocates the event sequence atomically and either commits every requested
