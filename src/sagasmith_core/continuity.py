@@ -64,11 +64,20 @@ class ContinuityService:
         scope_id: str = "party",
         audience: str = "dm",
         limit: int = 8,
+        offset: int = 0,
         budget_chars: int = 12_000,
         related_refs: list[str] | None = None,
     ) -> dict[str, Any]:
         if audience not in CONTINUITY_AUDIENCES:
             raise ValueError("audience must be 'dm' or 'player'")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise ValueError("limit must be an integer between 1 and 100")
+        if (
+            isinstance(offset, bool)
+            or not isinstance(offset, int)
+            or not 0 <= offset <= 100_000
+        ):
+            raise ValueError("offset must be an integer between 0 and 100000")
         branch = (
             self.branches.current(campaign_id)
             if branch_id is None
@@ -79,41 +88,48 @@ class ContinuityService:
             kind=CONTEXT_ANCHOR_KIND,
             branch_id=branch.id,
         )
-        facts = [
-            item
-            for item in self.facts.search(
-                campaign_id,
-                query or " ",
-                limit=limit + len(anchors),
-                branch_id=branch.id,
-            )
-            if item.kind != CONTEXT_ANCHOR_KIND
-        ][:limit]
-        events = self.events.list_for_audience(
+        fact_page = self.facts.search(
+            campaign_id,
+            query or " ",
+            limit=limit + 1,
+            offset=offset,
+            branch_id=branch.id,
+            excluded_kinds={CONTEXT_ANCHOR_KIND},
+            disclosure_scopes=(
+                PLAYER_MEMORY_DISCLOSURE_SCOPES if audience == "player" else None
+            ),
+        )
+        event_page = self.events.list_for_audience(
             campaign_id,
             audience=audience,
             actor_id=actor_id,
-            limit=limit,
+            limit=limit + 1,
+            offset=offset,
             branch_id=branch.id,
         )
-        knowledge = []
+        knowledge_page = []
         if actor_id:
-            knowledge = self.knowledge.search(
+            knowledge_page = self.knowledge.search(
                 campaign_id,
                 actor_id=actor_id,
                 query=query or " ",
                 branch_id=branch.id,
-                limit=limit,
+                limit=limit + 1,
+                offset=offset,
+                disclosure_scopes=(
+                    PLAYER_OWNED_ACTOR_DISCLOSURE_SCOPES
+                    if audience == "player"
+                    else None
+                ),
             )
-        if audience == "player":
-            facts = [
-                item for item in facts if item.disclosure_scope in PLAYER_MEMORY_DISCLOSURE_SCOPES
-            ]
-            knowledge = [
-                item
-                for item in knowledge
-                if item.disclosure_scope in PLAYER_OWNED_ACTOR_DISCLOSURE_SCOPES
-            ]
+        facts = fact_page[:limit]
+        events = event_page[-limit:]
+        knowledge = knowledge_page[:limit]
+        stream_has_more = {
+            "facts": len(fact_page) > limit,
+            "events": len(event_page) > limit,
+            "actor_knowledge": len(knowledge_page) > limit,
+        }
         current = self.branches.current(campaign_id)
         if branch.id == current.id:
             scoped_state = self.modules.current_scene(campaign_id, scope_id=scope_id)
@@ -160,6 +176,27 @@ class ContinuityService:
             retrieval["strategy"] = "lexical_structured_pinned_module_evidence_v3"
         retrieval["active_context_refs"] = sorted(active_refs)
         retrieval["pinned_module_evidence_count"] = len(module_evidence)
+        has_more = any(stream_has_more.values())
+        retrieval["pagination"] = {
+            "offset": offset,
+            "page_limit": limit,
+            "has_more": has_more,
+            "next_offset": offset + limit if has_more else None,
+            "streams": {
+                "facts": {
+                    "candidate_count": len(facts),
+                    "has_more": stream_has_more["facts"],
+                },
+                "events": {
+                    "candidate_count": len(events),
+                    "has_more": stream_has_more["events"],
+                },
+                "actor_knowledge": {
+                    "candidate_count": len(knowledge),
+                    "has_more": stream_has_more["actor_knowledge"],
+                },
+            },
+        }
         return {
             "campaign_id": campaign_id,
             "branch": asdict(branch),

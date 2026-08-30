@@ -355,11 +355,19 @@ class ContinuityCommitService:
             branch_id,
             head_snapshot_id,
             proposition=self._required_text(data, "proposition"),
-            epistemic_status=str(data.get("epistemic_status", "known")),
-            confidence=int(data.get("confidence", 3)),
+            epistemic_status=(
+                str(data["epistemic_status"])
+                if data.get("epistemic_status") is not None
+                else None
+            ),
+            confidence=(int(data["confidence"]) if data.get("confidence") is not None else None),
             source_event_id=str(source_event_id),
-            cause=str(data.get("cause", "told_by")),
-            disclosure_scope=str(data.get("disclosure_scope", "dm")),
+            cause=str(data["cause"]) if data.get("cause") is not None else None,
+            disclosure_scope=(
+                str(data["disclosure_scope"])
+                if data.get("disclosure_scope") is not None
+                else None
+            ),
             expected_revision_id=data.get("expected_revision_id"),
         )
 

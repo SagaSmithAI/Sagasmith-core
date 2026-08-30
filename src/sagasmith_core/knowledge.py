@@ -29,6 +29,13 @@ ACTOR_KNOWLEDGE_STATUSES = frozenset(
 INACTIVE_ACTOR_KNOWLEDGE_STATUSES = frozenset({"forgotten", "superseded"})
 
 
+class _UnsetSourceEvent:
+    """Distinguish an omitted source event from an explicit evidence clear."""
+
+
+_UNSET_SOURCE_EVENT = _UnsetSourceEvent()
+
+
 @dataclass(frozen=True)
 class ActorKnowledgeInfo:
     id: str
@@ -104,18 +111,16 @@ class ActorKnowledgeService:
         knowledge_id: str,
         *,
         proposition: str,
-        epistemic_status: str = "known",
-        confidence: int = 3,
-        source_event_id: str | None = None,
-        cause: str = "told_by",
-        disclosure_scope: str = "dm",
+        epistemic_status: str | None = None,
+        confidence: int | None = None,
+        source_event_id: str | None | _UnsetSourceEvent = _UNSET_SOURCE_EVENT,
+        cause: str | None = None,
+        disclosure_scope: str | None = None,
         branch_id: str | None = None,
         expected_revision_id: str | None = None,
         idempotency_key: str | None = None,
         idempotency_write: IdempotencyWrite | None = None,
     ) -> ActorKnowledgeInfo:
-        self._validate_status(epistemic_status)
-        self._validate_disclosure_scope(disclosure_scope)
         with self.database.transaction() as session:
             knowledge = session.get(ActorKnowledge, knowledge_id)
             if knowledge is None:
@@ -221,22 +226,13 @@ class ActorKnowledgeService:
         head_snapshot_id: str | None,
         *,
         proposition: str,
-        epistemic_status: str,
-        confidence: int,
-        source_event_id: str | None,
-        cause: str,
-        disclosure_scope: str,
+        epistemic_status: str | None,
+        confidence: int | None,
+        source_event_id: str | None | _UnsetSourceEvent,
+        cause: str | None,
+        disclosure_scope: str | None,
         expected_revision_id: str | None,
     ) -> ActorKnowledgeInfo:
-        self._validate_status(epistemic_status)
-        self._validate_disclosure_scope(disclosure_scope)
-        self._validate_event(
-            session,
-            source_event_id,
-            knowledge.campaign_id,
-            branch_id,
-            head_snapshot_id,
-        )
         head = session.get(
             BranchActorKnowledgeHead,
             {"branch_id": branch_id, "knowledge_id": knowledge.id},
@@ -248,15 +244,40 @@ class ActorKnowledgeService:
                 f"expected actor-knowledge revision {expected_revision_id}, "
                 f"current revision is {head.revision_id}"
             )
+        current = session.get(ActorKnowledgeRevision, head.revision_id)
+        if current is None:
+            raise LookupError(head.revision_id)
+        resolved_status = (
+            current.epistemic_status if epistemic_status is None else epistemic_status
+        )
+        resolved_confidence = current.confidence if confidence is None else confidence
+        resolved_source_event_id = (
+            current.source_event_id
+            if isinstance(source_event_id, _UnsetSourceEvent)
+            else source_event_id
+        )
+        resolved_cause = current.cause if cause is None else cause
+        resolved_disclosure_scope = (
+            current.disclosure_scope if disclosure_scope is None else disclosure_scope
+        )
+        self._validate_status(resolved_status)
+        self._validate_disclosure_scope(resolved_disclosure_scope)
+        self._validate_event(
+            session,
+            resolved_source_event_id,
+            knowledge.campaign_id,
+            branch_id,
+            head_snapshot_id,
+        )
         revision = self._revision(
             knowledge.id,
             parent_id=head.revision_id,
             proposition=proposition,
-            epistemic_status=epistemic_status,
-            confidence=confidence,
-            source_event_id=source_event_id,
-            cause=cause,
-            disclosure_scope=disclosure_scope,
+            epistemic_status=resolved_status,
+            confidence=resolved_confidence,
+            source_event_id=resolved_source_event_id,
+            cause=resolved_cause,
+            disclosure_scope=resolved_disclosure_scope,
         )
         session.add(revision)
         session.flush()
@@ -364,9 +385,18 @@ class ActorKnowledgeService:
         query: str,
         branch_id: str | None = None,
         limit: int = 8,
+        offset: int = 0,
         include_inactive: bool = False,
         disclosure_scopes: set[str] | frozenset[str] | None = None,
     ) -> list[ActorKnowledgeInfo]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
+            raise ValueError("limit must be an integer between 1 and 500")
+        if (
+            isinstance(offset, bool)
+            or not isinstance(offset, int)
+            or not 0 <= offset <= 100_000
+        ):
+            raise ValueError("offset must be an integer between 0 and 100000")
         values = self.list(
             campaign_id,
             actor_id=actor_id,
@@ -380,7 +410,7 @@ class ActorKnowledgeService:
                 -lexical_score(query, title=value.knowledge_key, content=value.proposition)
             ),
         )
-        return ranked[: max(1, min(limit, 100))]
+        return ranked[offset : offset + limit]
 
     @staticmethod
     def _revision(
