@@ -325,6 +325,54 @@ class EventService:
             participants = self._participant_map(session, [row.id for row in rows])
             return [self._info(row, participants.get(row.id, [])) for row in rows]
 
+    def list_for_actor_event_ids(
+        self,
+        campaign_id: str,
+        *,
+        actor_id: str,
+        event_ids: list[str] | tuple[str, ...] | set[str] | frozenset[str],
+        roles: set[str] | frozenset[str] | None = None,
+        knowledge_disclosure_scopes: set[str] | frozenset[str] | None = None,
+        audience: str | None = None,
+        branch_id: str | None = None,
+    ) -> list[CampaignEventInfo]:
+        """Read a bounded set of exact event refs through actor visibility policy."""
+
+        requested = list(event_ids)
+        if not requested or len(requested) > 128:
+            raise ValueError("event_ids must contain between 1 and 128 entries")
+        if any(not isinstance(item, str) or not item.strip() for item in requested):
+            raise ValueError("event_ids entries must be non-empty strings")
+        requested_ids = {item.strip() for item in requested}
+        selected_roles, selected_disclosure_scopes = self._actor_filters(
+            roles=roles,
+            knowledge_disclosure_scopes=knowledge_disclosure_scopes,
+            audience=audience,
+        )
+        with self.database.transaction() as session:
+            campaign = session.get(Campaign, campaign_id)
+            if campaign is None:
+                raise CampaignNotFoundError(campaign_id)
+            actor = session.get(Character, actor_id)
+            if actor is None or actor.campaign_id != campaign_id:
+                raise LookupError(actor_id)
+            branch = resolve_branch(session, campaign, branch_id)
+            actor_event_ids = self._actor_event_ids(
+                session,
+                branch_id=branch.id,
+                actor_id=actor_id,
+                roles=selected_roles,
+                knowledge_disclosure_scopes=selected_disclosure_scopes,
+            )
+            rows = [
+                row
+                for row in self._branch_rows(session, campaign_id, branch)
+                if row.id in requested_ids and row.id in actor_event_ids
+            ]
+            rows = self._actor_audience_rows(rows, audience=audience)
+            participants = self._participant_map(session, [row.id for row in rows])
+            return [self._info(row, participants.get(row.id, [])) for row in rows]
+
     def search_for_actor(
         self,
         campaign_id: str,

@@ -1948,6 +1948,36 @@ def test_campaign_memory_upsert_has_stable_identity_and_optimistic_revision(data
         )
 
 
+def test_campaign_memory_recency_and_updated_at_are_branch_local(database) -> None:
+    campaign = CampaignService(database).create(system_id="neutral", name="Branch recency")
+    memories = MemoryService(database)
+    snapshots = SnapshotService(database)
+    branches = BranchService(database)
+    first = memories.add(campaign.id, fact_key="first", content="First on main")
+    base = snapshots.create(campaign.id, label="Before the branch diverges")
+    main = branches.current(campaign.id)
+    alternate = branches.create(
+        campaign.id,
+        name="alternate-recency",
+        from_snapshot_id=base.id,
+    )
+    second = memories.add(campaign.id, fact_key="second", content="Second on main")
+
+    before = {item.fact_key: item for item in memories.list(campaign.id, branch_id=main.id)}
+    revised = memories.revise(
+        first.id,
+        content="First changed only on alternate",
+        branch_id=alternate.id,
+        expected_revision_id=first.revision_id,
+    )
+    after = memories.list(campaign.id, branch_id=main.id)
+
+    assert [item.fact_key for item in after] == [second.fact_key, first.fact_key]
+    assert after[1].content == "First on main"
+    assert after[1].updated_at == before[first.fact_key].updated_at
+    assert revised.updated_at != after[1].updated_at
+
+
 def test_campaign_memory_upsert_reuses_identity_on_a_sibling_branch(database) -> None:
     campaign = CampaignService(database).create(system_id="dnd5e", name="Branch facts")
     memories = MemoryService(database)
@@ -2494,6 +2524,81 @@ def test_actor_knowledge_list_and_search_filter_disclosure_scopes_per_branch(
         )
 
 
+def test_actor_knowledge_revise_preserves_omitted_epistemic_fields(database) -> None:
+    campaign = CampaignService(database).create(system_id="neutral", name="Knowledge edits")
+    actor = CharacterService(database).create(
+        system_id="neutral",
+        campaign_id=campaign.id,
+        name="Witness",
+        character_type="npc",
+    )
+    event = EventService(database).add(
+        campaign.id,
+        summary="The witness studies the sigil.",
+        audience_scope="actor",
+        participants=[{"actor_id": actor.id, "role": "witness"}],
+    )
+    knowledge = ActorKnowledgeService(database)
+    original = knowledge.add(
+        campaign.id,
+        actor_id=actor.id,
+        knowledge_key="sigil-color",
+        proposition="The sigil is blue.",
+        epistemic_status="belief",
+        confidence=5,
+        source_event_id=event.id,
+        cause="inferred",
+        disclosure_scope="owner",
+    )
+
+    revised = knowledge.revise(
+        original.id,
+        proposition="The sigil is azure.",
+        expected_revision_id=original.revision_id,
+    )
+    assert (
+        revised.epistemic_status,
+        revised.confidence,
+        revised.source_event_id,
+        revised.cause,
+        revised.disclosure_scope,
+    ) == ("belief", 5, event.id, "inferred", "owner")
+
+    committed = ContinuityCommitService(database).commit(
+        campaign.id,
+        event={
+            "summary": "The witness reconsiders the shade.",
+            "audience_scope": "actor",
+            "participants": [{"actor_id": actor.id, "role": "witness"}],
+        },
+        actor_knowledge=[
+            {
+                "action": "revise",
+                "knowledge_id": original.id,
+                "proposition": "The sigil is blue-green.",
+                "expected_revision_id": revised.revision_id,
+            }
+        ],
+    )
+    settled = committed["actor_knowledge"][0]
+    assert (
+        settled["epistemic_status"],
+        settled["confidence"],
+        settled["cause"],
+        settled["disclosure_scope"],
+    ) == ("belief", 5, "inferred", "owner")
+    assert settled["source_event_id"] == committed["event"]["id"]
+
+    cleared = knowledge.revise(
+        original.id,
+        proposition="The sigil's source is no longer remembered.",
+        source_event_id=None,
+        expected_revision_id=settled["revision_id"],
+    )
+    assert cleared.source_event_id is None
+    assert cleared.disclosure_scope == "owner"
+
+
 def test_event_and_all_witness_knowledge_commit_or_rollback_together(database) -> None:
     campaign = CampaignService(database).create(system_id="dnd5e", name="Atomic witnesses")
     characters = CharacterService(database)
@@ -2555,6 +2660,227 @@ def test_event_history_pages_beyond_first_hundred_without_full_history_load(data
 
     with pytest.raises(ValueError, match="offset"):
         events.list(campaign.id, offset=-1)
+
+
+def test_fact_and_actor_knowledge_search_page_beyond_first_hundred(database) -> None:
+    campaign = CampaignService(database).create(system_id="neutral", name="Long memory search")
+    actor = CharacterService(database).create(
+        system_id="neutral",
+        campaign_id=campaign.id,
+        name="Archivist",
+        character_type="npc",
+    )
+    memories = MemoryService(database)
+    knowledge = ActorKnowledgeService(database)
+    for index in range(125):
+        memories.add(
+            campaign.id,
+            fact_key=f"archive:{index:03d}",
+            content="Shared archive marker.",
+        )
+        knowledge.add(
+            campaign.id,
+            actor_id=actor.id,
+            knowledge_key=f"archive:{index:03d}",
+            proposition="Shared archive marker.",
+        )
+
+    assert [item.fact_key for item in memories.search(
+        campaign.id,
+        "archive marker",
+        limit=101,
+    )] == [f"archive:{index:03d}" for index in range(101)]
+    assert [item.knowledge_key for item in knowledge.search(
+        campaign.id,
+        actor_id=actor.id,
+        query="archive marker",
+        limit=101,
+    )] == [f"archive:{index:03d}" for index in range(101)]
+    assert [item.fact_key for item in memories.search(
+        campaign.id,
+        "archive marker",
+        limit=10,
+        offset=100,
+    )] == [f"archive:{index:03d}" for index in range(100, 110)]
+    assert [item.knowledge_key for item in knowledge.search(
+        campaign.id,
+        actor_id=actor.id,
+        query="archive marker",
+        limit=10,
+        offset=100,
+    )] == [f"archive:{index:03d}" for index in range(100, 110)]
+    assert memories.search(campaign.id, "archive marker", offset=125) == []
+    assert knowledge.search(
+        campaign.id,
+        actor_id=actor.id,
+        query="archive marker",
+        offset=125,
+    ) == []
+    with pytest.raises(ValueError, match="offset"):
+        memories.search(campaign.id, "archive marker", offset=-1)
+    with pytest.raises(ValueError, match="offset"):
+        knowledge.search(campaign.id, actor_id=actor.id, query="archive marker", offset=True)
+    with pytest.raises(ValueError, match="limit"):
+        memories.search(campaign.id, "archive marker", limit=501)
+    with pytest.raises(ValueError, match="limit"):
+        knowledge.search(
+            campaign.id,
+            actor_id=actor.id,
+            query="archive marker",
+            limit=0,
+        )
+
+
+def test_continuity_context_pages_all_three_authority_streams(database) -> None:
+    campaign = CampaignService(database).create(system_id="neutral", name="Paged continuity")
+    actor = CharacterService(database).create(
+        system_id="neutral",
+        campaign_id=campaign.id,
+        name="Long-lived witness",
+        character_type="npc",
+    )
+    memories = MemoryService(database)
+    knowledge = ActorKnowledgeService(database)
+    events = EventService(database)
+    for index in range(201):
+        if index < 105:
+            memories.add(
+                campaign.id,
+                fact_key=f"continuity:{index:03d}",
+                content="Shared continuity marker.",
+            )
+        if index < 102:
+            knowledge.add(
+                campaign.id,
+                actor_id=actor.id,
+                knowledge_key=f"continuity:{index:03d}",
+                proposition="Shared continuity marker.",
+            )
+        events.add(campaign.id, summary=f"Shared continuity marker {index:03d}.")
+
+    continuity = ContinuityService(database)
+    first = continuity.context(
+        campaign.id,
+        actor_id=actor.id,
+        query="continuity marker",
+        limit=100,
+        budget_chars=100_000,
+    )
+    second = continuity.context(
+        campaign.id,
+        actor_id=actor.id,
+        query="continuity marker",
+        limit=100,
+        offset=100,
+        budget_chars=100_000,
+    )
+    third = continuity.context(
+        campaign.id,
+        actor_id=actor.id,
+        query="continuity marker",
+        limit=100,
+        offset=200,
+        budget_chars=100_000,
+    )
+
+    assert first["retrieval"]["pagination"] == {
+        "offset": 0,
+        "page_limit": 100,
+        "has_more": True,
+        "next_offset": 100,
+        "streams": {
+            "facts": {"candidate_count": 100, "has_more": True},
+            "events": {"candidate_count": 100, "has_more": True},
+            "actor_knowledge": {"candidate_count": 100, "has_more": True},
+        },
+    }
+    assert second["retrieval"]["pagination"] == {
+        "offset": 100,
+        "page_limit": 100,
+        "has_more": True,
+        "next_offset": 200,
+        "streams": {
+            "facts": {"candidate_count": 5, "has_more": False},
+            "events": {"candidate_count": 100, "has_more": True},
+            "actor_knowledge": {"candidate_count": 2, "has_more": False},
+        },
+    }
+    assert third["retrieval"]["pagination"] == {
+        "offset": 200,
+        "page_limit": 100,
+        "has_more": False,
+        "next_offset": None,
+        "streams": {
+            "facts": {"candidate_count": 0, "has_more": False},
+            "events": {"candidate_count": 1, "has_more": False},
+            "actor_knowledge": {"candidate_count": 0, "has_more": False},
+        },
+    }
+    assert [item["fact_key"] for item in second["facts"]] == [
+        f"continuity:{index:03d}" for index in range(100, 105)
+    ]
+    assert [item["knowledge_key"] for item in second["actor_knowledge"]] == [
+        f"continuity:{index:03d}" for index in range(100, 102)
+    ]
+    assert [item["sequence"] for item in second["events"]] == list(range(2, 102))
+    assert [item["sequence"] for item in third["events"]] == [1]
+    with pytest.raises(ValueError, match="limit"):
+        continuity.context(campaign.id, limit=101)
+    with pytest.raises(ValueError, match="offset"):
+        continuity.context(campaign.id, offset=True)
+
+
+def test_player_continuity_filters_private_memory_before_paging(database) -> None:
+    campaign = CampaignService(database).create(system_id="neutral", name="Player continuity")
+    actor = CharacterService(database).create(
+        system_id="neutral",
+        campaign_id=campaign.id,
+        name="Player witness",
+        character_type="pc",
+    )
+    memories = MemoryService(database)
+    knowledge = ActorKnowledgeService(database)
+    for index in range(3):
+        memories.add(
+            campaign.id,
+            fact_key=f"private:{index}",
+            content="Shared player marker.",
+            disclosure_scope="dm",
+        )
+        knowledge.add(
+            campaign.id,
+            actor_id=actor.id,
+            knowledge_key=f"private:{index}",
+            proposition="Shared player marker.",
+            disclosure_scope="dm",
+        )
+    memories.add(
+        campaign.id,
+        fact_key="visible:fact",
+        content="Shared player marker.",
+        disclosure_scope="party",
+    )
+    knowledge.add(
+        campaign.id,
+        actor_id=actor.id,
+        knowledge_key="visible:knowledge",
+        proposition="Shared player marker.",
+        disclosure_scope="owner",
+    )
+
+    context = ContinuityService(database).context(
+        campaign.id,
+        actor_id=actor.id,
+        audience="player",
+        query="player marker",
+        limit=1,
+    )
+
+    assert [item["fact_key"] for item in context["facts"]] == ["visible:fact"]
+    assert [item["knowledge_key"] for item in context["actor_knowledge"]] == [
+        "visible:knowledge"
+    ]
+    assert context["retrieval"]["pagination"]["has_more"] is False
 
 
 def test_actor_scoped_events_follow_visible_actor_knowledge(database) -> None:
@@ -2711,6 +3037,78 @@ def test_actor_scoped_events_follow_explicit_participants_without_fake_knowledge
         {"actor_id": listener.id, "role": "listener"},
         {"actor_id": speaker.id, "role": "speaker"},
     )
+
+
+def test_exact_actor_event_refs_recall_old_authorized_events_without_leaking(database) -> None:
+    campaign = CampaignService(database).create(system_id="neutral", name="Exact event refs")
+    characters = CharacterService(database)
+    actor = characters.create(
+        system_id="neutral",
+        campaign_id=campaign.id,
+        name="Long-memory actor",
+        character_type="npc",
+    )
+    other = characters.create(
+        system_id="neutral",
+        campaign_id=campaign.id,
+        name="Unrelated actor",
+        character_type="npc",
+    )
+    events = EventService(database)
+    old = events.add(
+        campaign.id,
+        summary="The actor heard the first warning.",
+        audience_scope="actor",
+        participants=[{"actor_id": actor.id, "role": "listener"}],
+    )
+    knowledge_source = events.add(
+        campaign.id,
+        summary="A private source established a lasting belief.",
+        audience_scope="actor",
+    )
+    ActorKnowledgeService(database).add(
+        campaign.id,
+        actor_id=actor.id,
+        knowledge_key="private-source",
+        proposition="The source established this belief.",
+        source_event_id=knowledge_source.id,
+        disclosure_scope="owner",
+    )
+    for index in range(200):
+        events.add(
+            campaign.id,
+            summary=f"Later event {index}.",
+            audience_scope="actor",
+            participants=[{"actor_id": actor.id, "role": "witness"}],
+        )
+
+    assert old.id not in {
+        item.id
+        for item in events.list_for_actor(campaign.id, actor_id=actor.id, limit=200)
+    }
+    exact = events.list_for_actor_event_ids(
+        campaign.id,
+        actor_id=actor.id,
+        event_ids=[old.id, knowledge_source.id],
+        knowledge_disclosure_scopes={"owner"},
+        audience="player",
+    )
+    assert [item.id for item in exact] == [old.id, knowledge_source.id]
+    assert events.list_for_actor_event_ids(
+        campaign.id,
+        actor_id=other.id,
+        event_ids=[old.id, knowledge_source.id],
+        knowledge_disclosure_scopes={"owner"},
+        audience="player",
+    ) == []
+    with pytest.raises(ValueError, match="between 1 and 128"):
+        events.list_for_actor_event_ids(campaign.id, actor_id=actor.id, event_ids=[])
+    with pytest.raises(ValueError, match="between 1 and 128"):
+        events.list_for_actor_event_ids(
+            campaign.id,
+            actor_id=actor.id,
+            event_ids=[f"event-{index}" for index in range(129)],
+        )
 
 
 def test_actor_event_search_recalls_an_old_relevant_episode_and_respects_branches(
