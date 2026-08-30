@@ -12,6 +12,7 @@ from sqlalchemy import select, update
 from sagasmith_core.branches import resolve_branch
 from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.clock import operational_utcnow
+from sagasmith_core.concurrency import compare_and_swap_campaign
 from sagasmith_core.context_anchors import (
     CONTEXT_ANCHOR_KIND,
     normalize_context_anchor_metadata,
@@ -99,6 +100,7 @@ class MemoryService:
         source_event_ids: list[str] | None = None,
         importance: int = 3,
         disclosure_scope: str | None = None,
+        expected_campaign_revision: int | None = None,
         idempotency_key: str | None = None,
         idempotency_write: IdempotencyWrite | None = None,
     ) -> MemoryInfo:
@@ -106,6 +108,13 @@ class MemoryService:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
+            if expected_campaign_revision is not None:
+                compare_and_swap_campaign(
+                    session,
+                    campaign_id,
+                    expected_revision=expected_campaign_revision,
+                    advance_revision=False,
+                )
             idempotency = IdempotencyService(self.database)
             idempotency.require_uncommitted_in_session(session, idempotency_key, idempotency_write)
             branch = resolve_branch(session, campaign, branch_id)
@@ -212,6 +221,7 @@ class MemoryService:
         source_event_ids: list[str] | None = None,
         importance: int | None = None,
         disclosure_scope: str | None = None,
+        expected_campaign_revision: int | None = None,
         idempotency_key: str | None = None,
         idempotency_write: IdempotencyWrite | None = None,
     ) -> MemoryInfo:
@@ -222,6 +232,13 @@ class MemoryService:
             campaign = session.get(Campaign, memory.campaign_id)
             if campaign is None:
                 raise CampaignNotFoundError(memory.campaign_id)
+            if expected_campaign_revision is not None:
+                compare_and_swap_campaign(
+                    session,
+                    memory.campaign_id,
+                    expected_revision=expected_campaign_revision,
+                    advance_revision=False,
+                )
             idempotency = IdempotencyService(self.database)
             idempotency.require_uncommitted_in_session(session, idempotency_key, idempotency_write)
             branch = resolve_branch(session, campaign, branch_id)
@@ -269,6 +286,7 @@ class MemoryService:
         source_event_ids: list[str] | None = None,
         importance: int = 3,
         disclosure_scope: str | None = None,
+        expected_campaign_revision: int | None = None,
         idempotency_key: str | None = None,
         idempotency_write: IdempotencyWrite | None = None,
     ) -> MemoryInfo:
@@ -277,6 +295,13 @@ class MemoryService:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
+            if expected_campaign_revision is not None:
+                compare_and_swap_campaign(
+                    session,
+                    campaign_id,
+                    expected_revision=expected_campaign_revision,
+                    advance_revision=False,
+                )
             idempotency = IdempotencyService(self.database)
             idempotency.require_uncommitted_in_session(session, idempotency_key, idempotency_write)
             branch = resolve_branch(session, campaign, branch_id)

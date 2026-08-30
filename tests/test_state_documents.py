@@ -1948,6 +1948,126 @@ def test_campaign_memory_upsert_has_stable_identity_and_optimistic_revision(data
         )
 
 
+def test_campaign_memory_writes_reject_stale_campaign_revisions(database) -> None:
+    campaigns = CampaignService(database)
+    campaign = campaigns.create(system_id="neutral", name="Guarded memory")
+    memories = MemoryService(database)
+    advanced = campaigns.update(
+        campaign.id,
+        state={"scene": "second"},
+        expected_revision=campaign.revision,
+    )
+
+    with pytest.raises(ValueError, match="campaign revision conflict"):
+        memories.add(
+            campaign.id,
+            fact_key="scene:fact",
+            content="A stale fact.",
+            expected_campaign_revision=campaign.revision,
+            idempotency_key="stale-memory-add",
+            idempotency_write=IdempotencyWrite(
+                scope=f"test-memory-cas:{campaign.id}",
+                payload={"content": "A stale fact."},
+                response=lambda result: {"id": result.id},
+            ),
+        )
+    assert memories.list(campaign.id) == []
+    with pytest.raises(LookupError, match="receipt not found"):
+        IdempotencyService(database).receipt(campaign.id, "stale-memory-add")
+
+    created = memories.upsert(
+        campaign.id,
+        fact_key="scene:fact",
+        content="The current fact.",
+        expected_campaign_revision=advanced.revision,
+    )
+    latest = campaigns.update(
+        campaign.id,
+        state={"scene": "third"},
+        expected_revision=advanced.revision,
+    )
+
+    with pytest.raises(ValueError, match="campaign revision conflict"):
+        memories.upsert(
+            campaign.id,
+            fact_key="scene:fact",
+            content="A stale upsert.",
+            expected_revision_id=created.revision_id,
+            expected_campaign_revision=advanced.revision,
+        )
+    with pytest.raises(ValueError, match="campaign revision conflict"):
+        memories.revise(
+            created.id,
+            content="A stale revision.",
+            expected_revision_id=created.revision_id,
+            expected_campaign_revision=advanced.revision,
+        )
+
+    current = memories.list(campaign.id)[0]
+    assert current.content == "The current fact."
+    assert current.revision_id == created.revision_id
+    assert campaigns.get(campaign.id).revision == latest.revision
+
+
+def test_campaign_memory_revision_guard_serializes_concurrent_campaign_write(
+    database, monkeypatch
+) -> None:
+    campaigns = CampaignService(database)
+    campaign = campaigns.create(system_id="neutral", name="Serialized memory")
+    memories = MemoryService(database)
+    memory_write_entered = Event()
+    allow_memory_write = Event()
+    original_add = memories._add_in_session
+
+    def blocked_add(*args, **kwargs):
+        memory_write_entered.set()
+        assert allow_memory_write.wait(5)
+        return original_add(*args, **kwargs)
+
+    monkeypatch.setattr(memories, "_add_in_session", blocked_add)
+    campaign_update_attempted = Event()
+    campaign_update_completed = Event()
+
+    def before_campaign_update(_conn, _cursor, statement, _parameters, _context, _many):
+        if statement.lstrip().lower().startswith("update campaigns"):
+            campaign_update_attempted.set()
+
+    def after_campaign_update(_conn, _cursor, statement, _parameters, _context, _many):
+        if statement.lstrip().lower().startswith("update campaigns"):
+            campaign_update_completed.set()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        memory_future = pool.submit(
+            memories.add,
+            campaign.id,
+            fact_key="serialized:fact",
+            content="Committed before the campaign advances.",
+            expected_campaign_revision=campaign.revision,
+        )
+        assert memory_write_entered.wait(5)
+        event.listen(database.engine, "before_cursor_execute", before_campaign_update)
+        event.listen(database.engine, "after_cursor_execute", after_campaign_update)
+        try:
+            campaign_future = pool.submit(
+                campaigns.update,
+                campaign.id,
+                state={"scene": "advanced"},
+                expected_revision=campaign.revision,
+            )
+            assert campaign_update_attempted.wait(5)
+            assert not campaign_update_completed.wait(0.2)
+            allow_memory_write.set()
+            created = memory_future.result(timeout=5)
+            advanced = campaign_future.result(timeout=5)
+        finally:
+            allow_memory_write.set()
+            event.remove(database.engine, "before_cursor_execute", before_campaign_update)
+            event.remove(database.engine, "after_cursor_execute", after_campaign_update)
+
+    assert created.content == "Committed before the campaign advances."
+    assert advanced.revision == campaign.revision + 1
+
+
 def test_campaign_memory_recency_and_updated_at_are_branch_local(database) -> None:
     campaign = CampaignService(database).create(system_id="neutral", name="Branch recency")
     memories = MemoryService(database)
