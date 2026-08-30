@@ -93,11 +93,26 @@ database and runtime because v30-v32 deliberately have no downgrade protocol.
 supply a campaign-stable `fact_key`, normally composed from a subject reference
 and predicate. `MemoryRevision` stores lifecycle, disclosure, importance,
 valid-time, and source-event evidence; `BranchFactHead` selects the revision
-visible in one timeline.
+visible in one timeline. Public recency and `updated_at` come from that selected
+revision, not from the campaign-wide fact identity, so a sibling branch cannot
+reorder or retimestamp the current timeline.
 
 `ActorKnowledge` stores what one live actor believes or remembers. It must not
 be replaced by campaign facts or free-form character notes. Forgotten and
 superseded heads are excluded from normal recall but remain available for audit.
+Revising only the proposition preserves omitted epistemic status, confidence,
+source event, cause, and disclosure fields; callers explicitly pass a field to
+change it and may explicitly pass `source_event_id=None` to clear provenance.
+The scene-boundary `ContinuityCommitService` instead binds its newly committed
+event as provenance while preserving the other omitted epistemic fields.
+
+`ContinuityService.context` pages the branch-visible fact, event, and optional
+actor-knowledge candidate streams with one validated offset. Visibility and
+context-anchor exclusion happen before each bounded window, while shared-budget
+selection happens inside it. The response exposes per-stream lookahead and the
+next offset under `retrieval.pagination`, allowing domain MCPs to wrap the state
+in opaque cursors without duplicating branch, disclosure, scene-projection, or
+pinned-module-evidence policy.
 
 At a scene boundary, `ContinuityCommitService` is the preferred write path. It
 allocates the event sequence atomically and either commits every requested

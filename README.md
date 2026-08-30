@@ -63,9 +63,12 @@ no-op 写入不得伪造 cache 失效。Core 的向量、页面与 embedding cac
 以上三个垂直仓库是当前唯一源码入口。原独立 MCP、Skills、UI 与通用 Module
 Generator 仓库已归档，只保留只读历史；新集成不得依赖其分支、发布或文档。
 
-权威历史读取在服务边界保持有界。`EventService.list*` 与
-`RevisionService.history` 接受经过校验的 `limit` 和 `offset`，让领域 MCP
+权威历史读取在服务边界保持有界。`EventService.list*`、`MemoryService.search`、
+`ActorKnowledgeService.search`、`ContinuityService.context` 与 `RevisionService.history`
+接受有界分页和经过校验的 `offset`，让领域 MCP
 可以用 opaque continuation cursor 翻过前 100 条记录，而不必把完整战役历史加载到公开工具响应。
+Continuity 会同步推进事实、事件和角色认知的候选窗口，并在
+`retrieval.pagination` 中返回逐流前瞻状态与 `next_offset`。
 
 ## MCP 2026 身份基线
 
@@ -180,6 +183,7 @@ my_system = "my_package.system:get_system"
 - Snapshot、branch 和 revision 是权威连续性；向量命中不是。
 - 客观事实使用稳定 `fact_key`，在分支内通过 revision head 演进；修订应携带
   `expected_revision_id`。角色的主观知识继续使用独立的 ActorKnowledge ledger。
+- 事实的 recency 与 `updated_at` 来自所选分支的 revision head；修改旁支不会重排或重标当前分支。直接调用 ActorKnowledge 修订会保留未提供的认知状态、置信度、来源、成因与披露范围；只有显式传值（包括 `source_event_id=None`）才修改对应字段。通过 `ContinuityCommitService` 修订时，新提交的场景事件会成为来源，其余未提供字段仍保留。
 - 场景收尾优先使用 `ContinuityCommitService`，在同一事务中写入事件、事实、
   角色认知和可选 Snapshot，避免产生半保存状态。
 - Snapshot 在语义上是可独立恢复的全量 checkpoint；`recap` 才是相对父节点的差量摘要。完整性校验同时覆盖 payload、DAG 祖先链以及 fact/event/actor-knowledge bindings。

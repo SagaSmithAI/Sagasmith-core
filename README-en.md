@@ -52,10 +52,13 @@ must not fabricate cache invalidation. Core vector, page, and embedding caches a
 also rebuildable performance layers, never authorities for revisions, events,
 facts, actor knowledge, or snapshots.
 
-Authority history reads are bounded at the service boundary. `EventService.list*`
-and `RevisionService.history` accept a validated `limit` plus `offset`, so domain
+Authority history reads are bounded at the service boundary. `EventService.list*`,
+`MemoryService.search`, `ActorKnowledgeService.search`, `ContinuityService.context`,
+and `RevisionService.history` accept a bounded page plus validated `offset`, so domain
 MCPs can implement opaque continuation cursors beyond the first 100 records
 without loading the complete campaign history into a public tool response.
+Continuity advances fact, event, and actor-knowledge candidate windows together and
+reports per-stream lookahead plus `next_offset` under `retrieval.pagination`.
 
 ## Current domain implementations
 
@@ -185,6 +188,7 @@ The package supplies its profile, character schema, module parser, and rules eng
 - Snapshots, branches, and revisions are authoritative; vector hits are not.
 - A snapshot is a self-contained full checkpoint; only its `recap` is a delta from the parent. Integrity covers the payload, DAG ancestry, and fact/event/actor-knowledge bindings.
 - Objective facts use stable `fact_key` identities with branch-scoped revision heads and optimistic revision checks. Subjective actor knowledge remains a separate ledger.
+- Fact recency and `updated_at` are derived from the selected branch head. Revising a sibling timeline cannot reorder or retimestamp the current branch. Direct actor-knowledge revisions preserve omitted epistemic, confidence, provenance, cause, and disclosure fields; pass an explicit value (including `source_event_id=None`) to change one. A `ContinuityCommitService` revision binds the newly committed scene event as its provenance while preserving the other omitted fields.
 - Prefer `ContinuityCommitService` at scene boundaries so the event, fact upserts, actor-knowledge changes, and optional snapshot commit as one transaction.
 - Checkout never silently discards a dirty worktree; save a snapshot before switching branches.
 - Writes should use expected revisions and idempotency keys so agent retries cannot duplicate effects.

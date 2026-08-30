@@ -386,7 +386,7 @@ class MemoryService:
                 .join(BranchFactHead, BranchFactHead.memory_id == CampaignMemory.id)
                 .join(MemoryRevision, MemoryRevision.id == BranchFactHead.revision_id)
                 .where(BranchFactHead.branch_id == branch.id)
-                .order_by(CampaignMemory.updated_at.desc(), CampaignMemory.id)
+                .order_by(MemoryRevision.created_at.desc(), CampaignMemory.id)
             )
             if kind:
                 statement = statement.where(CampaignMemory.kind == kind)
@@ -400,10 +400,35 @@ class MemoryService:
         query: str,
         *,
         limit: int = 8,
+        offset: int = 0,
         branch_id: str | None = None,
         include_inactive: bool = False,
+        excluded_kinds: set[str] | frozenset[str] | None = None,
+        disclosure_scopes: set[str] | frozenset[str] | None = None,
     ) -> list[MemoryInfo]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
+            raise ValueError("limit must be an integer between 1 and 500")
+        if (
+            isinstance(offset, bool)
+            or not isinstance(offset, int)
+            or not 0 <= offset <= 100_000
+        ):
+            raise ValueError("offset must be an integer between 0 and 100000")
+        selected_scopes = None if disclosure_scopes is None else set(disclosure_scopes)
+        if selected_scopes is not None:
+            unknown_scopes = selected_scopes - MEMORY_DISCLOSURE_SCOPES
+            if unknown_scopes:
+                raise ValueError(
+                    f"invalid campaign-memory disclosure scopes: {sorted(unknown_scopes)}"
+                )
+        selected_excluded_kinds = set(excluded_kinds or ())
         values = self.list(campaign_id, branch_id=branch_id, include_inactive=include_inactive)
+        values = [
+            item
+            for item in values
+            if item.kind not in selected_excluded_kinds
+            and (selected_scopes is None or item.disclosure_scope in selected_scopes)
+        ]
         ranked = sorted(
             values,
             key=lambda item: (
@@ -425,7 +450,7 @@ class MemoryService:
                 item.fact_key,
             ),
         )
-        return ranked[: max(1, min(limit, 100))]
+        return ranked[offset : offset + limit]
 
     def list_for_subject_refs(
         self,
@@ -720,5 +745,5 @@ class MemoryService:
             importance=revision.importance,
             disclosure_scope=revision.disclosure_scope,
             created_at=memory.created_at.isoformat(),
-            updated_at=memory.updated_at.isoformat(),
+            updated_at=revision.created_at.isoformat(),
         )
