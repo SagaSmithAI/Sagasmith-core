@@ -9,6 +9,7 @@ from sqlalchemy import select, update
 
 from sagasmith_core.branches import resolve_branch
 from sagasmith_core.campaigns import CampaignNotFoundError
+from sagasmith_core.concurrency import compare_and_swap_campaign
 from sagasmith_core.database import Database
 from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
 from sagasmith_core.models import (
@@ -70,6 +71,8 @@ class ActorKnowledgeService:
         cause: str = "witnessed",
         disclosure_scope: str = "dm",
         branch_id: str | None = None,
+        expected_campaign_revision: int | None = None,
+        expected_branch_id: str | None = None,
         idempotency_key: str | None = None,
         idempotency_write: IdempotencyWrite | None = None,
     ) -> ActorKnowledgeInfo:
@@ -79,6 +82,18 @@ class ActorKnowledgeService:
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
+            if expected_campaign_revision is not None or expected_branch_id is not None:
+                compare_and_swap_campaign(
+                    session,
+                    campaign_id,
+                    expected_revision=(
+                        campaign.revision
+                        if expected_campaign_revision is None
+                        else expected_campaign_revision
+                    ),
+                    expected_branch_id=expected_branch_id,
+                    advance_revision=False,
+                )
             idempotency = IdempotencyService(self.database)
             idempotency.require_uncommitted_in_session(session, idempotency_key, idempotency_write)
             branch = resolve_branch(session, campaign, branch_id)
@@ -118,6 +133,8 @@ class ActorKnowledgeService:
         disclosure_scope: str | None = None,
         branch_id: str | None = None,
         expected_revision_id: str | None = None,
+        expected_campaign_revision: int | None = None,
+        expected_branch_id: str | None = None,
         idempotency_key: str | None = None,
         idempotency_write: IdempotencyWrite | None = None,
     ) -> ActorKnowledgeInfo:
@@ -128,6 +145,18 @@ class ActorKnowledgeService:
             campaign = session.get(Campaign, knowledge.campaign_id)
             if campaign is None:
                 raise CampaignNotFoundError(knowledge.campaign_id)
+            if expected_campaign_revision is not None or expected_branch_id is not None:
+                compare_and_swap_campaign(
+                    session,
+                    knowledge.campaign_id,
+                    expected_revision=(
+                        campaign.revision
+                        if expected_campaign_revision is None
+                        else expected_campaign_revision
+                    ),
+                    expected_branch_id=expected_branch_id,
+                    advance_revision=False,
+                )
             idempotency = IdempotencyService(self.database)
             idempotency.require_uncommitted_in_session(session, idempotency_key, idempotency_write)
             branch = resolve_branch(session, campaign, branch_id)
