@@ -2657,6 +2657,79 @@ def test_actor_knowledge_list_and_search_filter_disclosure_scopes_per_branch(
         )
 
 
+def test_actor_knowledge_writes_reject_a_stale_active_branch_atomically(database) -> None:
+    campaigns = CampaignService(database)
+    campaign = campaigns.create(system_id="dnd5e", name="Knowledge branch CAS")
+    actor = CharacterService(database).create(
+        system_id="dnd5e",
+        campaign_id=campaign.id,
+        name="Witness",
+        character_type="npc",
+    )
+    knowledge = ActorKnowledgeService(database)
+    original = knowledge.add(
+        campaign.id,
+        actor_id=actor.id,
+        knowledge_key="door-state",
+        proposition="The door is closed.",
+    )
+    snapshots = SnapshotService(database)
+    base = snapshots.create(campaign.id, label="Before checkout")
+    branches = BranchService(database)
+    main = branches.current(campaign.id)
+    alternate = branches.create(
+        campaign.id,
+        name="alternate",
+        from_snapshot_id=base.id,
+        checkout=True,
+    )
+    current = campaigns.get(campaign.id)
+
+    add_payload = {"knowledge_key": "stale-add"}
+    with pytest.raises(ValueError, match="campaign revision conflict or branch conflict"):
+        knowledge.add(
+            campaign.id,
+            actor_id=actor.id,
+            knowledge_key="stale-add",
+            proposition="This must not land on main.",
+            branch_id=main.id,
+            expected_campaign_revision=current.revision,
+            expected_branch_id=main.id,
+            idempotency_key="stale-knowledge-add",
+            idempotency_write=IdempotencyWrite(
+                scope=f"knowledge-add:{campaign.id}:{main.id}",
+                payload=add_payload,
+                response=lambda result: {"id": result.id},
+            ),
+        )
+
+    revise_payload = {"knowledge_id": original.id}
+    with pytest.raises(ValueError, match="campaign revision conflict or branch conflict"):
+        knowledge.revise(
+            original.id,
+            proposition="This stale revision must not land on main.",
+            branch_id=main.id,
+            expected_revision_id=original.revision_id,
+            expected_campaign_revision=current.revision,
+            expected_branch_id=main.id,
+            idempotency_key="stale-knowledge-revise",
+            idempotency_write=IdempotencyWrite(
+                scope=f"knowledge-revise:{campaign.id}:{main.id}",
+                payload=revise_payload,
+                response=lambda result: {"revision_id": result.revision_id},
+            ),
+        )
+
+    assert knowledge.list(campaign.id, actor_id=actor.id, branch_id=alternate.id) == [
+        original
+    ]
+    assert knowledge.list(campaign.id, actor_id=actor.id, branch_id=main.id) == [original]
+    with pytest.raises(LookupError):
+        IdempotencyService(database).receipt(campaign.id, "stale-knowledge-add")
+    with pytest.raises(LookupError):
+        IdempotencyService(database).receipt(campaign.id, "stale-knowledge-revise")
+
+
 def test_actor_knowledge_revise_preserves_omitted_epistemic_fields(database) -> None:
     campaign = CampaignService(database).create(system_id="neutral", name="Knowledge edits")
     actor = CharacterService(database).create(
