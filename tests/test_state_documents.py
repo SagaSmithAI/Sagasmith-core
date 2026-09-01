@@ -606,6 +606,52 @@ def test_layout_reading_order_keeps_columns_contiguous() -> None:
     assert ocr_layout_text(layout) == (text, used_columns)
 
 
+def test_layout_reading_order_keeps_staggered_column_continuations_together() -> None:
+    """A floating sidebar must not split an unfinished primary-column sentence."""
+
+    layout = OcrPageLayout(
+        page_number=151,
+        width=600,
+        height=800,
+        blocks=(
+            OcrTextBlock("main one", 1.0, 40, 90, 250, 110),
+            OcrTextBlock("SIDEBAR", 1.0, 340, 90, 550, 110),
+            OcrTextBlock("main two", 1.0, 40, 120, 250, 140),
+            OcrTextBlock("sidebar one", 1.0, 340, 120, 550, 140),
+            OcrTextBlock("main three", 1.0, 40, 150, 250, 170),
+            OcrTextBlock("sidebar two", 1.0, 340, 150, 550, 170),
+            OcrTextBlock("main four", 1.0, 40, 180, 250, 200),
+            OcrTextBlock("sidebar three", 1.0, 340, 180, 550, 200),
+            OcrTextBlock("main five", 1.0, 40, 210, 250, 230),
+            OcrTextBlock("main six", 1.0, 40, 240, 250, 260),
+            OcrTextBlock("main seven", 1.0, 40, 270, 250, 290),
+            OcrTextBlock("main clause,", 1.0, 40, 300, 250, 320),
+            OcrTextBlock("continues here.", 1.0, 340, 340, 550, 360),
+            OcrTextBlock("NEXT SECTION", 1.0, 340, 370, 550, 390),
+        ),
+    )
+
+    text, used_columns = _layout_reading_order_text(layout)
+
+    assert used_columns is True
+    assert text.splitlines() == [
+        "main one",
+        "main two",
+        "main three",
+        "main four",
+        "main five",
+        "main six",
+        "main seven",
+        "main clause,",
+        "continues here.",
+        "NEXT SECTION",
+        "SIDEBAR",
+        "sidebar one",
+        "sidebar two",
+        "sidebar three",
+    ]
+
+
 def test_layout_reading_order_uses_offset_crop_box_text_extent() -> None:
     blocks = []
     for row, y in enumerate((90, 120, 150, 180), 1):

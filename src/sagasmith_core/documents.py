@@ -2095,29 +2095,57 @@ def _layout_reading_order_text(layout: OcrPageLayout) -> tuple[str, bool]:
         columns: list[list[OcrTextBlock]],
         spanning: list[OcrTextBlock],
     ) -> list[OcrTextBlock]:
+        ordered_columns = [
+            sorted(column, key=lambda block: (block.y0, block.x0)) for column in columns
+        ]
+        if len(columns) == 2 and not spanning:
+            # A full-height primary column can wrap into the lower part of the
+            # adjacent column while a short, floating sidebar occupies its top.
+            # Reading each whole column in sequence puts that sidebar between an
+            # unfinished sentence and its lowercase continuation.  Reorder only
+            # when the geometry and punctuation both support that interpretation.
+            primary = sorted(columns[0], key=lambda block: (block.y0, block.x0))
+            adjacent = sorted(columns[1], key=lambda block: (block.y0, block.x0))
+            adjacent_chunks: list[list[OcrTextBlock]] = []
+            current_chunk: list[OcrTextBlock] = []
+            current_bottom = 0.0
+            chunk_gap = max(72.0, height * 0.1)
+            for block in adjacent:
+                if current_chunk and block.y0 - current_bottom > chunk_gap:
+                    adjacent_chunks.append(current_chunk)
+                    current_chunk = []
+                current_chunk.append(block)
+                current_bottom = max(current_bottom, block.y1)
+            if current_chunk:
+                adjacent_chunks.append(current_chunk)
+            continuation = adjacent_chunks[-1] if len(adjacent_chunks) > 1 else []
+            first_continuation = continuation[0].text.lstrip() if continuation else ""
+            primary_tail = primary[-1].text.rstrip() if primary else ""
+            if (
+                primary_tail.endswith((",", "-", "–", "—"))
+                and first_continuation[:1].islower()
+            ):
+                ordered_columns = [
+                    primary,
+                    [
+                        block
+                        for chunk in [continuation, *adjacent_chunks[:-1]]
+                        for block in chunk
+                    ],
+                ]
         result: list[OcrTextBlock] = []
         remaining = [block for column in columns for block in column]
         for divider in sorted(spanning, key=lambda block: (block.y0, block.x0)):
             divider_center = (divider.y0 + divider.y1) / 2
             prior = [block for block in remaining if (block.y0 + block.y1) / 2 < divider_center]
             remaining = [block for block in remaining if block not in prior]
-            for column in columns:
-                column_ids = {id(block) for block in column}
-                result.extend(
-                    sorted(
-                        (block for block in prior if id(block) in column_ids),
-                        key=lambda block: (block.y0, block.x0),
-                    )
-                )
+            prior_ids = {id(block) for block in prior}
+            for column in ordered_columns:
+                result.extend(block for block in column if id(block) in prior_ids)
             result.append(divider)
-        for column in columns:
-            column_ids = {id(block) for block in column}
-            result.extend(
-                sorted(
-                    (block for block in remaining if id(block) in column_ids),
-                    key=lambda block: (block.y0, block.x0),
-                )
-            )
+        remaining_ids = {id(block) for block in remaining}
+        for column in ordered_columns:
+            result.extend(block for block in column if id(block) in remaining_ids)
         return result
 
     ordered_blocks: list[OcrTextBlock] = []
