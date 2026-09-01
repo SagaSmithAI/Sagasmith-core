@@ -937,6 +937,169 @@ def test_page_locator_reuses_one_marker_index() -> None:
     assert locator.page_for_offset(len(content)) == 20
 
 
+def _write_synthetic_pdf(path: Path, page_count: int) -> None:
+    pypdf = pytest.importorskip("pypdf")
+    writer = pypdf.PdfWriter()
+    for _ in range(page_count):
+        writer.add_blank_page(width=200, height=100)
+    with path.open("wb") as stream:
+        writer.write(stream)
+
+
+def test_pdf_converter_reports_a_single_replacement_character_as_corrupt(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "single-replacement.pdf"
+    _write_synthetic_pdf(source, 2)
+    damaged = "Reliable synthetic source prose. " * 80 + "\ufffd"
+    intact = "The second synthetic page remains fully readable. " * 80
+    monkeypatch.setattr(
+        "sagasmith_core.documents._extract_pdfium_pages",
+        lambda _source, _profile: ([damaged, intact], {}, [1, 2]),
+    )
+
+    document = PdfDocumentConverter().convert(source)
+
+    assert document.metadata["initial_quality"]["replacement_character_pages"] == [1]
+    assert document.metadata["initial_quality"]["corrupt_text_pages"] == [1]
+    assert document.metadata["quality"]["replacement_character_page_count"] == 1
+    assert document.metadata["quality"]["corrupt_text_page_count"] == 1
+    assert "text layer remains corrupt on 1/2 pages" in document.warnings
+
+
+def test_pdf_converter_selectively_recovers_replacement_pages(tmp_path, monkeypatch) -> None:
+    source = tmp_path / "selective-replacement.pdf"
+    _write_synthetic_pdf(source, 3)
+    damaged_one = "First synthetic page has one undecodable glyph. " * 70 + "\ufffd"
+    intact = "The middle synthetic page remains fully readable. " * 70
+    damaged_three = "Third synthetic page has one undecodable glyph. " * 70 + "\ufffd"
+    monkeypatch.setattr(
+        "sagasmith_core.documents._extract_pdfium_pages",
+        lambda _source, _profile: ([damaged_one, intact, damaged_three], {}, [1, 2, 3]),
+    )
+
+    class RecoveringOcr:
+        name = "recovering-replacement"
+
+        def __init__(self) -> None:
+            self.pages: list[int] = []
+
+        def extract(self, path, *, page_numbers=None):
+            del path
+            self.pages = list(page_numbers or [])
+            return [
+                "Recovered synthetic source text without undecodable glyphs. " * 70
+                for _ in self.pages
+            ]
+
+    provider = RecoveringOcr()
+    document = PdfDocumentConverter(ocr_provider=provider).convert(source)
+
+    assert provider.pages == [1, 3]
+    assert document.metadata["initial_quality"]["replacement_character_pages"] == [1, 3]
+    assert document.metadata["ocr_pages"] == [1, 3]
+    assert document.metadata["quality"]["replacement_character_pages"] == []
+    assert document.metadata["quality"]["corrupt_text_pages"] == []
+    assert "\ufffd" not in document.content
+
+
+def test_pdf_converter_rejects_truncated_replacement_ocr_and_keeps_warning(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "rejected-replacement.pdf"
+    _write_synthetic_pdf(source, 2)
+    damaged = "Synthetic source text must remain recoverable and traceable. " * 70 + "\ufffd"
+    intact = "The second synthetic page remains fully readable. " * 70
+    monkeypatch.setattr(
+        "sagasmith_core.documents._extract_pdfium_pages",
+        lambda _source, _profile: ([damaged, intact], {}, [1, 2]),
+    )
+
+    class TruncatingOcr:
+        name = "truncating-replacement"
+
+        def extract(self, path, *, page_numbers=None):
+            del path
+            assert page_numbers == [1]
+            return ["Too short"]
+
+    document = PdfDocumentConverter(ocr_provider=TruncatingOcr()).convert(source)
+
+    assert document.metadata["ocr_pages"] == []
+    assert document.metadata["ocr_rejected_pages"] == [1]
+    assert document.metadata["quality"]["replacement_character_pages"] == [1]
+    assert document.metadata["quality"]["corrupt_text_page_count"] == 1
+    assert "text layer remains corrupt on 1/2 pages" in document.warnings
+    assert "\ufffd" in document.content
+
+
+def test_pdf_replacement_recovery_replays_from_the_extraction_cache(tmp_path, monkeypatch) -> None:
+    source = tmp_path / "cached-replacement.pdf"
+    _write_synthetic_pdf(source, 2)
+    damaged = "Cached synthetic source text includes one undecodable glyph. " * 70 + "\ufffd"
+    intact = "The second synthetic page remains fully readable. " * 70
+    extraction_calls = 0
+
+    def extract(_source, _profile):
+        nonlocal extraction_calls
+        extraction_calls += 1
+        return [damaged, intact], {}, [1, 2]
+
+    monkeypatch.setattr("sagasmith_core.documents._extract_pdfium_pages", extract)
+
+    class CountingOcr:
+        name = "cached-replacement"
+
+        def __init__(self) -> None:
+            self.calls: list[list[int]] = []
+
+        def extract(self, path, *, page_numbers=None):
+            del path
+            self.calls.append(list(page_numbers or []))
+            return ["Recovered cached source text without undecodable glyphs. " * 70]
+
+    provider = CountingOcr()
+    cache = tmp_path / "cache"
+    first = PdfDocumentConverter(ocr_provider=provider, extraction_cache_dir=cache).convert(source)
+    second = PdfDocumentConverter(ocr_provider=provider, extraction_cache_dir=cache).convert(source)
+
+    assert extraction_calls == 1
+    assert provider.calls == [[1]]
+    assert first.metadata["extraction_cache_hit"] is False
+    assert second.metadata["extraction_cache_hit"] is True
+    assert second.metadata["initial_quality"]["replacement_character_pages"] == [1]
+    assert second.metadata["quality"]["corrupt_text_pages"] == []
+
+
+def test_pdf_converter_does_not_flag_documents_without_replacements(tmp_path, monkeypatch) -> None:
+    source = tmp_path / "intact-synthetic.pdf"
+    _write_synthetic_pdf(source, 2)
+    pages = [
+        "The first synthetic page contains ordinary readable source text. " * 70,
+        "The second synthetic page contains ordinary readable source text. " * 70,
+    ]
+    monkeypatch.setattr(
+        "sagasmith_core.documents._extract_pdfium_pages",
+        lambda _source, _profile: (pages, {}, [1, 2]),
+    )
+
+    class UnexpectedOcr:
+        name = "unexpected"
+
+        def extract(self, path, *, page_numbers=None):
+            del path, page_numbers
+            pytest.fail("OCR should not run for fully readable synthetic pages")
+
+    document = PdfDocumentConverter(ocr_provider=UnexpectedOcr()).convert(source)
+
+    assert document.metadata["initial_quality"]["replacement_character_count"] == 0
+    assert document.metadata["quality"]["replacement_character_pages"] == []
+    assert document.metadata["quality"]["corrupt_text_page_count"] == 0
+    assert document.metadata["ocr_pages"] == []
+
+
 def test_pdf_converter_ocr_replaces_only_suspect_pages(tmp_path) -> None:
     pypdf = pytest.importorskip("pypdf")
     pytest.importorskip("pypdfium2")

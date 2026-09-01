@@ -25,8 +25,8 @@ DOCUMENT_NORMALIZER_VERSION = "37"
 _MAX_STRUCTURAL_HEADING_CHARS = 200
 DOCUMENT_SOURCE_SUFFIXES = frozenset({".md", ".markdown", ".pdf", ".txt"})
 _DOCUMENT_CACHE_SCHEMA = 1
-_PDF_EXTRACTION_CACHE_SCHEMA = 6
-_PDF_TEXT_EXTRACTOR_VERSION = "11"
+_PDF_EXTRACTION_CACHE_SCHEMA = 7
+_PDF_TEXT_EXTRACTOR_VERSION = "12"
 _OCR_PAGE_CACHE_SCHEMA = 1
 _BOOKMARK_OCR_MAX_NON_WHITESPACE = 800
 _RAPIDOCR_ENGINES: dict[str, tuple[Any, RLock]] = {}
@@ -1143,7 +1143,11 @@ def _page_quality(text: str) -> dict[str, Any]:
         "corrupt": (
             private_use / denominator >= 0.02
             or control / denominator >= 0.01
-            or replacement / denominator >= 0.01
+            # U+FFFD is emitted only when the extractor cannot decode a glyph.
+            # Even one occurrence makes the page unsuitable as an exact source
+            # reference, so it must be recoverable and reported by page rather
+            # than being hidden by a document-scale density threshold.
+            or replacement > 0
         ),
     }
 
@@ -1158,6 +1162,9 @@ def _document_quality(page_texts: Sequence[str]) -> dict[str, Any]:
     denominator = max(characters, 1)
     sparse_pages = [index for index, item in enumerate(page_stats, start=1) if item["sparse"]]
     corrupt_pages = [index for index, item in enumerate(page_stats, start=1) if item["corrupt"]]
+    replacement_pages = [
+        index for index, item in enumerate(page_stats, start=1) if item["replacement_characters"]
+    ]
     fused_pages = [index for index, item in enumerate(page_stats, start=1) if item["fused_text"]]
     lexical_damage_pages = [
         index for index, item in enumerate(page_stats, start=1) if item["lexically_damaged"]
@@ -1184,6 +1191,8 @@ def _document_quality(page_texts: Sequence[str]) -> dict[str, Any]:
         "control_character_count": control,
         "control_ratio": round(control / denominator, 6),
         "replacement_character_count": replacement,
+        "replacement_character_page_count": len(replacement_pages),
+        "replacement_character_pages": replacement_pages,
         "replacement_ratio": round(replacement / denominator, 6),
         "text_page_coverage": round(
             (len(page_stats) - len(sparse_pages)) / max(len(page_stats), 1), 6
