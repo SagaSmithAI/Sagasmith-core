@@ -2095,8 +2095,135 @@ def _layout_reading_order_text(layout: OcrPageLayout) -> tuple[str, bool]:
         columns: list[list[OcrTextBlock]],
         spanning: list[OcrTextBlock],
     ) -> list[OcrTextBlock]:
+        def nested_two_column_order(column: list[OcrTextBlock]) -> list[OcrTextBlock]:
+            """Order a bounded two-column region nested inside one wide column."""
+
+            ordinary_order = sorted(column, key=lambda block: (block.y0, block.x0))
+            if len(column) < 10:
+                return ordinary_order
+            local_start = min(block.x0 for block in column)
+            local_end = max(block.x1 for block in column)
+            local_width = local_end - local_start
+            if local_width <= 0:
+                return ordinary_order
+            boundary = local_start + local_width / 2
+            local_gutter = max(6.0, local_width * 0.025)
+            nested_columns: list[list[OcrTextBlock]] = [[], []]
+            dividers: list[OcrTextBlock] = []
+            for block in column:
+                center = (block.x0 + block.x1) / 2
+                block_width = block.x1 - block.x0
+                crosses_boundary = (
+                    block.x0 < boundary - local_gutter
+                    and block.x1 > boundary + local_gutter
+                )
+                if block_width >= local_width * 0.6 or (
+                    crosses_boundary and block_width >= local_width * 0.2
+                ):
+                    dividers.append(block)
+                    continue
+                nested_index = 0 if center < boundary else 1
+                nested_columns[nested_index].append(block)
+            # A short heading can introduce the return to wide prose without
+            # itself crossing the local gutter.  If it begins only after the
+            # neighboring narrow column has ended and leads directly into a
+            # genuinely wide block, keep that heading and its subtitle with
+            # the following wide region instead of the narrow list above it.
+            for nested_index, nested in enumerate(nested_columns):
+                other = nested_columns[1 - nested_index]
+                if not nested or not other or not dividers:
+                    continue
+                other_bottom = max(block.y1 for block in other)
+                for candidate in sorted(nested, key=lambda block: (block.y0, block.x0)):
+                    if candidate.y0 <= other_bottom or not _looks_like_all_caps_heading(
+                        candidate.text
+                    ):
+                        continue
+                    following_dividers = [
+                        divider for divider in dividers if divider.y0 > candidate.y0
+                    ]
+                    if not following_dividers:
+                        continue
+                    first_wide_y = min(divider.y0 for divider in following_dividers)
+                    promoted = [
+                        block
+                        for block in nested
+                        if candidate.y0 <= block.y0 < first_wide_y
+                    ]
+                    if not promoted:
+                        continue
+                    nested_columns[nested_index] = [
+                        block for block in nested if block not in promoted
+                    ]
+                    dividers.extend(promoted)
+                    break
+            if not dividers or any(len(nested) < 4 for nested in nested_columns):
+                return ordinary_order
+            nested_extents = [vertical_extent(nested) for nested in nested_columns]
+            nested_overlap = min(end for _start, end in nested_extents) - max(
+                start for start, _end in nested_extents
+            )
+            if nested_overlap < max(36.0, height * 0.06):
+                return ordinary_order
+            if not (
+                median(block.x1 for block in nested_columns[0]) + local_gutter
+                < median(block.x0 for block in nested_columns[1])
+            ):
+                return ordinary_order
+
+            ordered_nested = [
+                sorted(nested, key=lambda block: (block.y0, block.x0))
+                for nested in nested_columns
+            ]
+            first_heading_indexes = [
+                next(
+                    (
+                        index
+                        for index, block in enumerate(nested)
+                        if _looks_like_all_caps_heading(block.text)
+                    ),
+                    None,
+                )
+                for nested in ordered_nested
+            ]
+            if all(
+                heading_index is not None and heading_index > 0
+                for heading_index in first_heading_indexes
+            ):
+                left_heading = int(first_heading_indexes[0])
+                right_heading = int(first_heading_indexes[1])
+                ordered_nested = [
+                    ordered_nested[0][:left_heading],
+                    ordered_nested[1][:right_heading],
+                    ordered_nested[0][left_heading:],
+                    ordered_nested[1][right_heading:],
+                ]
+            result: list[OcrTextBlock] = []
+            remaining = [block for nested in nested_columns for block in nested]
+            for divider in sorted(dividers, key=lambda block: (block.y0, block.x0)):
+                divider_center = (divider.y0 + divider.y1) / 2
+                prior = [
+                    block
+                    for block in remaining
+                    if (block.y0 + block.y1) / 2 < divider_center
+                ]
+                remaining = [block for block in remaining if block not in prior]
+                prior_ids = {id(block) for block in prior}
+                for nested in ordered_nested:
+                    result.extend(block for block in nested if id(block) in prior_ids)
+                result.append(divider)
+            remaining_ids = {id(block) for block in remaining}
+            for nested in ordered_nested:
+                result.extend(block for block in nested if id(block) in remaining_ids)
+            return result
+
         ordered_columns = [
-            sorted(column, key=lambda block: (block.y0, block.x0)) for column in columns
+            (
+                nested_two_column_order(column)
+                if len(columns) == 2
+                else sorted(column, key=lambda block: (block.y0, block.x0))
+            )
+            for column in columns
         ]
         if len(columns) == 2 and not spanning:
             # A full-height primary column can wrap into the lower part of the

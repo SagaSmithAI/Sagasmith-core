@@ -652,6 +652,72 @@ def test_layout_reading_order_keeps_staggered_column_continuations_together() ->
     ]
 
 
+def test_layout_reading_order_preserves_nested_mixed_width_columns() -> None:
+    """Each wide column may contain its own bounded two-column list region."""
+
+    layout = OcrPageLayout(
+        page_number=13,
+        width=800,
+        height=800,
+        blocks=(
+            OcrTextBlock("left intro one", 1.0, 40, 40, 340, 60),
+            OcrTextBlock("left intro two", 1.0, 40, 70, 340, 90),
+            OcrTextBlock("left list one", 1.0, 40, 140, 150, 160),
+            OcrTextBlock("left list two", 1.0, 40, 170, 150, 190),
+            OcrTextBlock("left list three", 1.0, 40, 200, 150, 220),
+            OcrTextBlock("left list four", 1.0, 40, 230, 150, 250),
+            OcrTextBlock("left list five", 1.0, 40, 260, 150, 280),
+            OcrTextBlock("left neighbor one", 1.0, 230, 140, 340, 160),
+            OcrTextBlock("left neighbor two", 1.0, 230, 170, 340, 190),
+            OcrTextBlock("left neighbor three", 1.0, 230, 200, 340, 220),
+            OcrTextBlock("left neighbor four", 1.0, 230, 230, 340, 250),
+            OcrTextBlock("right prefix one", 1.0, 440, 40, 550, 60),
+            OcrTextBlock("right prefix two", 1.0, 440, 70, 550, 90),
+            OcrTextBlock("RIGHT LEFT SECTION", 1.0, 440, 100, 550, 120),
+            OcrTextBlock("right left item one", 1.0, 440, 130, 550, 150),
+            OcrTextBlock("right left item two", 1.0, 440, 160, 550, 180),
+            OcrTextBlock("neighbor prefix one", 1.0, 630, 40, 740, 60),
+            OcrTextBlock("neighbor prefix two", 1.0, 630, 70, 740, 90),
+            OcrTextBlock("RIGHT NEIGHBOR SECTION", 1.0, 630, 100, 740, 120),
+            OcrTextBlock("neighbor item one", 1.0, 630, 130, 740, 150),
+            OcrTextBlock("neighbor item two", 1.0, 630, 160, 740, 180),
+            OcrTextBlock("RIGHT SECTION", 1.0, 440, 190, 550, 210),
+            OcrTextBlock("right body one", 1.0, 440, 220, 740, 240),
+            OcrTextBlock("right body two", 1.0, 440, 250, 740, 270),
+        ),
+    )
+
+    text, used_columns = _layout_reading_order_text(layout)
+
+    assert used_columns is True
+    assert text.splitlines() == [
+        "left intro one",
+        "left intro two",
+        "left list one",
+        "left list two",
+        "left list three",
+        "left list four",
+        "left list five",
+        "left neighbor one",
+        "left neighbor two",
+        "left neighbor three",
+        "left neighbor four",
+        "right prefix one",
+        "right prefix two",
+        "neighbor prefix one",
+        "neighbor prefix two",
+        "RIGHT LEFT SECTION",
+        "right left item one",
+        "right left item two",
+        "RIGHT NEIGHBOR SECTION",
+        "neighbor item one",
+        "neighbor item two",
+        "RIGHT SECTION",
+        "right body one",
+        "right body two",
+    ]
+
+
 def test_layout_reading_order_uses_offset_crop_box_text_extent() -> None:
     blocks = []
     for row, y in enumerate((90, 120, 150, 180), 1):
