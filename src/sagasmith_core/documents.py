@@ -29,6 +29,11 @@ _PDF_EXTRACTION_CACHE_SCHEMA = 7
 _PDF_TEXT_EXTRACTOR_VERSION = "12"
 _OCR_PAGE_CACHE_SCHEMA = 1
 _BOOKMARK_OCR_MAX_NON_WHITESPACE = 800
+_CONTENT_QUALITY_WARNING_RE = re.compile(
+    r"^(?:text layer remains corrupt on \d+/\d+ pages|"
+    r"text layer remains lexically damaged on \d+/\d+ pages|"
+    r"usable text covers only \d+/\d+ pages)$"
+)
 _RAPIDOCR_ENGINES: dict[str, tuple[Any, RLock]] = {}
 _RAPIDOCR_ENGINES_LOCK = RLock()
 _NORMALIZATION_CACHE_LOCKS: WeakValueDictionary[Path, RLock] = WeakValueDictionary()
@@ -279,7 +284,7 @@ def apply_document_page_revisions(
     revision_checksum = hashlib.sha256(
         json.dumps(audit, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
-    return NormalizedDocument(
+    revised_document = NormalizedDocument(
         content=content,
         media_type=document.media_type,
         source_path=document.source_path,
@@ -287,8 +292,31 @@ def apply_document_page_revisions(
         page_count=document.page_count,
         bookmarks=document.bookmarks,
         warnings=document.warnings,
+        metadata=document.metadata,
+    )
+    quality = _document_quality(
+        [
+            normalized_document_page_text(revised_document, page_number)
+            for page_number in range(1, document.page_count + 1)
+        ]
+    )
+    warnings = [
+        warning
+        for warning in document.warnings
+        if _CONTENT_QUALITY_WARNING_RE.fullmatch(warning) is None
+    ]
+    warnings.extend(_content_quality_warnings(quality, document.page_count))
+    return NormalizedDocument(
+        content=content,
+        media_type=document.media_type,
+        source_path=document.source_path,
+        checksum=document.checksum,
+        page_count=document.page_count,
+        bookmarks=document.bookmarks,
+        warnings=tuple(warnings),
         metadata={
             **document.metadata,
+            "quality": quality,
             "text_revision_count": len(audit),
             "text_revision_pages": sorted(reviewed_pages),
             "text_revision_checksum": revision_checksum,
@@ -1198,6 +1226,28 @@ def _document_quality(page_texts: Sequence[str]) -> dict[str, Any]:
             (len(page_stats) - len(sparse_pages)) / max(len(page_stats), 1), 6
         ),
     }
+
+
+def _content_quality_warnings(quality: Mapping[str, Any], page_count: int) -> list[str]:
+    """Return warnings derived solely from normalized page content quality."""
+
+    warnings: list[str] = []
+    unresolved_corrupt = list(quality["corrupt_text_pages"])
+    if unresolved_corrupt:
+        warnings.append(
+            f"text layer remains corrupt on {len(unresolved_corrupt)}/{page_count} pages"
+        )
+    unresolved_lexical_damage = list(quality["lexical_damage_pages"])
+    if unresolved_lexical_damage:
+        warnings.append(
+            "text layer remains lexically damaged on "
+            f"{len(unresolved_lexical_damage)}/{page_count} pages"
+        )
+    if quality["text_page_coverage"] < 0.9:
+        warnings.append(
+            f"usable text covers only {quality['text_page_count']}/{page_count} pages"
+        )
+    return warnings
 
 
 def _repair_pdf_word_break_noncharacters(
@@ -2910,22 +2960,7 @@ class PdfDocumentConverter:
             visual_headings,
             self.layout_profile,
         )
-        warnings = list(structure_warnings)
-        unresolved_corrupt = list(quality["corrupt_text_pages"])
-        if unresolved_corrupt:
-            warnings.append(
-                f"text layer remains corrupt on {len(unresolved_corrupt)}/{len(pages)} pages"
-            )
-        unresolved_lexical_damage = list(quality["lexical_damage_pages"])
-        if unresolved_lexical_damage:
-            warnings.append(
-                "text layer remains lexically damaged on "
-                f"{len(unresolved_lexical_damage)}/{len(pages)} pages"
-            )
-        if quality["text_page_coverage"] < 0.9:
-            warnings.append(
-                f"usable text covers only {quality['text_page_count']}/{len(pages)} pages"
-            )
+        warnings = [*structure_warnings, *_content_quality_warnings(quality, len(pages))]
         return NormalizedDocument(
             content=content,
             media_type="application/pdf",

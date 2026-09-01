@@ -1356,6 +1356,57 @@ def test_agent_page_revision_is_bounded_audited_and_non_destructive() -> None:
     assert revised.metadata["text_revisions"][0]["replacements"] == revision["replacements"]
 
 
+def test_agent_page_revision_recomputes_content_quality_without_rewriting_provenance() -> None:
+    clean_text = "A" * 90
+    original = NormalizedDocument(
+        content=(
+            f"<!-- page: 1 -->\n\n{clean_text}\ufffd\n"
+            f"<!-- page: 2 -->\n\n{clean_text}\ufffd\n"
+        ),
+        media_type="application/pdf",
+        source_path="rules.pdf",
+        checksum="a" * 64,
+        page_count=2,
+        warnings=(
+            "no structural headings were recovered",
+            "text layer remains corrupt on 2/2 pages",
+        ),
+        metadata={
+            "initial_quality": {"replacement_character_count": 2, "corrupt_text_pages": [1, 2]},
+            "quality": {"replacement_character_count": 2, "corrupt_text_pages": [1, 2]},
+            "ocr_pages": [1, 2],
+            "ocr_rejected_pages": [],
+            "extraction_cache_hit": True,
+        },
+    )
+    page_text = normalized_document_page_text(original, 1)
+    revision = {
+        "source_checksum": original.checksum,
+        "page_number": 1,
+        "base_text_sha256": hashlib.sha256(page_text.encode("utf-8")).hexdigest(),
+        "replacements": [{"old": "\ufffd", "new": "e"}],
+        "reviewer": "agent:ocr-editor",
+        "review_method": "agent",
+        "rationale": "The rendered page confirms the missing glyph.",
+        "evidence": {"basis": "rendered_page", "rendered_image_checksum": "b" * 64},
+    }
+
+    revised = apply_document_page_revisions(original, [revision])
+
+    assert revised.metadata["quality"]["replacement_character_count"] == 1
+    assert revised.metadata["quality"]["replacement_character_pages"] == [2]
+    assert revised.metadata["quality"]["corrupt_text_pages"] == [2]
+    assert revised.warnings == (
+        "no structural headings were recovered",
+        "text layer remains corrupt on 1/2 pages",
+    )
+    assert revised.metadata["initial_quality"] == original.metadata["initial_quality"]
+    assert revised.metadata["ocr_pages"] == original.metadata["ocr_pages"]
+    assert revised.metadata["ocr_rejected_pages"] == original.metadata["ocr_rejected_pages"]
+    assert revised.metadata["extraction_cache_hit"] is True
+    assert revised.metadata["text_revisions"][0]["base_text_sha256"] == revision["base_text_sha256"]
+
+
 def test_agent_page_revision_rejects_ambiguous_or_stale_source_text() -> None:
     document = NormalizedDocument(
         content="<!-- page: 1 -->\n\nrod and rod\n",
@@ -1428,6 +1479,14 @@ def test_agent_page_revision_can_refine_the_same_unpublished_page() -> None:
     assert "##### ROD OF RULERSHIP" in revised.content
     assert revised.metadata["text_revision_pages"] == [1]
     assert revised.metadata["text_revision_count"] == 2
+    assert revised.metadata["text_revision_checksum"] == hashlib.sha256(
+        json.dumps(
+            revised.metadata["text_revisions"],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def test_agent_page_revision_can_recover_empty_page_from_rendered_evidence() -> None:
@@ -1462,6 +1521,8 @@ def test_agent_page_revision_can_recover_empty_page_from_rendered_evidence() -> 
 
     assert "# CLASS FEATURES" in normalized_document_page_text(revised, 1)
     assert normalized_document_page_text(revised, 2) == "\n\n# Existing\n"
+    assert revised.metadata["quality"]["sparse_pages"] == [2]
+    assert revised.warnings == ("usable text covers only 1/2 pages",)
 
     with pytest.raises(ValueError, match="requires rendered_page evidence"):
         apply_document_page_revisions(
