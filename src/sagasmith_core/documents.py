@@ -143,6 +143,7 @@ def apply_document_page_revisions(
     content = document.content
     audit: list[dict[str, Any]] = []
     reviewed_pages: set[int] = set()
+    first_before_pages: dict[int, str] = {}
     page_revision_counts: Counter[int] = Counter()
     for index, raw_revision in enumerate(revisions):
         if not isinstance(raw_revision, Mapping):
@@ -201,6 +202,7 @@ def apply_document_page_revisions(
         )
         page_start, page_end = _normalized_document_page_span(content, page_number)
         page_text = current_document.content[page_start:page_end]
+        first_before_pages.setdefault(page_number, page_text)
         base_checksum = hashlib.sha256(page_text.encode("utf-8")).hexdigest()
         if str(revision.get("base_text_sha256") or "") != base_checksum:
             raise ValueError(f"page revisions[{index}] base text checksum does not match")
@@ -294,11 +296,15 @@ def apply_document_page_revisions(
         warnings=document.warnings,
         metadata=document.metadata,
     )
-    quality = _document_quality(
-        [
-            normalized_document_page_text(revised_document, page_number)
-            for page_number in range(1, document.page_count + 1)
-        ]
+    final_pages = {
+        page_number: normalized_document_page_text(revised_document, page_number)
+        for page_number in range(1, document.page_count + 1)
+    }
+    quality = _revised_document_quality(
+        document.metadata.get("quality"),
+        first_before_pages,
+        final_pages,
+        document.page_count,
     )
     warnings = [
         warning
@@ -1226,6 +1232,95 @@ def _document_quality(page_texts: Sequence[str]) -> dict[str, Any]:
             (len(page_stats) - len(sparse_pages)) / max(len(page_stats), 1), 6
         ),
     }
+
+
+def _revised_document_quality(
+    baseline: Any,
+    before_pages: Mapping[int, str],
+    after_pages: Mapping[int, str],
+    page_count: int,
+) -> dict[str, Any]:
+    """Update extraction quality only for pages changed by accepted revisions.
+
+    Older documents may not carry a quality baseline; those use the explicit
+    full-content fallback so their returned quality remains meaningful.
+    """
+
+    required_baseline_fields = {
+        "character_count",
+        "non_whitespace_character_count",
+        "private_use_character_count",
+        "control_character_count",
+        "replacement_character_count",
+        "sparse_pages",
+        "corrupt_text_pages",
+        "fused_text_pages",
+        "lexical_damage_pages",
+    }
+    if not isinstance(baseline, Mapping) or not required_baseline_fields.issubset(baseline):
+        return _document_quality(
+            [
+                after_pages.get(page, "") if page in after_pages else ""
+                for page in range(1, page_count + 1)
+            ]
+        )
+    quality = dict(baseline)
+    before_stats = {page: _page_quality(text) for page, text in before_pages.items()}
+    after_stats = {page: _page_quality(text) for page, text in after_pages.items()}
+    numeric_fields = {
+        "character_count": "characters",
+        "non_whitespace_character_count": "non_whitespace_characters",
+        "private_use_character_count": "private_use_characters",
+        "control_character_count": "control_characters",
+        "replacement_character_count": "replacement_characters",
+    }
+    for document_field, page_field in numeric_fields.items():
+        value = quality.get(document_field)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            quality[document_field] = value + sum(
+                after_stats[page][page_field] - before_stats[page][page_field]
+                for page in before_stats
+            )
+
+    categories = {
+        "sparse_pages": ("sparse", "sparse_page_count"),
+        "corrupt_text_pages": ("corrupt", "corrupt_text_page_count"),
+        "fused_text_pages": ("fused_text", "fused_text_page_count"),
+        "lexical_damage_pages": ("lexically_damaged", "lexical_damage_page_count"),
+        "replacement_character_pages": ("replacement_characters", None),
+    }
+    for pages_field, (page_field, count_field) in categories.items():
+        members = {int(page) for page in quality.get(pages_field, []) if isinstance(page, int)}
+        for page, before in before_stats.items():
+            after = after_stats[page]
+            if bool(before[page_field]) != bool(after[page_field]):
+                if after[page_field]:
+                    members.add(page)
+                else:
+                    members.discard(page)
+        quality[pages_field] = sorted(members)
+        if count_field is not None:
+            quality[count_field] = len(members)
+    if "character_count" in quality and "private_use_character_count" in quality:
+        denominator = max(int(quality["character_count"]), 1)
+        for count_field, ratio_field in (
+            ("private_use_character_count", "private_use_ratio"),
+            ("control_character_count", "control_ratio"),
+            ("replacement_character_count", "replacement_ratio"),
+        ):
+            if count_field in quality:
+                quality[ratio_field] = round(quality[count_field] / denominator, 6)
+    if "sparse_pages" in quality:
+        quality["text_page_count"] = page_count - len(quality["sparse_pages"])
+        quality["sparse_page_count"] = len(quality["sparse_pages"])
+        quality["text_page_coverage"] = round(quality["text_page_count"] / max(page_count, 1), 6)
+    suspect = set(quality.get("sparse_pages", []))
+    suspect.update(quality.get("corrupt_text_pages", []))
+    suspect.update(quality.get("fused_text_pages", []))
+    suspect.update(quality.get("lexical_damage_pages", []))
+    quality["suspect_pages"] = sorted(suspect)
+    quality["suspect_page_count"] = len(suspect)
+    return quality
 
 
 def _content_quality_warnings(quality: Mapping[str, Any], page_count: int) -> list[str]:

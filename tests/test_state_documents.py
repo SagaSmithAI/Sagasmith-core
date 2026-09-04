@@ -53,6 +53,7 @@ from sagasmith_core.documents import (
     RapidOcrProvider,
     _bookmark_ocr_candidate_pages,
     _cache_profile,
+    _document_quality,
     _layout_reading_order_text,
     _looks_like_corrupt_visual_heading,
     _ocr_page_layout,
@@ -1405,6 +1406,43 @@ def test_agent_page_revision_recomputes_content_quality_without_rewriting_proven
     assert revised.metadata["ocr_rejected_pages"] == original.metadata["ocr_rejected_pages"]
     assert revised.metadata["extraction_cache_hit"] is True
     assert revised.metadata["text_revisions"][0]["base_text_sha256"] == revision["base_text_sha256"]
+
+
+def test_agent_page_revision_does_not_reclassify_unreviewed_quality_pages() -> None:
+    lexical_page = " ".join(["ordinary"] * 210) + "\n" + "\n".join("- B" for _ in range(8))
+    page_one = "A" * 90 + "\ufffd"
+    original = NormalizedDocument(
+        content=f"<!-- page: 1 -->\n\n{page_one}\n<!-- page: 2 -->\n\n{lexical_page}\n",
+        media_type="application/pdf",
+        source_path="rules.pdf",
+        checksum="a" * 64,
+        page_count=2,
+        warnings=("text layer remains corrupt on 1/2 pages",),
+        metadata={"quality": _document_quality([page_one, lexical_page])},
+    )
+    baseline = dict(original.metadata["quality"])
+    baseline["lexical_damage_pages"] = []
+    baseline["lexical_damage_page_count"] = 0
+    baseline["suspect_pages"] = baseline["corrupt_text_pages"]
+    baseline["suspect_page_count"] = len(baseline["suspect_pages"])
+    original = NormalizedDocument(**{**original.__dict__, "metadata": {"quality": baseline}})
+    page_text = normalized_document_page_text(original, 1)
+    revision = {
+        "source_checksum": original.checksum,
+        "page_number": 1,
+        "base_text_sha256": hashlib.sha256(page_text.encode("utf-8")).hexdigest(),
+        "replacements": [{"old": "\ufffd", "new": "ee"}],
+        "reviewer": "agent:ocr-editor",
+        "review_method": "agent",
+        "rationale": "The rendered page confirms the missing glyph.",
+        "evidence": {"basis": "rendered_page"},
+    }
+
+    revised = apply_document_page_revisions(original, [revision])
+
+    assert revised.metadata["quality"]["lexical_damage_pages"] == []
+    assert revised.metadata["quality"]["lexical_damage_page_count"] == 0
+    assert revised.metadata["quality"]["character_count"] == baseline["character_count"] + 1
 
 
 def test_agent_page_revision_rejects_ambiguous_or_stale_source_text() -> None:
