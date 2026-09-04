@@ -1282,9 +1282,12 @@ def _revised_document_quality(
         ) and all(
             isinstance(baseline[field], (list, tuple))
             and all(
-                isinstance(page, int) and not isinstance(page, bool)
+                isinstance(page, int)
+                and not isinstance(page, bool)
+                and 1 <= page <= page_count
                 for page in baseline[field]
             )
+            and len(set(baseline[field])) == len(baseline[field])
             for field in category_fields
         )
     if not valid_baseline:
