@@ -1445,6 +1445,53 @@ def test_agent_page_revision_does_not_reclassify_unreviewed_quality_pages() -> N
     assert revised.metadata["quality"]["character_count"] == baseline["character_count"] + 1
 
 
+def test_agent_page_revisions_use_first_before_and_final_after_quality() -> None:
+    original = NormalizedDocument(
+        content="<!-- page: 1 -->\n\n" + ("A" * 90) + "\ufffd\ufffd\n",
+        media_type="application/pdf",
+        source_path="rules.pdf",
+        checksum="a" * 64,
+        page_count=1,
+    )
+    original = NormalizedDocument(
+        **{
+            **original.__dict__,
+            "metadata": {
+                "quality": _document_quality([normalized_document_page_text(original, 1)])
+            },
+        }
+    )
+    first_page = normalized_document_page_text(original, 1)
+    first = {
+        "source_checksum": original.checksum,
+        "page_number": 1,
+        "base_text_sha256": hashlib.sha256(first_page.encode("utf-8")).hexdigest(),
+        "replacements": [{"old": "\ufffd\ufffd", "new": "ee\ufffd"}],
+        "reviewer": "agent:ocr-editor",
+        "review_method": "agent",
+        "rationale": "The rendered page confirms the missing glyph.",
+        "evidence": {"basis": "rendered_page"},
+    }
+    after_first = apply_document_page_revisions(original, [first])
+    second_page = normalized_document_page_text(after_first, 1)
+    second = {
+        **first,
+        "base_text_sha256": hashlib.sha256(second_page.encode("utf-8")).hexdigest(),
+        "replacements": [{"old": "\ufffd", "new": "e"}],
+    }
+
+    revised = apply_document_page_revisions(original, [first, second])
+
+    assert revised.metadata["quality"]["replacement_character_count"] == 0
+    assert (
+        revised.metadata["quality"]["character_count"]
+        == original.metadata["quality"]["character_count"] + 1
+    )
+    assert revised.metadata["text_revision_count"] == 2
+    assert revised.metadata["text_revisions"][0]["base_text_sha256"] == first["base_text_sha256"]
+    assert revised.metadata["text_revisions"][1]["base_text_sha256"] == second["base_text_sha256"]
+
+
 def test_agent_page_revision_rejects_ambiguous_or_stale_source_text() -> None:
     document = NormalizedDocument(
         content="<!-- page: 1 -->\n\nrod and rod\n",

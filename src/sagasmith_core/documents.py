@@ -1256,8 +1256,38 @@ def _revised_document_quality(
         "corrupt_text_pages",
         "fused_text_pages",
         "lexical_damage_pages",
+        "replacement_character_pages",
     }
-    if not isinstance(baseline, Mapping) or not required_baseline_fields.issubset(baseline):
+    numeric_fields = {
+        "character_count",
+        "non_whitespace_character_count",
+        "private_use_character_count",
+        "control_character_count",
+        "replacement_character_count",
+    }
+    category_fields = {
+        "sparse_pages",
+        "corrupt_text_pages",
+        "fused_text_pages",
+        "lexical_damage_pages",
+        "replacement_character_pages",
+    }
+    valid_baseline = isinstance(baseline, Mapping) and required_baseline_fields.issubset(baseline)
+    if valid_baseline:
+        valid_baseline = all(
+            isinstance(baseline[field], int)
+            and not isinstance(baseline[field], bool)
+            and baseline[field] >= 0
+            for field in numeric_fields
+        ) and all(
+            isinstance(baseline[field], (list, tuple))
+            and all(
+                isinstance(page, int) and not isinstance(page, bool)
+                for page in baseline[field]
+            )
+            for field in category_fields
+        )
+    if not valid_baseline:
         return _document_quality(
             [
                 after_pages.get(page, "") if page in after_pages else ""
