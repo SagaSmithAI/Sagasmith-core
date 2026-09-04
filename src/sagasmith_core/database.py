@@ -63,6 +63,10 @@ class Database:
             f"sagasmith_database_session_{id(self)}",
             default=None,
         )
+        self._ambient_immediate: ContextVar[bool] = ContextVar(
+            f"sagasmith_database_immediate_{id(self)}",
+            default=False,
+        )
 
     @staticmethod
     def _configure_sqlite_connection(dbapi_connection: Any, _record: Any) -> None:
@@ -82,17 +86,25 @@ class Database:
         Base.metadata.drop_all(bind=self.engine)
 
     @contextmanager
-    def transaction(self) -> Iterator[Session]:
+    def transaction(self, *, immediate: bool = False) -> Iterator[Session]:
         ambient = self._ambient_session.get()
         if ambient is not None:
+            if immediate and not self._ambient_immediate.get():
+                raise RuntimeError(
+                    "an immediate transaction is required before entering this ambient transaction"
+                )
             yield ambient
             return
         session = self.session_factory()
         token = self._ambient_session.set(session)
+        immediate_token = self._ambient_immediate.set(immediate)
         try:
             with session.begin():
+                if immediate and self.engine.dialect.name == "sqlite":
+                    session.connection().exec_driver_sql("BEGIN IMMEDIATE")
                 yield session
         finally:
+            self._ambient_immediate.reset(immediate_token)
             self._ambient_session.reset(token)
             session.close()
 

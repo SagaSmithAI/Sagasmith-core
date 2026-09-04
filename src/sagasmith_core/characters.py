@@ -77,6 +77,17 @@ class CharacterService:
                 raise CharacterNotFoundError(character_id)
             return self._info(row)
 
+    def get_for_update(self, character_id: str) -> CharacterInfo:
+        """Read a character while locking its row in the current transaction."""
+        statement = select(Character).where(Character.id == character_id).with_for_update()
+        with self.database.transaction(
+            immediate=self.database.engine.dialect.name == "sqlite"
+        ) as session:
+            row = session.scalars(statement).one_or_none()
+            if row is None:
+                raise CharacterNotFoundError(character_id)
+            return self._info(row)
+
     def import_content_actor(
         self,
         actor: dict[str, Any],
