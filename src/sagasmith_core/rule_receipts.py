@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -64,6 +66,53 @@ class RuleReceiptService:
                 .limit(limit)
             )
             return [self._info(receipt, group) for receipt, group in rows]
+
+    def has_applied_receipt(
+        self,
+        campaign_id: str,
+        *,
+        event: str,
+        receipt_fields: Mapping[str, Any],
+        branch_id: str | None = None,
+    ) -> bool:
+        """Return whether an applied receipt contains the requested top-level fields.
+
+        The database narrows the authoritative candidates before receipt JSON is
+        inspected.  Field matching is deliberately exact at the top level: every
+        requested key must be present and its value must compare equal.
+        """
+        if not isinstance(receipt_fields, Mapping) or not receipt_fields:
+            raise ValueError("receipt_fields must be a non-empty mapping")
+        expected_fields = deepcopy(dict(receipt_fields))
+        # Join an ambient mutation transaction when one exists. Callers that
+        # authorize a dependent write must observe receipt state under the
+        # same transaction/locks as that write, not through a second session.
+        with self.database.transaction() as session:
+            statement = (
+                select(RuleResolutionReceipt.receipt)
+                .join(
+                    MutationGroup,
+                    MutationGroup.id == RuleResolutionReceipt.mutation_group_id,
+                )
+                .where(
+                    RuleResolutionReceipt.campaign_id == campaign_id,
+                    MutationGroup.campaign_id == campaign_id,
+                    RuleResolutionReceipt.event == event,
+                    MutationGroup.applied.is_(True),
+                )
+            )
+            if branch_id is not None:
+                statement = statement.where(
+                    RuleResolutionReceipt.branch_id == branch_id,
+                    MutationGroup.branch_id == branch_id,
+                )
+            for (receipt,) in session.execute(statement):
+                if isinstance(receipt, Mapping) and all(
+                    key in receipt and receipt[key] == value
+                    for key, value in expected_fields.items()
+                ):
+                    return True
+        return False
 
     @staticmethod
     def _info(row: RuleResolutionReceipt, group: MutationGroup) -> RuleReceiptInfo:
