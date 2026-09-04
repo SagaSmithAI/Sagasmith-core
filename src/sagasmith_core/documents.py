@@ -1282,9 +1282,7 @@ def _revised_document_quality(
         ) and all(
             isinstance(baseline[field], (list, tuple))
             and all(
-                isinstance(page, int)
-                and not isinstance(page, bool)
-                and 1 <= page <= page_count
+                isinstance(page, int) and not isinstance(page, bool) and 1 <= page <= page_count
                 for page in baseline[field]
             )
             and len(set(baseline[field])) == len(baseline[field])
@@ -1372,9 +1370,7 @@ def _content_quality_warnings(quality: Mapping[str, Any], page_count: int) -> li
             f"{len(unresolved_lexical_damage)}/{page_count} pages"
         )
     if quality["text_page_coverage"] < 0.9:
-        warnings.append(
-            f"usable text covers only {quality['text_page_count']}/{page_count} pages"
-        )
+        warnings.append(f"usable text covers only {quality['text_page_count']}/{page_count} pages")
     return warnings
 
 
@@ -2301,8 +2297,7 @@ def _layout_reading_order_text(layout: OcrPageLayout) -> tuple[str, bool]:
                 center = (block.x0 + block.x1) / 2
                 block_width = block.x1 - block.x0
                 crosses_boundary = (
-                    block.x0 < boundary - local_gutter
-                    and block.x1 > boundary + local_gutter
+                    block.x0 < boundary - local_gutter and block.x1 > boundary + local_gutter
                 )
                 if block_width >= local_width * 0.6 or (
                     crosses_boundary and block_width >= local_width * 0.2
@@ -2333,9 +2328,7 @@ def _layout_reading_order_text(layout: OcrPageLayout) -> tuple[str, bool]:
                         continue
                     first_wide_y = min(divider.y0 for divider in following_dividers)
                     promoted = [
-                        block
-                        for block in nested
-                        if candidate.y0 <= block.y0 < first_wide_y
+                        block for block in nested if candidate.y0 <= block.y0 < first_wide_y
                     ]
                     if not promoted:
                         continue
@@ -2359,8 +2352,7 @@ def _layout_reading_order_text(layout: OcrPageLayout) -> tuple[str, bool]:
                 return ordinary_order
 
             ordered_nested = [
-                sorted(nested, key=lambda block: (block.y0, block.x0))
-                for nested in nested_columns
+                sorted(nested, key=lambda block: (block.y0, block.x0)) for nested in nested_columns
             ]
             first_heading_indexes = [
                 next(
@@ -2389,11 +2381,7 @@ def _layout_reading_order_text(layout: OcrPageLayout) -> tuple[str, bool]:
             remaining = [block for nested in nested_columns for block in nested]
             for divider in sorted(dividers, key=lambda block: (block.y0, block.x0)):
                 divider_center = (divider.y0 + divider.y1) / 2
-                prior = [
-                    block
-                    for block in remaining
-                    if (block.y0 + block.y1) / 2 < divider_center
-                ]
+                prior = [block for block in remaining if (block.y0 + block.y1) / 2 < divider_center]
                 remaining = [block for block in remaining if block not in prior]
                 prior_ids = {id(block) for block in prior}
                 for nested in ordered_nested:
@@ -2435,17 +2423,10 @@ def _layout_reading_order_text(layout: OcrPageLayout) -> tuple[str, bool]:
             continuation = adjacent_chunks[-1] if len(adjacent_chunks) > 1 else []
             first_continuation = continuation[0].text.lstrip() if continuation else ""
             primary_tail = primary[-1].text.rstrip() if primary else ""
-            if (
-                primary_tail.endswith((",", "-", "–", "—"))
-                and first_continuation[:1].islower()
-            ):
+            if primary_tail.endswith((",", "-", "–", "—")) and first_continuation[:1].islower():
                 ordered_columns = [
                     primary,
-                    [
-                        block
-                        for chunk in [continuation, *adjacent_chunks[:-1]]
-                        for block in chunk
-                    ],
+                    [block for chunk in [continuation, *adjacent_chunks[:-1]] for block in chunk],
                 ]
         result: list[OcrTextBlock] = []
         remaining = [block for column in columns for block in column]
@@ -3190,8 +3171,7 @@ def _read_normalized_document_cache(
             value.get("schema") == _DOCUMENT_CACHE_SCHEMA
             and value.get("checksum") == checksum
             and value.get("profile") == profile
-            and value.get("content_checksum")
-            == hashlib.sha256(content.encode("utf-8")).hexdigest()
+            and value.get("content_checksum") == hashlib.sha256(content.encode("utf-8")).hexdigest()
         ):
             return NormalizedDocument(
                 content=content,
