@@ -21,40 +21,48 @@ from sagasmith_core.models import CampaignAddonActivation
 from sagasmith_core.rule_packs import RulePackError
 
 
-def _rule_component(database, *, version: str = "1.0.0") -> dict:
+def _rule_component(
+    database,
+    *,
+    pack_id: str = "dnd5e.example-addon.rules",
+    version: str = "1.0.0",
+    system_id: str = "dnd5e",
+    editions: list[str] | None = None,
+    dependencies: list[str | dict] | None = None,
+) -> dict:
     rules = RuleService(database)
     ingested = rules.ingest(
-        system_id="dnd5e",
-        source_key=f"example.addon-source-{version}",
+        system_id=system_id,
+        source_key=f"{pack_id}.source-{version}",
         title="Example Addon Source",
         content="# Feature\nA source-backed example feature.",
         edition="2014",
         version=version,
-        publication_id=f"example.addon-source-{version}",
+        publication_id=f"{pack_id}.source-{version}",
         authority="supplement",
     )
     source = rules.export_indexed_source(ingested.source_id)
     chunk = source["sections"][0]["chunks"][0]
     manifest = {
-            "id": "dnd5e.example-addon.rules",
+            "id": pack_id,
             "version": version,
             "title": "Example Addon Rules",
-            "namespace": "dnd5e.example-addon.rules",
-            "system_id": "dnd5e",
-            "editions": ["2014"],
-            "dependencies": [],
+            "namespace": pack_id,
+            "system_id": system_id,
+            "editions": list(editions or ["2014"]),
+            "dependencies": list(dependencies or []),
             "conflicts": [],
             "capabilities": [],
         }
     artifacts = [
             {
-                "id": "dnd5e.example-addon.rules.feature.test",
+                "id": f"{pack_id}.feature.test",
                 "kind": "feature",
                 "card": {"name": "Test Feature"},
                 "source_citations": [
                     {
-                        "source": f"rule-source:example.addon-source-{version}",
-                        "source_key": f"example.addon-source-{version}",
+                        "source": f"rule-source:{pack_id}.source-{version}",
+                        "source_key": f"{pack_id}.source-{version}",
                         "chunk_key": chunk["key"],
                         "source_checksum": source["checksum"],
                     }
@@ -62,12 +70,12 @@ def _rule_component(database, *, version: str = "1.0.0") -> dict:
             }
         ]
     definition_checksum = hashlib.sha256(
-        f"dnd5e.example-addon.rules:{version}".encode()
+        f"{pack_id}:{version}".encode()
     ).hexdigest()
     return {
-        "id": "dnd5e.example-addon.rules",
+        "id": pack_id,
         "version": version,
-        "system_id": "dnd5e",
+        "system_id": system_id,
         "payload": {
             "manifest": manifest,
             "artifacts": artifacts,
@@ -254,6 +262,480 @@ def test_addon_import_install_and_branch_activation_are_separate(database) -> No
     assert RulePackService(database).effective_ruleset(campaign.id).lock == ()
     with pytest.raises(AddonError, match="activated"):
         addons.remove_version(installed.addon_id, installed.version)
+
+
+def test_addon_activation_owns_only_its_exact_recursive_rule_dependency_closure(
+    database,
+) -> None:
+    packs = RulePackService(database)
+    leaf = _rule_component(database, pack_id="dnd5e.dependency.leaf")
+    _install_rule_component(database, leaf)
+    middle = _rule_component(
+        database,
+        pack_id="dnd5e.dependency.middle",
+        dependencies=[
+            {
+                "id": leaf["id"],
+                "version": leaf["version"],
+                "checksum": leaf["metadata"]["definition_checksum"],
+            }
+        ],
+    )
+    _install_rule_component(database, middle)
+    middle_runtime = packs.get_version(middle["id"], middle["version"])
+    root = _rule_component(
+        database,
+        dependencies=[
+            {
+                "id": middle["id"],
+                "version": middle["version"],
+                "checksum": middle_runtime.checksum,
+            }
+        ],
+    )
+    unrelated = _rule_component(database, pack_id="dnd5e.dependency.unrelated")
+    for component in (root, unrelated):
+        _install_rule_component(database, component)
+    package = _addon(root)
+    addons = AddonService(database)
+    addons.import_package(package)
+    addons.install(package["id"], package["version"])
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Closure")
+    RuleProfileService(database).set(campaign.id, edition="2014")
+
+    activated = addons.set_activation(
+        campaign.id,
+        addon_id=package["id"],
+        version=package["version"],
+    )
+
+    assert activated.enabled is True
+    lock = packs.effective_ruleset(campaign.id).lock
+    assert {item["pack_id"] for item in lock} == {
+        leaf["id"],
+        middle["id"],
+        root["id"],
+    }
+    assert unrelated["id"] not in {item["pack_id"] for item in lock}
+    assert {
+        item["pack_id"]: item["options"]["_addon_ids"] for item in lock
+    } == {
+        leaf["id"]: [package["id"]],
+        middle["id"]: [package["id"]],
+        root["id"]: [package["id"]],
+    }
+
+    addons.set_activation(
+        campaign.id,
+        addon_id=package["id"],
+        version=package["version"],
+        enabled=False,
+    )
+    assert packs.effective_ruleset(campaign.id).lock == ()
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("missing", "not installed"),
+        ("inactive", "not installed"),
+        ("wrong-version", "not installed"),
+        ("stale-checksum", "requires checksum"),
+        ("unpinned", "must pin exact version and checksum"),
+    ],
+)
+def test_addon_dependency_activation_rejects_non_exact_or_inactive_closure_atomically(
+    database,
+    case: str,
+    message: str,
+) -> None:
+    dependency_id = "dnd5e.dependency.required"
+    dependency = _rule_component(database, pack_id=dependency_id)
+    if case in {"inactive", "wrong-version", "stale-checksum"}:
+        if case == "inactive":
+            payload = dependency["payload"]
+            draft = RulePackService(database).save_draft(
+                manifest=payload["manifest"],
+                artifacts=payload["artifacts"],
+                mechanics=payload["mechanics"],
+                provenance={
+                    "content_definition": {
+                        "definition_checksum": dependency["metadata"][
+                            "definition_checksum"
+                        ]
+                    }
+                },
+            )
+            assert draft.status == "validated"
+        else:
+            _install_rule_component(database, dependency)
+    dependency_spec: str | dict = dependency_id
+    if case != "unpinned":
+        dependency_spec = {
+            "id": dependency_id,
+            "version": "2.0.0" if case == "wrong-version" else "1.0.0",
+            "checksum": (
+                "f" * 64
+                if case == "stale-checksum"
+                else dependency["metadata"]["definition_checksum"]
+            ),
+        }
+    root = _rule_component(database, dependencies=[dependency_spec])
+    _install_rule_component(database, root)
+    package = _addon(root)
+    addons = AddonService(database)
+    addons.import_package(package)
+    addons.install(package["id"], package["version"])
+    campaign = CampaignService(database).create(system_id="dnd5e", name=case)
+    RuleProfileService(database).set(campaign.id, edition="2014")
+    before_revision = CampaignService(database).get(campaign.id).revision
+
+    with pytest.raises(AddonError, match=message):
+        addons.set_activation(
+            campaign.id,
+            addon_id=package["id"],
+            version=package["version"],
+        )
+
+    assert CampaignService(database).get(campaign.id).revision == before_revision
+    assert addons.activations(campaign.id) == []
+    assert RulePackService(database).effective_ruleset(campaign.id).lock == ()
+
+
+@pytest.mark.parametrize(
+    ("dependency_system", "dependency_editions", "message"),
+    [
+        ("coc7e", ["2014"], "incompatible with campaign system"),
+        ("dnd5e", ["2024"], "does not support campaign edition 2014"),
+    ],
+)
+def test_addon_dependency_activation_rejects_incompatible_closure_atomically(
+    database,
+    dependency_system: str,
+    dependency_editions: list[str],
+    message: str,
+) -> None:
+    dependency = _rule_component(
+        database,
+        pack_id=f"{dependency_system}.dependency.required",
+        system_id=dependency_system,
+        editions=dependency_editions,
+    )
+    _install_rule_component(database, dependency)
+    root = _rule_component(
+        database,
+        dependencies=[
+            {
+                "id": dependency["id"],
+                "version": dependency["version"],
+                "checksum": dependency["metadata"]["definition_checksum"],
+            }
+        ],
+    )
+    _install_rule_component(database, root)
+    package = _addon(root)
+    addons = AddonService(database)
+    addons.import_package(package)
+    addons.install(package["id"], package["version"])
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Incompatible")
+    RuleProfileService(database).set(campaign.id, edition="2014")
+    before_revision = CampaignService(database).get(campaign.id).revision
+
+    with pytest.raises(AddonError, match=message):
+        addons.set_activation(
+            campaign.id,
+            addon_id=package["id"],
+            version=package["version"],
+        )
+
+    assert CampaignService(database).get(campaign.id).revision == before_revision
+    assert addons.activations(campaign.id) == []
+    assert RulePackService(database).effective_ruleset(campaign.id).lock == ()
+
+
+def test_addon_dependency_activation_rejects_cycles_atomically(database) -> None:
+    first_id = "dnd5e.dependency.cycle.first"
+    second_id = "dnd5e.dependency.cycle.second"
+    first_checksum = hashlib.sha256(f"{first_id}:1.0.0".encode()).hexdigest()
+    second_checksum = hashlib.sha256(f"{second_id}:1.0.0".encode()).hexdigest()
+    first = _rule_component(
+        database,
+        pack_id=first_id,
+        dependencies=[
+            {"id": second_id, "version": "1.0.0", "checksum": second_checksum}
+        ],
+    )
+    second = _rule_component(
+        database,
+        pack_id=second_id,
+        dependencies=[
+            {"id": first_id, "version": "1.0.0", "checksum": first_checksum}
+        ],
+    )
+    for component in (first, second):
+        _install_rule_component(database, component)
+    package = _addon(first)
+    addons = AddonService(database)
+    addons.import_package(package)
+    addons.install(package["id"], package["version"])
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Cycle")
+    RuleProfileService(database).set(campaign.id, edition="2014")
+    before_revision = CampaignService(database).get(campaign.id).revision
+
+    with pytest.raises(AddonError, match="dependency cycle"):
+        addons.set_activation(
+            campaign.id,
+            addon_id=package["id"],
+            version=package["version"],
+        )
+
+    assert CampaignService(database).get(campaign.id).revision == before_revision
+    assert addons.activations(campaign.id) == []
+    assert RulePackService(database).effective_ruleset(campaign.id).lock == ()
+
+
+def test_addon_dependency_activation_rejects_ambiguous_exact_versions(database) -> None:
+    shared_id = "dnd5e.dependency.shared"
+    shared_v1 = _rule_component(database, pack_id=shared_id, version="1.0.0")
+    shared_v2 = _rule_component(database, pack_id=shared_id, version="2.0.0")
+    for component in (shared_v1, shared_v2):
+        _install_rule_component(database, component)
+    branches = []
+    for name, dependency in (("left", shared_v1), ("right", shared_v2)):
+        branch = _rule_component(
+            database,
+            pack_id=f"dnd5e.dependency.{name}",
+            dependencies=[
+                {
+                    "id": dependency["id"],
+                    "version": dependency["version"],
+                    "checksum": dependency["metadata"]["definition_checksum"],
+                }
+            ],
+        )
+        _install_rule_component(database, branch)
+        branches.append(branch)
+    root = _rule_component(
+        database,
+        dependencies=[
+            {
+                "id": branch["id"],
+                "version": branch["version"],
+                "checksum": branch["metadata"]["definition_checksum"],
+            }
+            for branch in branches
+        ],
+    )
+    _install_rule_component(database, root)
+    package = _addon(root)
+    addons = AddonService(database)
+    addons.import_package(package)
+    addons.install(package["id"], package["version"])
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Ambiguous")
+    RuleProfileService(database).set(campaign.id, edition="2014")
+    before_revision = CampaignService(database).get(campaign.id).revision
+
+    with pytest.raises(AddonError, match="requirements are ambiguous"):
+        addons.set_activation(
+            campaign.id,
+            addon_id=package["id"],
+            version=package["version"],
+        )
+
+    assert CampaignService(database).get(campaign.id).revision == before_revision
+    assert addons.activations(campaign.id) == []
+    assert RulePackService(database).effective_ruleset(campaign.id).lock == ()
+
+
+def test_shared_addon_dependency_remains_owned_until_the_last_addon_is_disabled(
+    database,
+) -> None:
+    shared = _rule_component(database, pack_id="dnd5e.dependency.shared")
+    _install_rule_component(database, shared)
+    addons = AddonService(database)
+    packages = []
+    for name in ("first", "second"):
+        root = _rule_component(
+            database,
+            pack_id=f"dnd5e.dependency.root.{name}",
+            dependencies=[
+                {
+                    "id": shared["id"],
+                    "version": shared["version"],
+                    "checksum": shared["metadata"]["definition_checksum"],
+                }
+            ],
+        )
+        _install_rule_component(database, root)
+        package = _addon(root, addon_id=f"dnd5e.example-addon.{name}")
+        addons.import_package(package)
+        addons.install(package["id"], package["version"])
+        packages.append(package)
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Shared closure")
+    RuleProfileService(database).set(campaign.id, edition="2014")
+    for package in packages:
+        addons.set_activation(
+            campaign.id,
+            addon_id=package["id"],
+            version=package["version"],
+        )
+
+    addons.set_activation(
+        campaign.id,
+        addon_id=packages[0]["id"],
+        version=packages[0]["version"],
+        enabled=False,
+    )
+
+    lock = RulePackService(database).effective_ruleset(campaign.id).lock
+    assert {item["pack_id"] for item in lock} == {
+        "dnd5e.dependency.root.second",
+        shared["id"],
+    }
+    shared_lock = next(item for item in lock if item["pack_id"] == shared["id"])
+    assert shared_lock["options"]["_addon_ids"] == [packages[1]["id"]]
+
+    addons.set_activation(
+        campaign.id,
+        addon_id=packages[1]["id"],
+        version=packages[1]["version"],
+        enabled=False,
+    )
+    assert RulePackService(database).effective_ruleset(campaign.id).lock == ()
+
+
+def test_addon_dependency_disable_preserves_preexisting_manual_activation(database) -> None:
+    dependency = _rule_component(database, pack_id="dnd5e.dependency.manual")
+    _install_rule_component(database, dependency)
+    root = _rule_component(
+        database,
+        dependencies=[
+            {
+                "id": dependency["id"],
+                "version": dependency["version"],
+                "checksum": dependency["metadata"]["definition_checksum"],
+            }
+        ],
+    )
+    _install_rule_component(database, root)
+    package = _addon(root)
+    addons = AddonService(database)
+    addons.import_package(package)
+    addons.install(package["id"], package["version"])
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Manual closure")
+    RuleProfileService(database).set(campaign.id, edition="2014")
+    packs = RulePackService(database)
+    packs.set_activation(
+        campaign.id,
+        pack_id=dependency["id"],
+        version=dependency["version"],
+        options={"manual": "preserved"},
+    )
+
+    addons.set_activation(
+        campaign.id,
+        addon_id=package["id"],
+        version=package["version"],
+    )
+    addons.set_activation(
+        campaign.id,
+        addon_id=package["id"],
+        version=package["version"],
+        enabled=False,
+    )
+
+    lock = packs.effective_ruleset(campaign.id).lock
+    assert [item["pack_id"] for item in lock] == [dependency["id"]]
+    assert lock[0]["options"]["manual"] == "preserved"
+    assert lock[0]["options"]["_addon_ids"] == []
+    assert lock[0]["options"]["_manual_activation_preserved"] is True
+
+
+def test_addon_version_switch_replaces_the_exact_dependency_closure(database) -> None:
+    dependency_id = "dnd5e.dependency.versioned"
+    root_id = "dnd5e.example-addon.rules"
+    addon_id = "dnd5e.example-addon.versioned-closure"
+    addons = AddonService(database)
+    packages = []
+    for version in ("1.0.0", "2.0.0"):
+        dependency = _rule_component(
+            database,
+            pack_id=dependency_id,
+            version=version,
+        )
+        _install_rule_component(database, dependency)
+        root = _rule_component(
+            database,
+            pack_id=root_id,
+            version=version,
+            dependencies=[
+                {
+                    "id": dependency["id"],
+                    "version": dependency["version"],
+                    "checksum": dependency["metadata"]["definition_checksum"],
+                }
+            ],
+        )
+        _install_rule_component(database, root)
+        package = _addon(root, addon_id=addon_id, version=version)
+        addons.import_package(package)
+        addons.install(package["id"], package["version"])
+        packages.append(package)
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Closure upgrade")
+    RuleProfileService(database).set(campaign.id, edition="2014")
+    addons.set_activation(campaign.id, addon_id=addon_id, version="1.0.0")
+
+    upgraded = addons.set_activation(campaign.id, addon_id=addon_id, version="2.0.0")
+
+    assert upgraded.version == "2.0.0"
+    lock = RulePackService(database).effective_ruleset(campaign.id).lock
+    assert {item["pack_id"]: item["version"] for item in lock} == {
+        dependency_id: "2.0.0",
+        root_id: "2.0.0",
+    }
+    assert all(item["options"]["_addon_ids"] == [addon_id] for item in lock)
+
+
+def test_addon_dependency_activation_rejects_overdeep_closure_without_recursion(
+    database,
+) -> None:
+    next_component: dict | None = None
+    for index in reversed(range(130)):
+        dependencies = []
+        if next_component is not None:
+            dependencies.append(
+                {
+                    "id": next_component["id"],
+                    "version": next_component["version"],
+                    "checksum": next_component["metadata"]["definition_checksum"],
+                }
+            )
+        component = _rule_component(
+            database,
+            pack_id=f"dnd5e.dependency.deep-{index}",
+            dependencies=dependencies,
+        )
+        _install_rule_component(database, component)
+        next_component = component
+    assert next_component is not None
+    package = _addon(next_component)
+    addons = AddonService(database)
+    addons.import_package(package)
+    addons.install(package["id"], package["version"])
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Deep closure")
+    RuleProfileService(database).set(campaign.id, edition="2014")
+    before_revision = CampaignService(database).get(campaign.id).revision
+
+    with pytest.raises(AddonError, match="safe depth limit"):
+        addons.set_activation(
+            campaign.id,
+            addon_id=package["id"],
+            version=package["version"],
+        )
+
+    assert CampaignService(database).get(campaign.id).revision == before_revision
+    assert addons.activations(campaign.id) == []
+    assert RulePackService(database).effective_ruleset(campaign.id).lock == ()
 
 
 def test_addon_accepts_exact_plugin_proven_local_component_equivalence(database) -> None:

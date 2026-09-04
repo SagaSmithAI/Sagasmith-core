@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sagasmith-core"
-version = "0.2.1"
+version = "0.2.2"
 description = "System-neutral database, document, retrieval, and campaign runtime for tabletop RPGs"
 readme = "README.md"
 requires-python = ">=3.11"

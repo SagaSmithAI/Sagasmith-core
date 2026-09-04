@@ -21,6 +21,7 @@ from sagasmith_core.models import (
     CampaignSnapshot,
     ContentAddon,
     ContentAddonVersion,
+    RulePack,
     RulePackVersion,
 )
 from sagasmith_core.rule_packs import RulePackService
@@ -29,6 +30,10 @@ from sagasmith_core.runtime_locks import require_mutation_unlocked
 
 class AddonError(ValueError):
     """Raised when an addon lifecycle transition would break an exact lock."""
+
+
+_MAX_ADDON_RULE_DEPENDENCY_DEPTH = 128
+_MAX_ADDON_RULE_DEPENDENCY_PACKS = 1024
 
 
 @dataclass(frozen=True)
@@ -338,6 +343,11 @@ class AddonService:
             global_errors = self._global_component_errors(session, row)
             if global_errors:
                 raise AddonError("addon components are not installed: " + "; ".join(global_errors))
+            self._rule_dependency_components(
+                session,
+                campaign=campaign,
+                components=list(row.components or []),
+            )
             self._assert_addon_conflicts(
                 session,
                 campaign_id=campaign_id,
@@ -438,6 +448,20 @@ class AddonService:
                 if previous_version is None or previous_version.checksum != row.checksum:
                     raise AddonError("the active addon version is unavailable for replacement")
                 previous_options = dict(row.options or {})
+            dependency_components = self._rule_dependency_components(
+                session,
+                campaign=campaign,
+                components=list(version_row.components or []),
+            )
+            previous_dependency_components = (
+                self._rule_dependency_components(
+                    session,
+                    campaign=campaign,
+                    components=list(previous_version.components or []),
+                )
+                if previous_version is not None
+                else []
+            )
             if row is None:
                 row = CampaignAddonActivation(
                     campaign_id=campaign_id,
@@ -455,6 +479,15 @@ class AddonService:
                     enabled=False,
                     addon_options=previous_options,
                 )
+                self._set_rule_component_ownership(
+                    session,
+                    campaign=campaign,
+                    branch_id=branch.id,
+                    addon_id=addon_id,
+                    components=previous_dependency_components,
+                    enabled=False,
+                    addon_options={},
+                )
             row.version = version
             row.checksum = version_row.checksum
             row.enabled = bool(enabled)
@@ -468,6 +501,15 @@ class AddonService:
                 components=list(version_row.components),
                 enabled=enabled,
                 addon_options=addon_options,
+            )
+            self._set_rule_component_ownership(
+                session,
+                campaign=campaign,
+                branch_id=branch.id,
+                addon_id=addon_id,
+                components=dependency_components,
+                enabled=enabled,
+                addon_options={},
             )
             compare_and_swap_campaign(
                 session,
@@ -598,6 +640,140 @@ class AddonService:
                     f"checksum is {status['checksum_status']}"
                 )
         return errors
+
+    @staticmethod
+    def _rule_dependency_components(
+        session,
+        *,
+        campaign: Campaign,
+        components: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Resolve the exact installed dependency closure for addon rule components."""
+
+        profile = session.get(CampaignRuleProfile, campaign.id)
+        edition = profile.edition if profile is not None else ""
+        root_ids = {
+            str(component["id"])
+            for component in components
+            if str(component.get("kind") or "") == "rule_pack"
+        }
+        selected: dict[str, tuple[str, str]] = {}
+        dependencies: dict[str, dict[str, Any]] = {}
+        visited: set[str] = set()
+
+        def load(pack_id: str, version: str) -> RulePackVersion:
+            row = session.get(
+                RulePackVersion,
+                {"pack_id": pack_id, "version": version},
+            )
+            if row is None or row.status != "installed":
+                raise AddonError(
+                    f"addon rule dependency is not installed: {pack_id}@{version}"
+                )
+            pack = session.get(RulePack, pack_id)
+            if pack is None or pack.system_id != campaign.system_id:
+                raise AddonError(
+                    f"addon rule dependency is incompatible with campaign system: "
+                    f"{pack_id}@{version}"
+                )
+            supported = {str(item) for item in row.manifest.get("editions", [])}
+            if supported and edition and edition not in supported:
+                raise AddonError(
+                    f"addon rule dependency {pack_id}@{version} does not support "
+                    f"campaign edition {edition}"
+                )
+            selected_identity = (row.version, row.checksum)
+            existing_identity = selected.get(pack_id)
+            if existing_identity is not None and existing_identity != selected_identity:
+                raise AddonError(
+                    f"addon rule dependency requirements are ambiguous for {pack_id}"
+                )
+            selected[pack_id] = selected_identity
+            if len(selected) > _MAX_ADDON_RULE_DEPENDENCY_PACKS:
+                raise AddonError(
+                    "addon rule dependency closure exceeds the safe pack limit "
+                    f"of {_MAX_ADDON_RULE_DEPENDENCY_PACKS}"
+                )
+            return row
+
+        for component in components:
+            if str(component.get("kind") or "") != "rule_pack":
+                continue
+            root_id = str(component["id"])
+            root_version = str(component["version"])
+            stack: list[tuple[str, str, int, bool]] = [
+                (root_id, root_version, 0, False)
+            ]
+            visiting: list[str] = []
+            while stack:
+                pack_id, version, depth, exiting = stack.pop()
+                if exiting:
+                    if visiting[-1] != pack_id:
+                        raise AddonError("addon rule dependency traversal state is invalid")
+                    visiting.pop()
+                    visited.add(pack_id)
+                    continue
+                if pack_id in visiting:
+                    cycle = " -> ".join((*visiting[visiting.index(pack_id) :], pack_id))
+                    raise AddonError(f"addon rule dependency cycle: {cycle}")
+                row = load(pack_id, version)
+                if pack_id in visited:
+                    continue
+                if depth > _MAX_ADDON_RULE_DEPENDENCY_DEPTH:
+                    raise AddonError(
+                        "addon rule dependency closure exceeds the safe depth limit "
+                        f"of {_MAX_ADDON_RULE_DEPENDENCY_DEPTH}"
+                    )
+                visiting.append(pack_id)
+                stack.append((pack_id, version, depth, True))
+                dependency_ids: set[str] = set()
+                child_frames: list[tuple[str, str, int, bool]] = []
+                for dependency in row.manifest.get("dependencies", []):
+                    if not isinstance(dependency, dict):
+                        raise AddonError(
+                            f"addon rule dependency {pack_id} must pin exact version and checksum"
+                        )
+                    dependency_id = str(dependency.get("id") or "")
+                    dependency_version = str(dependency.get("version") or "")
+                    expected_checksum = str(dependency.get("checksum") or "")
+                    if not dependency_id or not dependency_version or not expected_checksum:
+                        raise AddonError(
+                            f"addon rule dependency {pack_id} must pin exact version and checksum"
+                        )
+                    if dependency_id in dependency_ids:
+                        raise AddonError(
+                            "addon rule dependency requirements are ambiguous for "
+                            f"{dependency_id}"
+                        )
+                    dependency_ids.add(dependency_id)
+                    dependency_row = load(dependency_id, dependency_version)
+                    definition_checksum = str(
+                        dict(dependency_row.provenance or {})
+                        .get("content_definition", {})
+                        .get("definition_checksum")
+                        or ""
+                    )
+                    if expected_checksum not in {
+                        dependency_row.checksum,
+                        definition_checksum,
+                    }:
+                        raise AddonError(
+                            f"addon rule dependency {pack_id} requires checksum "
+                            f"{expected_checksum} for {dependency_id}@{dependency_version}"
+                        )
+                    if dependency_id not in root_ids:
+                        dependencies[dependency_id] = {
+                            "kind": "rule_pack",
+                            "id": dependency_id,
+                            "version": dependency_row.version,
+                            "checksum": dependency_row.checksum,
+                            "optional": False,
+                        }
+                    child_frames.append(
+                        (dependency_id, dependency_version, depth + 1, False)
+                    )
+                stack.extend(reversed(child_frames))
+        return [dependencies[pack_id] for pack_id in sorted(dependencies)]
 
     @staticmethod
     def _assert_addon_conflicts(

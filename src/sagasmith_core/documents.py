@@ -25,10 +25,15 @@ DOCUMENT_NORMALIZER_VERSION = "37"
 _MAX_STRUCTURAL_HEADING_CHARS = 200
 DOCUMENT_SOURCE_SUFFIXES = frozenset({".md", ".markdown", ".pdf", ".txt"})
 _DOCUMENT_CACHE_SCHEMA = 1
-_PDF_EXTRACTION_CACHE_SCHEMA = 6
-_PDF_TEXT_EXTRACTOR_VERSION = "11"
+_PDF_EXTRACTION_CACHE_SCHEMA = 7
+_PDF_TEXT_EXTRACTOR_VERSION = "12"
 _OCR_PAGE_CACHE_SCHEMA = 1
 _BOOKMARK_OCR_MAX_NON_WHITESPACE = 800
+_CONTENT_QUALITY_WARNING_RE = re.compile(
+    r"^(?:text layer remains corrupt on \d+/\d+ pages|"
+    r"text layer remains lexically damaged on \d+/\d+ pages|"
+    r"usable text covers only \d+/\d+ pages)$"
+)
 _RAPIDOCR_ENGINES: dict[str, tuple[Any, RLock]] = {}
 _RAPIDOCR_ENGINES_LOCK = RLock()
 _NORMALIZATION_CACHE_LOCKS: WeakValueDictionary[Path, RLock] = WeakValueDictionary()
@@ -138,6 +143,7 @@ def apply_document_page_revisions(
     content = document.content
     audit: list[dict[str, Any]] = []
     reviewed_pages: set[int] = set()
+    first_before_pages: dict[int, str] = {}
     page_revision_counts: Counter[int] = Counter()
     for index, raw_revision in enumerate(revisions):
         if not isinstance(raw_revision, Mapping):
@@ -196,6 +202,7 @@ def apply_document_page_revisions(
         )
         page_start, page_end = _normalized_document_page_span(content, page_number)
         page_text = current_document.content[page_start:page_end]
+        first_before_pages.setdefault(page_number, page_text)
         base_checksum = hashlib.sha256(page_text.encode("utf-8")).hexdigest()
         if str(revision.get("base_text_sha256") or "") != base_checksum:
             raise ValueError(f"page revisions[{index}] base text checksum does not match")
@@ -279,7 +286,7 @@ def apply_document_page_revisions(
     revision_checksum = hashlib.sha256(
         json.dumps(audit, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
-    return NormalizedDocument(
+    revised_document = NormalizedDocument(
         content=content,
         media_type=document.media_type,
         source_path=document.source_path,
@@ -287,8 +294,35 @@ def apply_document_page_revisions(
         page_count=document.page_count,
         bookmarks=document.bookmarks,
         warnings=document.warnings,
+        metadata=document.metadata,
+    )
+    final_pages = {
+        page_number: normalized_document_page_text(revised_document, page_number)
+        for page_number in range(1, document.page_count + 1)
+    }
+    quality = _revised_document_quality(
+        document.metadata.get("quality"),
+        first_before_pages,
+        final_pages,
+        document.page_count,
+    )
+    warnings = [
+        warning
+        for warning in document.warnings
+        if _CONTENT_QUALITY_WARNING_RE.fullmatch(warning) is None
+    ]
+    warnings.extend(_content_quality_warnings(quality, document.page_count))
+    return NormalizedDocument(
+        content=content,
+        media_type=document.media_type,
+        source_path=document.source_path,
+        checksum=document.checksum,
+        page_count=document.page_count,
+        bookmarks=document.bookmarks,
+        warnings=tuple(warnings),
         metadata={
             **document.metadata,
+            "quality": quality,
             "text_revision_count": len(audit),
             "text_revision_pages": sorted(reviewed_pages),
             "text_revision_checksum": revision_checksum,
@@ -1143,7 +1177,11 @@ def _page_quality(text: str) -> dict[str, Any]:
         "corrupt": (
             private_use / denominator >= 0.02
             or control / denominator >= 0.01
-            or replacement / denominator >= 0.01
+            # U+FFFD is emitted only when the extractor cannot decode a glyph.
+            # Even one occurrence makes the page unsuitable as an exact source
+            # reference, so it must be recoverable and reported by page rather
+            # than being hidden by a document-scale density threshold.
+            or replacement > 0
         ),
     }
 
@@ -1158,6 +1196,9 @@ def _document_quality(page_texts: Sequence[str]) -> dict[str, Any]:
     denominator = max(characters, 1)
     sparse_pages = [index for index, item in enumerate(page_stats, start=1) if item["sparse"]]
     corrupt_pages = [index for index, item in enumerate(page_stats, start=1) if item["corrupt"]]
+    replacement_pages = [
+        index for index, item in enumerate(page_stats, start=1) if item["replacement_characters"]
+    ]
     fused_pages = [index for index, item in enumerate(page_stats, start=1) if item["fused_text"]]
     lexical_damage_pages = [
         index for index, item in enumerate(page_stats, start=1) if item["lexically_damaged"]
@@ -1184,11 +1225,153 @@ def _document_quality(page_texts: Sequence[str]) -> dict[str, Any]:
         "control_character_count": control,
         "control_ratio": round(control / denominator, 6),
         "replacement_character_count": replacement,
+        "replacement_character_page_count": len(replacement_pages),
+        "replacement_character_pages": replacement_pages,
         "replacement_ratio": round(replacement / denominator, 6),
         "text_page_coverage": round(
             (len(page_stats) - len(sparse_pages)) / max(len(page_stats), 1), 6
         ),
     }
+
+
+def _revised_document_quality(
+    baseline: Any,
+    before_pages: Mapping[int, str],
+    after_pages: Mapping[int, str],
+    page_count: int,
+) -> dict[str, Any]:
+    """Update extraction quality only for pages changed by accepted revisions.
+
+    Older documents may not carry a quality baseline; those use the explicit
+    full-content fallback so their returned quality remains meaningful.
+    """
+
+    required_baseline_fields = {
+        "character_count",
+        "non_whitespace_character_count",
+        "private_use_character_count",
+        "control_character_count",
+        "replacement_character_count",
+        "sparse_pages",
+        "corrupt_text_pages",
+        "fused_text_pages",
+        "lexical_damage_pages",
+        "replacement_character_pages",
+    }
+    numeric_fields = {
+        "character_count",
+        "non_whitespace_character_count",
+        "private_use_character_count",
+        "control_character_count",
+        "replacement_character_count",
+    }
+    category_fields = {
+        "sparse_pages",
+        "corrupt_text_pages",
+        "fused_text_pages",
+        "lexical_damage_pages",
+        "replacement_character_pages",
+    }
+    valid_baseline = isinstance(baseline, Mapping) and required_baseline_fields.issubset(baseline)
+    if valid_baseline:
+        valid_baseline = all(
+            isinstance(baseline[field], int)
+            and not isinstance(baseline[field], bool)
+            and baseline[field] >= 0
+            for field in numeric_fields
+        ) and all(
+            isinstance(baseline[field], (list, tuple))
+            and all(
+                isinstance(page, int) and not isinstance(page, bool) and 1 <= page <= page_count
+                for page in baseline[field]
+            )
+            and len(set(baseline[field])) == len(baseline[field])
+            for field in category_fields
+        )
+    if not valid_baseline:
+        return _document_quality(
+            [
+                after_pages.get(page, "") if page in after_pages else ""
+                for page in range(1, page_count + 1)
+            ]
+        )
+    quality = dict(baseline)
+    before_stats = {page: _page_quality(text) for page, text in before_pages.items()}
+    after_stats = {page: _page_quality(text) for page, text in after_pages.items()}
+    numeric_fields = {
+        "character_count": "characters",
+        "non_whitespace_character_count": "non_whitespace_characters",
+        "private_use_character_count": "private_use_characters",
+        "control_character_count": "control_characters",
+        "replacement_character_count": "replacement_characters",
+    }
+    for document_field, page_field in numeric_fields.items():
+        value = quality.get(document_field)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            quality[document_field] = value + sum(
+                after_stats[page][page_field] - before_stats[page][page_field]
+                for page in before_stats
+            )
+
+    categories = {
+        "sparse_pages": ("sparse", "sparse_page_count"),
+        "corrupt_text_pages": ("corrupt", "corrupt_text_page_count"),
+        "fused_text_pages": ("fused_text", "fused_text_page_count"),
+        "lexical_damage_pages": ("lexically_damaged", "lexical_damage_page_count"),
+        "replacement_character_pages": ("replacement_characters", None),
+    }
+    for pages_field, (page_field, count_field) in categories.items():
+        members = {int(page) for page in quality.get(pages_field, []) if isinstance(page, int)}
+        for page, before in before_stats.items():
+            after = after_stats[page]
+            if bool(before[page_field]) != bool(after[page_field]):
+                if after[page_field]:
+                    members.add(page)
+                else:
+                    members.discard(page)
+        quality[pages_field] = sorted(members)
+        if count_field is not None:
+            quality[count_field] = len(members)
+    if "character_count" in quality and "private_use_character_count" in quality:
+        denominator = max(int(quality["character_count"]), 1)
+        for count_field, ratio_field in (
+            ("private_use_character_count", "private_use_ratio"),
+            ("control_character_count", "control_ratio"),
+            ("replacement_character_count", "replacement_ratio"),
+        ):
+            if count_field in quality:
+                quality[ratio_field] = round(quality[count_field] / denominator, 6)
+    if "sparse_pages" in quality:
+        quality["text_page_count"] = page_count - len(quality["sparse_pages"])
+        quality["sparse_page_count"] = len(quality["sparse_pages"])
+        quality["text_page_coverage"] = round(quality["text_page_count"] / max(page_count, 1), 6)
+    suspect = set(quality.get("sparse_pages", []))
+    suspect.update(quality.get("corrupt_text_pages", []))
+    suspect.update(quality.get("fused_text_pages", []))
+    suspect.update(quality.get("lexical_damage_pages", []))
+    quality["suspect_pages"] = sorted(suspect)
+    quality["suspect_page_count"] = len(suspect)
+    return quality
+
+
+def _content_quality_warnings(quality: Mapping[str, Any], page_count: int) -> list[str]:
+    """Return warnings derived solely from normalized page content quality."""
+
+    warnings: list[str] = []
+    unresolved_corrupt = list(quality["corrupt_text_pages"])
+    if unresolved_corrupt:
+        warnings.append(
+            f"text layer remains corrupt on {len(unresolved_corrupt)}/{page_count} pages"
+        )
+    unresolved_lexical_damage = list(quality["lexical_damage_pages"])
+    if unresolved_lexical_damage:
+        warnings.append(
+            "text layer remains lexically damaged on "
+            f"{len(unresolved_lexical_damage)}/{page_count} pages"
+        )
+    if quality["text_page_coverage"] < 0.9:
+        warnings.append(f"usable text covers only {quality['text_page_count']}/{page_count} pages")
+    return warnings
 
 
 def _repair_pdf_word_break_noncharacters(
@@ -2095,29 +2278,169 @@ def _layout_reading_order_text(layout: OcrPageLayout) -> tuple[str, bool]:
         columns: list[list[OcrTextBlock]],
         spanning: list[OcrTextBlock],
     ) -> list[OcrTextBlock]:
+        def nested_two_column_order(column: list[OcrTextBlock]) -> list[OcrTextBlock]:
+            """Order a bounded two-column region nested inside one wide column."""
+
+            ordinary_order = sorted(column, key=lambda block: (block.y0, block.x0))
+            if len(column) < 10:
+                return ordinary_order
+            local_start = min(block.x0 for block in column)
+            local_end = max(block.x1 for block in column)
+            local_width = local_end - local_start
+            if local_width <= 0:
+                return ordinary_order
+            boundary = local_start + local_width / 2
+            local_gutter = max(6.0, local_width * 0.025)
+            nested_columns: list[list[OcrTextBlock]] = [[], []]
+            dividers: list[OcrTextBlock] = []
+            for block in column:
+                center = (block.x0 + block.x1) / 2
+                block_width = block.x1 - block.x0
+                crosses_boundary = (
+                    block.x0 < boundary - local_gutter and block.x1 > boundary + local_gutter
+                )
+                if block_width >= local_width * 0.6 or (
+                    crosses_boundary and block_width >= local_width * 0.2
+                ):
+                    dividers.append(block)
+                    continue
+                nested_index = 0 if center < boundary else 1
+                nested_columns[nested_index].append(block)
+            # A short heading can introduce the return to wide prose without
+            # itself crossing the local gutter.  If it begins only after the
+            # neighboring narrow column has ended and leads directly into a
+            # genuinely wide block, keep that heading and its subtitle with
+            # the following wide region instead of the narrow list above it.
+            for nested_index, nested in enumerate(nested_columns):
+                other = nested_columns[1 - nested_index]
+                if not nested or not other or not dividers:
+                    continue
+                other_bottom = max(block.y1 for block in other)
+                for candidate in sorted(nested, key=lambda block: (block.y0, block.x0)):
+                    if candidate.y0 <= other_bottom or not _looks_like_all_caps_heading(
+                        candidate.text
+                    ):
+                        continue
+                    following_dividers = [
+                        divider for divider in dividers if divider.y0 > candidate.y0
+                    ]
+                    if not following_dividers:
+                        continue
+                    first_wide_y = min(divider.y0 for divider in following_dividers)
+                    promoted = [
+                        block for block in nested if candidate.y0 <= block.y0 < first_wide_y
+                    ]
+                    if not promoted:
+                        continue
+                    nested_columns[nested_index] = [
+                        block for block in nested if block not in promoted
+                    ]
+                    dividers.extend(promoted)
+                    break
+            if not dividers or any(len(nested) < 4 for nested in nested_columns):
+                return ordinary_order
+            nested_extents = [vertical_extent(nested) for nested in nested_columns]
+            nested_overlap = min(end for _start, end in nested_extents) - max(
+                start for start, _end in nested_extents
+            )
+            if nested_overlap < max(36.0, height * 0.06):
+                return ordinary_order
+            if not (
+                median(block.x1 for block in nested_columns[0]) + local_gutter
+                < median(block.x0 for block in nested_columns[1])
+            ):
+                return ordinary_order
+
+            ordered_nested = [
+                sorted(nested, key=lambda block: (block.y0, block.x0)) for nested in nested_columns
+            ]
+            first_heading_indexes = [
+                next(
+                    (
+                        index
+                        for index, block in enumerate(nested)
+                        if _looks_like_all_caps_heading(block.text)
+                    ),
+                    None,
+                )
+                for nested in ordered_nested
+            ]
+            if all(
+                heading_index is not None and heading_index > 0
+                for heading_index in first_heading_indexes
+            ):
+                left_heading = int(first_heading_indexes[0])
+                right_heading = int(first_heading_indexes[1])
+                ordered_nested = [
+                    ordered_nested[0][:left_heading],
+                    ordered_nested[1][:right_heading],
+                    ordered_nested[0][left_heading:],
+                    ordered_nested[1][right_heading:],
+                ]
+            result: list[OcrTextBlock] = []
+            remaining = [block for nested in nested_columns for block in nested]
+            for divider in sorted(dividers, key=lambda block: (block.y0, block.x0)):
+                divider_center = (divider.y0 + divider.y1) / 2
+                prior = [block for block in remaining if (block.y0 + block.y1) / 2 < divider_center]
+                remaining = [block for block in remaining if block not in prior]
+                prior_ids = {id(block) for block in prior}
+                for nested in ordered_nested:
+                    result.extend(block for block in nested if id(block) in prior_ids)
+                result.append(divider)
+            remaining_ids = {id(block) for block in remaining}
+            for nested in ordered_nested:
+                result.extend(block for block in nested if id(block) in remaining_ids)
+            return result
+
+        ordered_columns = [
+            (
+                nested_two_column_order(column)
+                if len(columns) == 2
+                else sorted(column, key=lambda block: (block.y0, block.x0))
+            )
+            for column in columns
+        ]
+        if len(columns) == 2 and not spanning:
+            # A full-height primary column can wrap into the lower part of the
+            # adjacent column while a short, floating sidebar occupies its top.
+            # Reading each whole column in sequence puts that sidebar between an
+            # unfinished sentence and its lowercase continuation.  Reorder only
+            # when the geometry and punctuation both support that interpretation.
+            primary = sorted(columns[0], key=lambda block: (block.y0, block.x0))
+            adjacent = sorted(columns[1], key=lambda block: (block.y0, block.x0))
+            adjacent_chunks: list[list[OcrTextBlock]] = []
+            current_chunk: list[OcrTextBlock] = []
+            current_bottom = 0.0
+            chunk_gap = max(72.0, height * 0.1)
+            for block in adjacent:
+                if current_chunk and block.y0 - current_bottom > chunk_gap:
+                    adjacent_chunks.append(current_chunk)
+                    current_chunk = []
+                current_chunk.append(block)
+                current_bottom = max(current_bottom, block.y1)
+            if current_chunk:
+                adjacent_chunks.append(current_chunk)
+            continuation = adjacent_chunks[-1] if len(adjacent_chunks) > 1 else []
+            first_continuation = continuation[0].text.lstrip() if continuation else ""
+            primary_tail = primary[-1].text.rstrip() if primary else ""
+            if primary_tail.endswith((",", "-", "–", "—")) and first_continuation[:1].islower():
+                ordered_columns = [
+                    primary,
+                    [block for chunk in [continuation, *adjacent_chunks[:-1]] for block in chunk],
+                ]
         result: list[OcrTextBlock] = []
         remaining = [block for column in columns for block in column]
         for divider in sorted(spanning, key=lambda block: (block.y0, block.x0)):
             divider_center = (divider.y0 + divider.y1) / 2
             prior = [block for block in remaining if (block.y0 + block.y1) / 2 < divider_center]
             remaining = [block for block in remaining if block not in prior]
-            for column in columns:
-                column_ids = {id(block) for block in column}
-                result.extend(
-                    sorted(
-                        (block for block in prior if id(block) in column_ids),
-                        key=lambda block: (block.y0, block.x0),
-                    )
-                )
+            prior_ids = {id(block) for block in prior}
+            for column in ordered_columns:
+                result.extend(block for block in column if id(block) in prior_ids)
             result.append(divider)
-        for column in columns:
-            column_ids = {id(block) for block in column}
-            result.extend(
-                sorted(
-                    (block for block in remaining if id(block) in column_ids),
-                    key=lambda block: (block.y0, block.x0),
-                )
-            )
+        remaining_ids = {id(block) for block in remaining}
+        for column in ordered_columns:
+            result.extend(block for block in column if id(block) in remaining_ids)
         return result
 
     ordered_blocks: list[OcrTextBlock] = []
@@ -2746,22 +3069,7 @@ class PdfDocumentConverter:
             visual_headings,
             self.layout_profile,
         )
-        warnings = list(structure_warnings)
-        unresolved_corrupt = list(quality["corrupt_text_pages"])
-        if unresolved_corrupt:
-            warnings.append(
-                f"text layer remains corrupt on {len(unresolved_corrupt)}/{len(pages)} pages"
-            )
-        unresolved_lexical_damage = list(quality["lexical_damage_pages"])
-        if unresolved_lexical_damage:
-            warnings.append(
-                "text layer remains lexically damaged on "
-                f"{len(unresolved_lexical_damage)}/{len(pages)} pages"
-            )
-        if quality["text_page_coverage"] < 0.9:
-            warnings.append(
-                f"usable text covers only {quality['text_page_count']}/{len(pages)} pages"
-            )
+        warnings = [*structure_warnings, *_content_quality_warnings(quality, len(pages))]
         return NormalizedDocument(
             content=content,
             media_type="application/pdf",
@@ -2863,8 +3171,7 @@ def _read_normalized_document_cache(
             value.get("schema") == _DOCUMENT_CACHE_SCHEMA
             and value.get("checksum") == checksum
             and value.get("profile") == profile
-            and value.get("content_checksum")
-            == hashlib.sha256(content.encode("utf-8")).hexdigest()
+            and value.get("content_checksum") == hashlib.sha256(content.encode("utf-8")).hexdigest()
         ):
             return NormalizedDocument(
                 content=content,

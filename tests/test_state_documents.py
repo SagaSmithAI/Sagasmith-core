@@ -53,6 +53,7 @@ from sagasmith_core.documents import (
     RapidOcrProvider,
     _bookmark_ocr_candidate_pages,
     _cache_profile,
+    _document_quality,
     _layout_reading_order_text,
     _looks_like_corrupt_visual_heading,
     _ocr_page_layout,
@@ -606,6 +607,118 @@ def test_layout_reading_order_keeps_columns_contiguous() -> None:
     assert ocr_layout_text(layout) == (text, used_columns)
 
 
+def test_layout_reading_order_keeps_staggered_column_continuations_together() -> None:
+    """A floating sidebar must not split an unfinished primary-column sentence."""
+
+    layout = OcrPageLayout(
+        page_number=151,
+        width=600,
+        height=800,
+        blocks=(
+            OcrTextBlock("main one", 1.0, 40, 90, 250, 110),
+            OcrTextBlock("SIDEBAR", 1.0, 340, 90, 550, 110),
+            OcrTextBlock("main two", 1.0, 40, 120, 250, 140),
+            OcrTextBlock("sidebar one", 1.0, 340, 120, 550, 140),
+            OcrTextBlock("main three", 1.0, 40, 150, 250, 170),
+            OcrTextBlock("sidebar two", 1.0, 340, 150, 550, 170),
+            OcrTextBlock("main four", 1.0, 40, 180, 250, 200),
+            OcrTextBlock("sidebar three", 1.0, 340, 180, 550, 200),
+            OcrTextBlock("main five", 1.0, 40, 210, 250, 230),
+            OcrTextBlock("main six", 1.0, 40, 240, 250, 260),
+            OcrTextBlock("main seven", 1.0, 40, 270, 250, 290),
+            OcrTextBlock("main clause,", 1.0, 40, 300, 250, 320),
+            OcrTextBlock("continues here.", 1.0, 340, 340, 550, 360),
+            OcrTextBlock("NEXT SECTION", 1.0, 340, 370, 550, 390),
+        ),
+    )
+
+    text, used_columns = _layout_reading_order_text(layout)
+
+    assert used_columns is True
+    assert text.splitlines() == [
+        "main one",
+        "main two",
+        "main three",
+        "main four",
+        "main five",
+        "main six",
+        "main seven",
+        "main clause,",
+        "continues here.",
+        "NEXT SECTION",
+        "SIDEBAR",
+        "sidebar one",
+        "sidebar two",
+        "sidebar three",
+    ]
+
+
+def test_layout_reading_order_preserves_nested_mixed_width_columns() -> None:
+    """Each wide column may contain its own bounded two-column list region."""
+
+    layout = OcrPageLayout(
+        page_number=13,
+        width=800,
+        height=800,
+        blocks=(
+            OcrTextBlock("left intro one", 1.0, 40, 40, 340, 60),
+            OcrTextBlock("left intro two", 1.0, 40, 70, 340, 90),
+            OcrTextBlock("left list one", 1.0, 40, 140, 150, 160),
+            OcrTextBlock("left list two", 1.0, 40, 170, 150, 190),
+            OcrTextBlock("left list three", 1.0, 40, 200, 150, 220),
+            OcrTextBlock("left list four", 1.0, 40, 230, 150, 250),
+            OcrTextBlock("left list five", 1.0, 40, 260, 150, 280),
+            OcrTextBlock("left neighbor one", 1.0, 230, 140, 340, 160),
+            OcrTextBlock("left neighbor two", 1.0, 230, 170, 340, 190),
+            OcrTextBlock("left neighbor three", 1.0, 230, 200, 340, 220),
+            OcrTextBlock("left neighbor four", 1.0, 230, 230, 340, 250),
+            OcrTextBlock("right prefix one", 1.0, 440, 40, 550, 60),
+            OcrTextBlock("right prefix two", 1.0, 440, 70, 550, 90),
+            OcrTextBlock("RIGHT LEFT SECTION", 1.0, 440, 100, 550, 120),
+            OcrTextBlock("right left item one", 1.0, 440, 130, 550, 150),
+            OcrTextBlock("right left item two", 1.0, 440, 160, 550, 180),
+            OcrTextBlock("neighbor prefix one", 1.0, 630, 40, 740, 60),
+            OcrTextBlock("neighbor prefix two", 1.0, 630, 70, 740, 90),
+            OcrTextBlock("RIGHT NEIGHBOR SECTION", 1.0, 630, 100, 740, 120),
+            OcrTextBlock("neighbor item one", 1.0, 630, 130, 740, 150),
+            OcrTextBlock("neighbor item two", 1.0, 630, 160, 740, 180),
+            OcrTextBlock("RIGHT SECTION", 1.0, 440, 190, 550, 210),
+            OcrTextBlock("right body one", 1.0, 440, 220, 740, 240),
+            OcrTextBlock("right body two", 1.0, 440, 250, 740, 270),
+        ),
+    )
+
+    text, used_columns = _layout_reading_order_text(layout)
+
+    assert used_columns is True
+    assert text.splitlines() == [
+        "left intro one",
+        "left intro two",
+        "left list one",
+        "left list two",
+        "left list three",
+        "left list four",
+        "left list five",
+        "left neighbor one",
+        "left neighbor two",
+        "left neighbor three",
+        "left neighbor four",
+        "right prefix one",
+        "right prefix two",
+        "neighbor prefix one",
+        "neighbor prefix two",
+        "RIGHT LEFT SECTION",
+        "right left item one",
+        "right left item two",
+        "RIGHT NEIGHBOR SECTION",
+        "neighbor item one",
+        "neighbor item two",
+        "RIGHT SECTION",
+        "right body one",
+        "right body two",
+    ]
+
+
 def test_layout_reading_order_uses_offset_crop_box_text_extent() -> None:
     blocks = []
     for row, y in enumerate((90, 120, 150, 180), 1):
@@ -823,6 +936,169 @@ def test_page_locator_reuses_one_marker_index() -> None:
     assert locator.page_for_offset(content.index("first")) == 1
     assert locator.page_for_offset(content.index("second")) == 2
     assert locator.page_for_offset(len(content)) == 20
+
+
+def _write_synthetic_pdf(path: Path, page_count: int) -> None:
+    pypdf = pytest.importorskip("pypdf")
+    writer = pypdf.PdfWriter()
+    for _ in range(page_count):
+        writer.add_blank_page(width=200, height=100)
+    with path.open("wb") as stream:
+        writer.write(stream)
+
+
+def test_pdf_converter_reports_a_single_replacement_character_as_corrupt(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "single-replacement.pdf"
+    _write_synthetic_pdf(source, 2)
+    damaged = "Reliable synthetic source prose. " * 80 + "\ufffd"
+    intact = "The second synthetic page remains fully readable. " * 80
+    monkeypatch.setattr(
+        "sagasmith_core.documents._extract_pdfium_pages",
+        lambda _source, _profile: ([damaged, intact], {}, [1, 2]),
+    )
+
+    document = PdfDocumentConverter().convert(source)
+
+    assert document.metadata["initial_quality"]["replacement_character_pages"] == [1]
+    assert document.metadata["initial_quality"]["corrupt_text_pages"] == [1]
+    assert document.metadata["quality"]["replacement_character_page_count"] == 1
+    assert document.metadata["quality"]["corrupt_text_page_count"] == 1
+    assert "text layer remains corrupt on 1/2 pages" in document.warnings
+
+
+def test_pdf_converter_selectively_recovers_replacement_pages(tmp_path, monkeypatch) -> None:
+    source = tmp_path / "selective-replacement.pdf"
+    _write_synthetic_pdf(source, 3)
+    damaged_one = "First synthetic page has one undecodable glyph. " * 70 + "\ufffd"
+    intact = "The middle synthetic page remains fully readable. " * 70
+    damaged_three = "Third synthetic page has one undecodable glyph. " * 70 + "\ufffd"
+    monkeypatch.setattr(
+        "sagasmith_core.documents._extract_pdfium_pages",
+        lambda _source, _profile: ([damaged_one, intact, damaged_three], {}, [1, 2, 3]),
+    )
+
+    class RecoveringOcr:
+        name = "recovering-replacement"
+
+        def __init__(self) -> None:
+            self.pages: list[int] = []
+
+        def extract(self, path, *, page_numbers=None):
+            del path
+            self.pages = list(page_numbers or [])
+            return [
+                "Recovered synthetic source text without undecodable glyphs. " * 70
+                for _ in self.pages
+            ]
+
+    provider = RecoveringOcr()
+    document = PdfDocumentConverter(ocr_provider=provider).convert(source)
+
+    assert provider.pages == [1, 3]
+    assert document.metadata["initial_quality"]["replacement_character_pages"] == [1, 3]
+    assert document.metadata["ocr_pages"] == [1, 3]
+    assert document.metadata["quality"]["replacement_character_pages"] == []
+    assert document.metadata["quality"]["corrupt_text_pages"] == []
+    assert "\ufffd" not in document.content
+
+
+def test_pdf_converter_rejects_truncated_replacement_ocr_and_keeps_warning(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "rejected-replacement.pdf"
+    _write_synthetic_pdf(source, 2)
+    damaged = "Synthetic source text must remain recoverable and traceable. " * 70 + "\ufffd"
+    intact = "The second synthetic page remains fully readable. " * 70
+    monkeypatch.setattr(
+        "sagasmith_core.documents._extract_pdfium_pages",
+        lambda _source, _profile: ([damaged, intact], {}, [1, 2]),
+    )
+
+    class TruncatingOcr:
+        name = "truncating-replacement"
+
+        def extract(self, path, *, page_numbers=None):
+            del path
+            assert page_numbers == [1]
+            return ["Too short"]
+
+    document = PdfDocumentConverter(ocr_provider=TruncatingOcr()).convert(source)
+
+    assert document.metadata["ocr_pages"] == []
+    assert document.metadata["ocr_rejected_pages"] == [1]
+    assert document.metadata["quality"]["replacement_character_pages"] == [1]
+    assert document.metadata["quality"]["corrupt_text_page_count"] == 1
+    assert "text layer remains corrupt on 1/2 pages" in document.warnings
+    assert "\ufffd" in document.content
+
+
+def test_pdf_replacement_recovery_replays_from_the_extraction_cache(tmp_path, monkeypatch) -> None:
+    source = tmp_path / "cached-replacement.pdf"
+    _write_synthetic_pdf(source, 2)
+    damaged = "Cached synthetic source text includes one undecodable glyph. " * 70 + "\ufffd"
+    intact = "The second synthetic page remains fully readable. " * 70
+    extraction_calls = 0
+
+    def extract(_source, _profile):
+        nonlocal extraction_calls
+        extraction_calls += 1
+        return [damaged, intact], {}, [1, 2]
+
+    monkeypatch.setattr("sagasmith_core.documents._extract_pdfium_pages", extract)
+
+    class CountingOcr:
+        name = "cached-replacement"
+
+        def __init__(self) -> None:
+            self.calls: list[list[int]] = []
+
+        def extract(self, path, *, page_numbers=None):
+            del path
+            self.calls.append(list(page_numbers or []))
+            return ["Recovered cached source text without undecodable glyphs. " * 70]
+
+    provider = CountingOcr()
+    cache = tmp_path / "cache"
+    first = PdfDocumentConverter(ocr_provider=provider, extraction_cache_dir=cache).convert(source)
+    second = PdfDocumentConverter(ocr_provider=provider, extraction_cache_dir=cache).convert(source)
+
+    assert extraction_calls == 1
+    assert provider.calls == [[1]]
+    assert first.metadata["extraction_cache_hit"] is False
+    assert second.metadata["extraction_cache_hit"] is True
+    assert second.metadata["initial_quality"]["replacement_character_pages"] == [1]
+    assert second.metadata["quality"]["corrupt_text_pages"] == []
+
+
+def test_pdf_converter_does_not_flag_documents_without_replacements(tmp_path, monkeypatch) -> None:
+    source = tmp_path / "intact-synthetic.pdf"
+    _write_synthetic_pdf(source, 2)
+    pages = [
+        "The first synthetic page contains ordinary readable source text. " * 70,
+        "The second synthetic page contains ordinary readable source text. " * 70,
+    ]
+    monkeypatch.setattr(
+        "sagasmith_core.documents._extract_pdfium_pages",
+        lambda _source, _profile: (pages, {}, [1, 2]),
+    )
+
+    class UnexpectedOcr:
+        name = "unexpected"
+
+        def extract(self, path, *, page_numbers=None):
+            del path, page_numbers
+            pytest.fail("OCR should not run for fully readable synthetic pages")
+
+    document = PdfDocumentConverter(ocr_provider=UnexpectedOcr()).convert(source)
+
+    assert document.metadata["initial_quality"]["replacement_character_count"] == 0
+    assert document.metadata["quality"]["replacement_character_pages"] == []
+    assert document.metadata["quality"]["corrupt_text_page_count"] == 0
+    assert document.metadata["ocr_pages"] == []
 
 
 def test_pdf_converter_ocr_replaces_only_suspect_pages(tmp_path) -> None:
@@ -1081,6 +1357,141 @@ def test_agent_page_revision_is_bounded_audited_and_non_destructive() -> None:
     assert revised.metadata["text_revisions"][0]["replacements"] == revision["replacements"]
 
 
+def test_agent_page_revision_recomputes_content_quality_without_rewriting_provenance() -> None:
+    clean_text = "A" * 90
+    original = NormalizedDocument(
+        content=(
+            f"<!-- page: 1 -->\n\n{clean_text}\ufffd\n"
+            f"<!-- page: 2 -->\n\n{clean_text}\ufffd\n"
+        ),
+        media_type="application/pdf",
+        source_path="rules.pdf",
+        checksum="a" * 64,
+        page_count=2,
+        warnings=(
+            "no structural headings were recovered",
+            "text layer remains corrupt on 2/2 pages",
+        ),
+        metadata={
+            "initial_quality": {"replacement_character_count": 2, "corrupt_text_pages": [1, 2]},
+            "quality": {"replacement_character_count": 2, "corrupt_text_pages": [1, 2]},
+            "ocr_pages": [1, 2],
+            "ocr_rejected_pages": [],
+            "extraction_cache_hit": True,
+        },
+    )
+    page_text = normalized_document_page_text(original, 1)
+    revision = {
+        "source_checksum": original.checksum,
+        "page_number": 1,
+        "base_text_sha256": hashlib.sha256(page_text.encode("utf-8")).hexdigest(),
+        "replacements": [{"old": "\ufffd", "new": "e"}],
+        "reviewer": "agent:ocr-editor",
+        "review_method": "agent",
+        "rationale": "The rendered page confirms the missing glyph.",
+        "evidence": {"basis": "rendered_page", "rendered_image_checksum": "b" * 64},
+    }
+
+    revised = apply_document_page_revisions(original, [revision])
+
+    assert revised.metadata["quality"]["replacement_character_count"] == 1
+    assert revised.metadata["quality"]["replacement_character_pages"] == [2]
+    assert revised.metadata["quality"]["corrupt_text_pages"] == [2]
+    assert revised.warnings == (
+        "no structural headings were recovered",
+        "text layer remains corrupt on 1/2 pages",
+    )
+    assert revised.metadata["initial_quality"] == original.metadata["initial_quality"]
+    assert revised.metadata["ocr_pages"] == original.metadata["ocr_pages"]
+    assert revised.metadata["ocr_rejected_pages"] == original.metadata["ocr_rejected_pages"]
+    assert revised.metadata["extraction_cache_hit"] is True
+    assert revised.metadata["text_revisions"][0]["base_text_sha256"] == revision["base_text_sha256"]
+
+
+def test_agent_page_revision_does_not_reclassify_unreviewed_quality_pages() -> None:
+    lexical_page = " ".join(["ordinary"] * 210) + "\n" + "\n".join("- B" for _ in range(8))
+    page_one = "A" * 90 + "\ufffd"
+    original = NormalizedDocument(
+        content=f"<!-- page: 1 -->\n\n{page_one}\n<!-- page: 2 -->\n\n{lexical_page}\n",
+        media_type="application/pdf",
+        source_path="rules.pdf",
+        checksum="a" * 64,
+        page_count=2,
+        warnings=("text layer remains corrupt on 1/2 pages",),
+        metadata={"quality": _document_quality([page_one, lexical_page])},
+    )
+    baseline = dict(original.metadata["quality"])
+    baseline["lexical_damage_pages"] = []
+    baseline["lexical_damage_page_count"] = 0
+    baseline["suspect_pages"] = baseline["corrupt_text_pages"]
+    baseline["suspect_page_count"] = len(baseline["suspect_pages"])
+    original = NormalizedDocument(**{**original.__dict__, "metadata": {"quality": baseline}})
+    page_text = normalized_document_page_text(original, 1)
+    revision = {
+        "source_checksum": original.checksum,
+        "page_number": 1,
+        "base_text_sha256": hashlib.sha256(page_text.encode("utf-8")).hexdigest(),
+        "replacements": [{"old": "\ufffd", "new": "ee"}],
+        "reviewer": "agent:ocr-editor",
+        "review_method": "agent",
+        "rationale": "The rendered page confirms the missing glyph.",
+        "evidence": {"basis": "rendered_page"},
+    }
+
+    revised = apply_document_page_revisions(original, [revision])
+
+    assert revised.metadata["quality"]["lexical_damage_pages"] == []
+    assert revised.metadata["quality"]["lexical_damage_page_count"] == 0
+    assert revised.metadata["quality"]["character_count"] == baseline["character_count"] + 1
+
+
+def test_agent_page_revisions_use_first_before_and_final_after_quality() -> None:
+    original = NormalizedDocument(
+        content="<!-- page: 1 -->\n\n" + ("A" * 90) + "\ufffd\ufffd\n",
+        media_type="application/pdf",
+        source_path="rules.pdf",
+        checksum="a" * 64,
+        page_count=1,
+    )
+    original = NormalizedDocument(
+        **{
+            **original.__dict__,
+            "metadata": {
+                "quality": _document_quality([normalized_document_page_text(original, 1)])
+            },
+        }
+    )
+    first_page = normalized_document_page_text(original, 1)
+    first = {
+        "source_checksum": original.checksum,
+        "page_number": 1,
+        "base_text_sha256": hashlib.sha256(first_page.encode("utf-8")).hexdigest(),
+        "replacements": [{"old": "\ufffd\ufffd", "new": "ee\ufffd"}],
+        "reviewer": "agent:ocr-editor",
+        "review_method": "agent",
+        "rationale": "The rendered page confirms the missing glyph.",
+        "evidence": {"basis": "rendered_page"},
+    }
+    after_first = apply_document_page_revisions(original, [first])
+    second_page = normalized_document_page_text(after_first, 1)
+    second = {
+        **first,
+        "base_text_sha256": hashlib.sha256(second_page.encode("utf-8")).hexdigest(),
+        "replacements": [{"old": "\ufffd", "new": "e"}],
+    }
+
+    revised = apply_document_page_revisions(original, [first, second])
+
+    assert revised.metadata["quality"]["replacement_character_count"] == 0
+    assert (
+        revised.metadata["quality"]["character_count"]
+        == original.metadata["quality"]["character_count"] + 1
+    )
+    assert revised.metadata["text_revision_count"] == 2
+    assert revised.metadata["text_revisions"][0]["base_text_sha256"] == first["base_text_sha256"]
+    assert revised.metadata["text_revisions"][1]["base_text_sha256"] == second["base_text_sha256"]
+
+
 def test_agent_page_revision_rejects_ambiguous_or_stale_source_text() -> None:
     document = NormalizedDocument(
         content="<!-- page: 1 -->\n\nrod and rod\n",
@@ -1153,6 +1564,14 @@ def test_agent_page_revision_can_refine_the_same_unpublished_page() -> None:
     assert "##### ROD OF RULERSHIP" in revised.content
     assert revised.metadata["text_revision_pages"] == [1]
     assert revised.metadata["text_revision_count"] == 2
+    assert revised.metadata["text_revision_checksum"] == hashlib.sha256(
+        json.dumps(
+            revised.metadata["text_revisions"],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def test_agent_page_revision_can_recover_empty_page_from_rendered_evidence() -> None:
@@ -1187,6 +1606,8 @@ def test_agent_page_revision_can_recover_empty_page_from_rendered_evidence() -> 
 
     assert "# CLASS FEATURES" in normalized_document_page_text(revised, 1)
     assert normalized_document_page_text(revised, 2) == "\n\n# Existing\n"
+    assert revised.metadata["quality"]["sparse_pages"] == [2]
+    assert revised.warnings == ("usable text covers only 1/2 pages",)
 
     with pytest.raises(ValueError, match="requires rendered_page evidence"):
         apply_document_page_revisions(
