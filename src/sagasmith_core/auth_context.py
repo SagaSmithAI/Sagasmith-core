@@ -544,14 +544,16 @@ class AuthContextNonceGuard:
 
     def remember(self, context: AuthContext, *, now: datetime | None = None) -> None:
         current = (now or datetime.now(UTC)).astimezone(UTC)
-        cutoff = current - self.retention
+        retain_until = max(current, context.issued_at) + self.retention
+        if context.expires_at is not None:
+            retain_until = max(retain_until, context.expires_at)
         issuer = context.workload_identity or context.host
         key = f"{issuer}:{context.nonce}"
         with self._lock:
-            for nonce in [item for item, timestamp in self._seen.items() if timestamp < cutoff]:
+            for nonce in [item for item, expiry in self._seen.items() if expiry < current]:
                 self._seen.pop(nonce, None)
             if key in self._seen:
                 raise ValueError("auth context nonce was already used")
             if len(self._seen) >= self.maximum_entries:
                 raise RuntimeError("auth context replay guard is at capacity")
-            self._seen[key] = current
+            self._seen[key] = retain_until

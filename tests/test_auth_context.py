@@ -149,6 +149,25 @@ def test_delegated_auth_context_round_trip_and_receipt() -> None:
     assert receipt["revision"] == 18
 
 
+def test_nonce_guard_retains_live_delegations_past_default_retention() -> None:
+    guard = AuthContextNonceGuard()
+    envelope = delegated(expires_at=NOW + timedelta(minutes=15))
+    guard.remember(verify_auth_context(envelope, SECRET, now=NOW), now=NOW)
+    later = NOW + timedelta(minutes=6)
+    context = verify_auth_context(envelope, SECRET, now=later)
+    with pytest.raises(ValueError, match="already used"):
+        guard.remember(context, now=later)
+
+
+def test_nonce_guard_releases_expired_delegation_capacity() -> None:
+    guard = AuthContextNonceGuard(maximum_entries=1)
+    envelope = delegated(expires_at=NOW + timedelta(minutes=15))
+    guard.remember(verify_auth_context(envelope, SECRET, now=NOW), now=NOW)
+    later = NOW + timedelta(minutes=16)
+    fresh = delegated(issued_at=later, expires_at=later + timedelta(minutes=5))
+    guard.remember(verify_auth_context(fresh, SECRET, now=later), now=later)
+
+
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
