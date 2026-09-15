@@ -112,6 +112,10 @@ def test_rule_vectors_are_delivered_only_after_sql_commit(database) -> None:
     )
 
     assert hits
+    assert store.upserts == []
+    VectorIndexJobService(database).flush(
+        store, system_id="dnd5e", collection="rules", embedding_model="fake"
+    )
     assert len(store.upserts) == 1
     assert len(store.queries) == 1
     assert {job.status for job in vector_jobs(database)} == {"completed"}
@@ -147,6 +151,10 @@ def test_module_vectors_are_delivered_only_after_sql_commit(database) -> None:
     )
 
     assert hits
+    assert store.upserts == []
+    VectorIndexJobService(database).flush(
+        store, system_id="dnd5e", collection="modules", embedding_model="fake"
+    )
     assert len(store.upserts) == 1
     assert len(store.queries) == 1
     assert store.upserts[0]["name"] == "modules"
@@ -181,6 +189,13 @@ def test_failed_vector_delivery_is_retry_safe(database) -> None:
     stable_ids = store.upserts[0]["ids"]
 
     store.fail_upsert = False
+    deferred = service.flush(
+        store, system_id="dnd5e", collection="rules", embedding_model="fake"
+    )
+    assert deferred.attempted == 0
+    with database.transaction() as session:
+        for job in session.scalars(select(VectorIndexJob)):
+            job.next_attempt_at = 0
     completed = service.flush(
         store,
         system_id="dnd5e",

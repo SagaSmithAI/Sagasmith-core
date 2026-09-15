@@ -4844,7 +4844,7 @@ def test_restore_head_recaptures_materialized_actors_and_actor_knowledge(databas
             "summary": "",
             "sheet": {"hp": 7},
             "notes": {},
-            "revision": 1,
+            "revision": characters.get(actor.id).revision,
         }
     ]
     assert [item["knowledge_key"] for item in document["payload"]["actor_knowledge"]] == [
@@ -5114,7 +5114,7 @@ def test_state_mutation_atomically_transfers_complete_actor_knowledge(database) 
     assert copied[0].knowledge_key == f"body-thief.{target.id}.{known.id}"
     assert copied[0].proposition == known.proposition
     assert copied[0].subject_ref == known.subject_ref
-    assert copied[0].cause == "body_thief"
+    assert copied[0].cause == "knowledge_transfer"
     assert copied[0].disclosure_scope == "dm"
     assert CampaignService(database).get(campaign.id).state == {"phase": "body-taken"}
     with pytest.raises(ValueError, match="restore a snapshot or branch"):

@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-from sagasmith_core.models import Base
+from sagasmith_core.migrations.schema_20260713_07 import Base
 
 revision = "20260713_07"
 down_revision = "20260712_06"

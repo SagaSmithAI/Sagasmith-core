@@ -267,6 +267,7 @@ def fts5_hits(
     *,
     limit: int = 20,
     weights: tuple[float, ...] | None = None,
+    allowed_ids=None,
 ) -> list[str]:
     """Run an FTS5 MATCH and return chunk IDs ranked by BM25.
 
@@ -292,13 +293,15 @@ def fts5_hits(
             order_clause = f"bm25({table}, {weights_str})"
         else:
             order_clause = "rank"
+        import sqlalchemy as sa
+
+        indexed = sa.table(table, sa.column("chunk_id"))
+        statement = sa.select(indexed.c.chunk_id).where(sa.text(f"{table} MATCH :query"))
+        if allowed_ids is not None:
+            statement = statement.where(indexed.c.chunk_id.in_(allowed_ids))
         rows = session.execute(
-            __import__("sqlalchemy").text(
-                f"SELECT chunk_id FROM {table} "
-                f"WHERE {table} MATCH :query "
-                f"ORDER BY {order_clause} LIMIT :limit"
-            ),
-            {"query": match_expr, "limit": limit},
+            statement.order_by(sa.text(order_clause), indexed.c.chunk_id).limit(limit),
+            {"query": match_expr},
         )
         return [str(row[0]) for row in rows]
     except OperationalError as error:

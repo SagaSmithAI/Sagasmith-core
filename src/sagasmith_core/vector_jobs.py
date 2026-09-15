@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, Sequence
 
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
 
 from sagasmith_core.database import Database
 from sagasmith_core.models import ModuleChunk, RuleChunk, VectorIndexJob
@@ -35,25 +37,37 @@ class VectorIndexJobService:
         profile: Any = None,
         job_ids: Sequence[str] | None = None,
         limit: int = 1_000,
+        lease_seconds: float = 120,
+        max_attempts: int = 5,
     ) -> VectorFlushResult:
         if limit < 1:
             raise ValueError("vector job limit must be positive")
+        if lease_seconds <= 0 or max_attempts < 1:
+            raise ValueError("lease and attempt limits must be positive")
+        self.database.require_independent_work()
+        now = time.time()
+        token = str(uuid.uuid4())
         if not embedding_model.strip():
             raise ValueError("embedding_model must identify one immutable model revision")
         profile_model = getattr(profile, "storage_model_id", None)
         if profile_model is not None and str(profile_model) != embedding_model:
             raise ValueError("vector profile does not match the requested embedding_model")
         selected_ids = tuple(dict.fromkeys(str(item) for item in job_ids or ()))
-        with self.database.transaction() as session:
+        with self.database.transaction(immediate=True) as session:
             statement = (
                 select(VectorIndexJob)
                 .where(
                     VectorIndexJob.system_id == system_id,
                     VectorIndexJob.collection == collection,
                     VectorIndexJob.operation == "upsert",
-                    VectorIndexJob.status.in_(("pending", "failed")),
-                    VectorIndexJob.payload["embedding_model"].as_string()
-                    == embedding_model,
+                    or_(
+                        VectorIndexJob.status.in_(("pending", "failed")),
+                        (VectorIndexJob.status == "delivering")
+                        & (VectorIndexJob.lease_until < now),
+                    ),
+                    VectorIndexJob.next_attempt_at <= now,
+                    VectorIndexJob.attempts < max_attempts,
+                    VectorIndexJob.payload["embedding_model"].as_string() == embedding_model,
                 )
                 .order_by(VectorIndexJob.created_at, VectorIndexJob.id)
                 .limit(limit)
@@ -61,6 +75,25 @@ class VectorIndexJobService:
             if selected_ids:
                 statement = statement.where(VectorIndexJob.id.in_(selected_ids))
             jobs = list(session.scalars(statement))
+            claimed = []
+            for job in jobs:
+                changed = session.execute(
+                    update(VectorIndexJob)
+                    .where(
+                        VectorIndexJob.id == job.id,
+                        or_(VectorIndexJob.lease_token.is_(None), VectorIndexJob.lease_until < now),
+                        VectorIndexJob.attempts == job.attempts,
+                    )
+                    .values(
+                        status="delivering",
+                        lease_token=token,
+                        lease_until=now + lease_seconds,
+                        attempts=VectorIndexJob.attempts + 1,
+                    )
+                )
+                if changed.rowcount:
+                    claimed.append(job)
+            jobs = claimed
             deliverable: list[tuple[str, str, list[float], dict[str, Any], str]] = []
             invalid: dict[str, str] = {}
             for job in jobs:
@@ -91,8 +124,9 @@ class VectorIndexJobService:
                 )
             for job in jobs:
                 if job.id in invalid:
-                    job.status = "failed"
-                    job.attempts += 1
+                    job.status = "permanent_failure"
+                    job.lease_token = None
+                    job.lease_until = None
                     job.error = invalid[job.id]
 
         delivered_ids: list[str] = []
@@ -116,14 +150,20 @@ class VectorIndexJobService:
         if deliverable_ids:
             with self.database.transaction() as session:
                 for job in session.scalars(
-                    select(VectorIndexJob).where(VectorIndexJob.id.in_(deliverable_ids))
+                    select(VectorIndexJob).where(
+                        VectorIndexJob.id.in_(deliverable_ids), VectorIndexJob.lease_token == token
+                    )
                 ):
-                    job.attempts += 1
+                    job.lease_token = None
+                    job.lease_until = None
                     if job.id in delivered_ids:
                         job.status = "completed"
                         job.error = ""
                     else:
-                        job.status = "failed"
+                        job.status = (
+                            "permanent_failure" if job.attempts >= max_attempts else "failed"
+                        )
+                        job.next_attempt_at = time.time() + min(3600, 2**job.attempts)
                         job.error = delivery_error or "vector delivery failed"
         return VectorFlushResult(
             attempted=len(jobs),

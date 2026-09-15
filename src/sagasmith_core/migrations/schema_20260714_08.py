@@ -1,26 +1,26 @@
-"""System-neutral ORM models for campaigns, characters, rules, and modules."""
+"""Frozen schema from f35c282c86a7b1a9ef32ea98cb1040c5dd265573; do not import live ORM here."""
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import (
     JSON,
     Boolean,
     DateTime,
-    Float,
     ForeignKey,
     Index,
     Integer,
-    LargeBinary,
     String,
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from sagasmith_core.clock import operational_utcnow
+
+def utcnow() -> datetime:
+    return datetime.now(UTC)
 
 
 class Base(DeclarativeBase):
@@ -28,13 +28,11 @@ class Base(DeclarativeBase):
 
 
 class TimestampMixin:
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=operational_utcnow
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=operational_utcnow,
-        onupdate=operational_utcnow,
+        default=utcnow,
+        onupdate=utcnow,
     )
 
 
@@ -54,7 +52,6 @@ class Campaign(TimestampMixin, Base):
     settings: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     state: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     revision: Mapped[int] = mapped_column(Integer, default=1)
-    event_sequence: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     active_branch_id: Mapped[str | None] = mapped_column(
         ForeignKey("campaign_branches.id", ondelete="SET NULL"), nullable=True, index=True
     )
@@ -110,7 +107,6 @@ class RuleSource(TimestampMixin, Base):
         nullable=True,
     )
     checksum: Mapped[str] = mapped_column(String(64), nullable=False)
-    active: Mapped[bool] = mapped_column(Boolean, default=True)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
@@ -194,8 +190,7 @@ class ModuleChapter(Base):
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     content: Mapped[str] = mapped_column(Text, default="")
     source_path: Mapped[str] = mapped_column(Text, default="")
-    # Import/index lifecycle only. Play progress lives exclusively in SceneProgress.
-    status: Mapped[str] = mapped_column(String(32), default="indexed")
+    status: Mapped[str] = mapped_column(String(32), default="locked")
     page_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
     page_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
@@ -281,10 +276,6 @@ class SceneProgress(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(32), default="current")
     progress: Mapped[int] = mapped_column(Integer, default=0)
     current_room: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    # ``current_room`` is a human-readable label. A profile may additionally
-    # provide a stable spatial location key so room
-    # renames do not break branch-local progress or a temporary battle map.
-    current_location_key: Mapped[str | None] = mapped_column(String(300), nullable=True)
     state_version: Mapped[int] = mapped_column(Integer, default=1)
     state: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
@@ -303,166 +294,6 @@ class CampaignRuleProfile(TimestampMixin, Base):
     options: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
-class RulePack(TimestampMixin, Base):
-    """Installed rule-extension identity; executable versions are immutable rows."""
-
-    __tablename__ = "rule_packs"
-
-    id: Mapped[str] = mapped_column(String(200), primary_key=True)
-    system_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    title: Mapped[str] = mapped_column(String(300), nullable=False)
-    namespace: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
-    provenance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-
-
-class RulePackPayload(Base):
-    """One canonical compressed payload shared by exact rule-pack versions."""
-
-    __tablename__ = "rule_pack_payloads"
-
-    id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    payload_codec: Mapped[str] = mapped_column(String(32), nullable=False)
-    uncompressed_size: Mapped[int] = mapped_column(Integer, nullable=False)
-    compressed_payload: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=operational_utcnow
-    )
-
-
-class RulePackVersion(Base):
-    """One content-addressed, validated rule-pack version."""
-
-    __tablename__ = "rule_pack_versions"
-
-    pack_id: Mapped[str] = mapped_column(
-        ForeignKey("rule_packs.id", ondelete="CASCADE"), primary_key=True
-    )
-    version: Mapped[str] = mapped_column(String(64), primary_key=True)
-    payload_document_id: Mapped[str] = mapped_column(
-        ForeignKey("rule_pack_payloads.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
-    payload_document: Mapped[RulePackPayload] = relationship(lazy="joined")
-    checksum: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    status: Mapped[str] = mapped_column(String(32), default="draft", index=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=operational_utcnow
-    )
-
-    def _decoded_payload(self) -> dict[str, Any]:
-        from sagasmith_core.state_document_storage import decode_state_document
-
-        cached = self.__dict__.get("_decoded_rule_pack_payload")
-        if cached is None:
-            cached = decode_state_document(
-                document_id=self.payload_document.id,
-                payload_codec=self.payload_document.payload_codec,
-                uncompressed_size=self.payload_document.uncompressed_size,
-                compressed_payload=bytes(self.payload_document.compressed_payload),
-            )
-            self.__dict__["_decoded_rule_pack_payload"] = cached
-        return cached
-
-    @property
-    def manifest(self) -> dict[str, Any]:
-        return dict(self._decoded_payload()["manifest"])
-
-    @property
-    def artifacts(self) -> list[dict[str, Any]]:
-        return [dict(item) for item in self._decoded_payload()["artifacts"]]
-
-    @property
-    def mechanics(self) -> list[dict[str, Any]]:
-        return [dict(item) for item in self._decoded_payload()["mechanics"]]
-
-    @property
-    def provenance(self) -> dict[str, Any]:
-        return dict(self._decoded_payload()["provenance"])
-
-    @property
-    def validation_report(self) -> dict[str, Any]:
-        return dict(self._decoded_payload()["validation_report"])
-
-
-class CampaignRuleActivation(TimestampMixin, Base):
-    """Exact rule-pack lock selected by one campaign branch."""
-
-    __tablename__ = "campaign_rule_activations"
-    __table_args__ = (
-        UniqueConstraint(
-            "campaign_id", "branch_id", "pack_id", name="uq_campaign_branch_rule_pack"
-        ),
-    )
-
-    campaign_id: Mapped[str] = mapped_column(
-        ForeignKey("campaigns.id", ondelete="CASCADE"), primary_key=True
-    )
-    branch_id: Mapped[str] = mapped_column(
-        ForeignKey("campaign_branches.id", ondelete="CASCADE"), primary_key=True
-    )
-    pack_id: Mapped[str] = mapped_column(
-        ForeignKey("rule_packs.id", ondelete="RESTRICT"), primary_key=True
-    )
-    version: Mapped[str] = mapped_column(String(64), nullable=False)
-    checksum: Mapped[str] = mapped_column(String(64), nullable=False)
-    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    options: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-
-
-class ContentAddon(TimestampMixin, Base):
-    """System-neutral identity for an installed portable addon release."""
-
-    __tablename__ = "content_addons"
-
-    id: Mapped[str] = mapped_column(String(200), primary_key=True)
-    system_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    title: Mapped[str] = mapped_column(String(300), nullable=False)
-
-
-class ContentAddonVersion(Base):
-    """Immutable addon manifest and exact embedded-component lock."""
-
-    __tablename__ = "content_addon_versions"
-
-    addon_id: Mapped[str] = mapped_column(
-        ForeignKey("content_addons.id", ondelete="CASCADE"), primary_key=True
-    )
-    version: Mapped[str] = mapped_column(String(64), primary_key=True)
-    manifest: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    components: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
-    package: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    provenance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    checksum: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    status: Mapped[str] = mapped_column(String(32), default="imported", index=True)
-    validation_report: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=operational_utcnow
-    )
-
-
-class CampaignAddonActivation(TimestampMixin, Base):
-    """Exact addon lock selected by one campaign branch."""
-
-    __tablename__ = "campaign_addon_activations"
-    __table_args__ = (
-        UniqueConstraint("campaign_id", "branch_id", "addon_id", name="uq_campaign_branch_addon"),
-    )
-
-    campaign_id: Mapped[str] = mapped_column(
-        ForeignKey("campaigns.id", ondelete="CASCADE"), primary_key=True
-    )
-    branch_id: Mapped[str] = mapped_column(
-        ForeignKey("campaign_branches.id", ondelete="CASCADE"), primary_key=True
-    )
-    addon_id: Mapped[str] = mapped_column(
-        ForeignKey("content_addons.id", ondelete="RESTRICT"), primary_key=True
-    )
-    version: Mapped[str] = mapped_column(String(64), nullable=False)
-    checksum: Mapped[str] = mapped_column(String(64), nullable=False)
-    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    component_locks: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
-    options: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-
-
 class CampaignEvent(Base):
     __tablename__ = "campaign_events"
     __table_args__ = (
@@ -478,7 +309,6 @@ class CampaignEvent(Base):
     sequence: Mapped[int] = mapped_column(Integer, nullable=False)
     event_type: Mapped[str] = mapped_column(String(64), default="narrative")
     summary: Mapped[str] = mapped_column(Text, default="")
-    retrieval_text: Mapped[str] = mapped_column(Text, default="")
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     audience_scope: Mapped[str] = mapped_column(String(200), default="dm")
     branch_id: Mapped[str | None] = mapped_column(
@@ -487,49 +317,7 @@ class CampaignEvent(Base):
     committed_snapshot_id: Mapped[str | None] = mapped_column(
         ForeignKey("campaign_snapshots.id", ondelete="SET NULL"), nullable=True, index=True
     )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=operational_utcnow
-    )
-
-
-class CampaignEventParticipant(Base):
-    """Immutable actor participation index for one campaign event.
-
-    ``actor_id`` deliberately is not a foreign key. Snapshot restore rebuilds
-    character rows in place, while historical event participants must remain
-    addressable by their stable actor ids throughout that operation.
-    """
-
-    __tablename__ = "campaign_event_participants"
-    __table_args__ = (
-        UniqueConstraint(
-            "event_id",
-            "actor_id",
-            "role",
-            name="uq_campaign_event_participant_role",
-        ),
-        Index("ix_campaign_event_participant_actor", "actor_id", "event_id"),
-    )
-
-    event_id: Mapped[str] = mapped_column(
-        ForeignKey("campaign_events.id", ondelete="CASCADE"), primary_key=True
-    )
-    actor_id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    role: Mapped[str] = mapped_column(String(32), primary_key=True)
-
-
-class StateDocument(Base):
-    """One canonical compressed document shared by reversible revision references."""
-
-    __tablename__ = "state_documents"
-
-    id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    payload_codec: Mapped[str] = mapped_column(String(32), nullable=False)
-    uncompressed_size: Mapped[int] = mapped_column(Integer, nullable=False)
-    compressed_payload: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=operational_utcnow
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class StateRevision(Base):
@@ -555,32 +343,18 @@ class StateRevision(Base):
     operation: Mapped[str] = mapped_column(String(100), nullable=False)
     entity_type: Mapped[str] = mapped_column(String(64), nullable=False)
     entity_id: Mapped[str] = mapped_column(String(100), nullable=False)
-    before_document_id: Mapped[str | None] = mapped_column(
-        ForeignKey("state_documents.id", ondelete="RESTRICT"), nullable=True, index=True
-    )
-    after_document_id: Mapped[str | None] = mapped_column(
-        ForeignKey("state_documents.id", ondelete="RESTRICT"), nullable=True, index=True
-    )
+    before: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    after: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     applied: Mapped[bool] = mapped_column(Boolean, default=True)
     redoable: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=operational_utcnow
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class MutationGroup(Base):
     """One user-visible state mutation, possibly touching many entities."""
 
     __tablename__ = "mutation_groups"
-    __table_args__ = (
-        Index("ix_mutation_group_campaign_sequence", "campaign_id", "sequence"),
-        UniqueConstraint(
-            "campaign_id",
-            "branch_id",
-            "idempotency_key",
-            name="uq_mutation_group_branch_idempotency",
-        ),
-    )
+    __table_args__ = (Index("ix_mutation_group_campaign_sequence", "campaign_id", "sequence"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     campaign_id: Mapped[str] = mapped_column(
@@ -594,40 +368,9 @@ class MutationGroup(Base):
     actor: Mapped[str] = mapped_column(String(100), default="runtime")
     idempotency_key: Mapped[str | None] = mapped_column(String(200), nullable=True, index=True)
     request_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    reversible: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
     applied: Mapped[bool] = mapped_column(Boolean, default=True)
     redoable: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=operational_utcnow
-    )
-
-
-class RuleResolutionReceipt(Base):
-    """Immutable evidence of the exact rules applied by one state mutation."""
-
-    __tablename__ = "rule_resolution_receipts"
-    __table_args__ = (
-        Index("ix_rule_receipt_campaign_created", "campaign_id", "created_at"),
-        Index("ix_rule_receipt_campaign_mechanic", "campaign_id", "mechanic_id"),
-    )
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    campaign_id: Mapped[str] = mapped_column(
-        ForeignKey("campaigns.id", ondelete="CASCADE"), index=True
-    )
-    branch_id: Mapped[str | None] = mapped_column(
-        ForeignKey("campaign_branches.id", ondelete="SET NULL"), nullable=True, index=True
-    )
-    mutation_group_id: Mapped[str] = mapped_column(
-        ForeignKey("mutation_groups.id", ondelete="CASCADE"), index=True
-    )
-    ruleset_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    mechanic_id: Mapped[str] = mapped_column(String(300), nullable=False)
-    event: Mapped[str] = mapped_column(String(100), nullable=False)
-    receipt: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=operational_utcnow
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class IdempotencyRecord(Base):
@@ -642,9 +385,6 @@ class IdempotencyRecord(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     scope: Mapped[str] = mapped_column(String(200), nullable=False)
     key: Mapped[str] = mapped_column(String(200), nullable=False)
-    branch_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
-    scope_type: Mapped[str] = mapped_column(String(32), default="branch")
-    identity: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     campaign_id: Mapped[str | None] = mapped_column(
         ForeignKey("campaigns.id", ondelete="CASCADE"), nullable=True, index=True
     )
@@ -653,15 +393,7 @@ class IdempotencyRecord(Base):
         ForeignKey("mutation_groups.id", ondelete="SET NULL"), nullable=True
     )
     response: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=operational_utcnow
-    )
-
-
-class AuthNonceRecord(Base):
-    __tablename__ = "auth_nonce_records"
-    key: Mapped[str] = mapped_column(String(64), primary_key=True)
-    expires_at: Mapped[float] = mapped_column(Float, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class Principal(Base):
@@ -677,9 +409,7 @@ class Principal(Base):
     external_id: Mapped[str] = mapped_column(String(200), nullable=False)
     display_name: Mapped[str] = mapped_column(String(200), default="")
     is_service: Mapped[bool] = mapped_column(Boolean, default=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=operational_utcnow
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class CampaignMembership(Base):
@@ -697,9 +427,7 @@ class CampaignMembership(Base):
         ForeignKey("principals.id", ondelete="CASCADE"), primary_key=True
     )
     role: Mapped[str] = mapped_column(String(32), default="player")
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=operational_utcnow
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class ActorGrant(Base):
@@ -719,9 +447,7 @@ class ActorGrant(Base):
     actor_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     can_control: Mapped[bool] = mapped_column(Boolean, default=False)
     can_view_private: Mapped[bool] = mapped_column(Boolean, default=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=operational_utcnow
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class AuditLog(Base):
@@ -744,14 +470,15 @@ class AuditLog(Base):
     actor: Mapped[str] = mapped_column(String(100), default="runtime")
     before: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     after: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=operational_utcnow
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class CampaignSnapshot(Base):
     __tablename__ = "campaign_snapshots"
-    __table_args__ = (UniqueConstraint("campaign_id", "slot", name="uq_campaign_snapshot_slot"),)
+    __table_args__ = (
+        UniqueConstraint("campaign_id", "slot", name="uq_campaign_snapshot_slot"),
+        Index("ix_campaign_snapshot_head", "campaign_id", "is_head"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     campaign_id: Mapped[str] = mapped_column(
@@ -767,24 +494,16 @@ class CampaignSnapshot(Base):
     )
     slot: Mapped[int] = mapped_column(Integer, nullable=False)
     label: Mapped[str] = mapped_column(String(300), default="")
-    schema_version: Mapped[int] = mapped_column(Integer, default=9)
-    compressed_payload: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-    payload_codec: Mapped[str] = mapped_column(String(32), nullable=False)
-    uncompressed_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, default=1)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     checksum: Mapped[str] = mapped_column(String(64), nullable=False)
-    record_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
     recap: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=operational_utcnow
-    )
+    is_head: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class CampaignMemory(TimestampMixin, Base):
     __tablename__ = "campaign_memories"
-    __table_args__ = (
-        UniqueConstraint("campaign_id", "fact_key", name="uq_campaign_memory_fact_key"),
-        Index("ix_campaign_memory_subject_ref", "campaign_id", "subject_ref"),
-    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     campaign_id: Mapped[str] = mapped_column(
@@ -793,9 +512,6 @@ class CampaignMemory(TimestampMixin, Base):
     )
     kind: Mapped[str] = mapped_column(String(64), default="fact")
     subject: Mapped[str] = mapped_column(String(300), default="")
-    fact_key: Mapped[str] = mapped_column(String(300), nullable=False)
-    subject_ref: Mapped[str] = mapped_column(String(300), default="")
-    predicate: Mapped[str] = mapped_column(String(200), default="")
 
 
 class MemoryRevision(Base):
@@ -816,22 +532,18 @@ class MemoryRevision(Base):
     )
     content: Mapped[str] = mapped_column(Text, nullable=False)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    status: Mapped[str] = mapped_column(String(32), default="active")
-    valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    valid_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    source_event_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
-    importance: Mapped[int] = mapped_column(Integer, default=3)
-    disclosure_scope: Mapped[str] = mapped_column(String(32), default="dm")
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=operational_utcnow
-    )
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class CampaignBranch(TimestampMixin, Base):
-    """A playable campaign timeline; branches are refs, never destructive restores."""
+    """A playable D&D timeline; branches are refs, never destructive restores."""
 
     __tablename__ = "campaign_branches"
-    __table_args__ = (UniqueConstraint("campaign_id", "name", name="uq_campaign_branch_name"),)
+    __table_args__ = (
+        UniqueConstraint("campaign_id", "name", name="uq_campaign_branch_name"),
+        Index("ix_campaign_branch_current", "campaign_id", "is_current"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     campaign_id: Mapped[str] = mapped_column(
@@ -844,6 +556,7 @@ class CampaignBranch(TimestampMixin, Base):
     head_snapshot_id: Mapped[str | None] = mapped_column(
         ForeignKey("campaign_snapshots.id", ondelete="SET NULL"), nullable=True
     )
+    is_current: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class BranchFactHead(Base):
@@ -910,9 +623,7 @@ class ActorKnowledge(Base):
     actor_id: Mapped[str] = mapped_column(String(36), index=True)
     knowledge_key: Mapped[str] = mapped_column(String(200), nullable=False)
     subject_ref: Mapped[str] = mapped_column(String(200), default="")
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=operational_utcnow
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class ActorKnowledgeRevision(Base):
@@ -933,9 +644,7 @@ class ActorKnowledgeRevision(Base):
     )
     cause: Mapped[str] = mapped_column(String(64), default="witnessed")
     disclosure_scope: Mapped[str] = mapped_column(String(200), default="dm")
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=operational_utcnow
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class BranchActorKnowledgeHead(Base):
@@ -987,9 +696,6 @@ class VectorIndexJob(TimestampMixin, Base):
     operation: Mapped[str] = mapped_column(String(32), default="upsert")
     status: Mapped[str] = mapped_column(String(32), default="pending")
     attempts: Mapped[int] = mapped_column(Integer, default=0)
-    lease_token: Mapped[str | None] = mapped_column(String(36), nullable=True)
-    lease_until: Mapped[float | None] = mapped_column(Float, nullable=True)
-    next_attempt_at: Mapped[float] = mapped_column(Float, default=0)
     error: Mapped[str] = mapped_column(Text, default="")
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
@@ -1008,116 +714,3 @@ class ModuleAsset(TimestampMixin, Base):
     checksum: Mapped[str] = mapped_column(String(64), nullable=False)
     normalized_content: Mapped[str | None] = mapped_column(Text, nullable=True)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-
-
-class ModuleContentReview(TimestampMixin, Base):
-    """Immutable source-backed transcription of content absent from the PDF text layer."""
-
-    __tablename__ = "module_content_reviews"
-    __table_args__ = (
-        Index("ix_module_content_review_key", "module_id", "content_key", "created_at"),
-    )
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    module_id: Mapped[str] = mapped_column(
-        ForeignKey("module_sources.id", ondelete="CASCADE"),
-        index=True,
-    )
-    scene_id: Mapped[str] = mapped_column(
-        ForeignKey("module_scenes.id", ondelete="CASCADE"),
-        index=True,
-    )
-    content_key: Mapped[str] = mapped_column(String(200), nullable=False)
-    content_kind: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
-    normalized_content: Mapped[str] = mapped_column(Text, nullable=False)
-    checksum: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    evidence_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-
-
-class ModuleActorBinding(TimestampMixin, Base):
-    """Portable cast/preset association owned by an immutable module revision."""
-
-    __tablename__ = "module_actor_bindings"
-    __table_args__ = (
-        UniqueConstraint(
-            "module_id",
-            "scene_key",
-            "character_id",
-            "binding_kind",
-            "role",
-            name="uq_module_actor_binding",
-        ),
-        Index("ix_module_actor_binding_scene", "module_id", "scene_key"),
-    )
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    module_id: Mapped[str] = mapped_column(
-        ForeignKey("module_sources.id", ondelete="CASCADE"), index=True
-    )
-    scene_id: Mapped[str | None] = mapped_column(
-        ForeignKey("module_scenes.id", ondelete="CASCADE"), nullable=True, index=True
-    )
-    scene_key: Mapped[str] = mapped_column(String(300), default="")
-    character_id: Mapped[str] = mapped_column(
-        ForeignKey("characters.id", ondelete="CASCADE"), index=True
-    )
-    portable_actor_id: Mapped[str] = mapped_column(String(200), nullable=False)
-    binding_kind: Mapped[str] = mapped_column(String(50), default="cast")
-    role: Mapped[str] = mapped_column(String(200), default="")
-    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-
-
-class ImportJob(TimestampMixin, Base):
-    """Durable authoring workflow state for rulebooks and adventure modules."""
-
-    __tablename__ = "import_jobs"
-    __table_args__ = (
-        Index("ix_import_job_campaign_kind_state", "campaign_id", "kind", "state"),
-        Index("ix_import_job_source", "source_id"),
-    )
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    campaign_id: Mapped[str] = mapped_column(
-        ForeignKey("campaigns.id", ondelete="CASCADE"), index=True
-    )
-    system_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    kind: Mapped[str] = mapped_column(String(32), nullable=False)
-    state: Mapped[str] = mapped_column(String(32), nullable=False, default="staged")
-    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    artifact: Mapped[str] = mapped_column(String(500), nullable=False)
-    artifact_checksum: Mapped[str] = mapped_column(String(64), default="")
-    source_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
-    module_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
-    parser_profile: Mapped[str] = mapped_column(String(100), default="")
-    parser_version: Mapped[str] = mapped_column(String(32), default="")
-    document_codec: Mapped[str] = mapped_column(String(32), nullable=False)
-    document_uncompressed_size: Mapped[int] = mapped_column(Integer, nullable=False)
-    document_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
-    compressed_document: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-    error: Mapped[str] = mapped_column(Text, default="")
-
-    def _document_field(self, name: str) -> Any:
-        from sagasmith_core.import_job_storage import decode_import_job_document
-
-        return decode_import_job_document(self)[name]
-
-    @property
-    def payload(self) -> dict[str, Any]:
-        return dict(self._document_field("payload"))
-
-    @property
-    def inspection(self) -> dict[str, Any]:
-        return dict(self._document_field("inspection"))
-
-    @property
-    def candidates(self) -> list[dict[str, Any]]:
-        return [dict(item) for item in self._document_field("candidates")]
-
-    @property
-    def validation(self) -> dict[str, Any]:
-        return dict(self._document_field("validation"))
-
-    @property
-    def result(self) -> dict[str, Any]:
-        return dict(self._document_field("result"))

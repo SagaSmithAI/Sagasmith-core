@@ -1,5 +1,12 @@
 # SagaSmith Core
 
+## 0.3 execution contracts
+
+See [execution and migration contracts](docs/execution-contracts.md) for explicit
+units of work, monotonic restore versions, operational grants, branch-owned
+receipts, frozen historical schemas, bounded retrieval, vector workers and durable
+nonce protection. Runtime consumers must update their dependency range to 0.3.
+
 [中文](README.md) · [English](README-en.md) · [官网](https://sagasmithai.github.io) · [平台总览](https://github.com/SagaSmithAI/.github/blob/main/profile/README.md) · [SagaSmith Web](https://github.com/SagaSmithAI/SagaSmith-Web) · [内容目录](https://github.com/SagaSmithAI/SagaSmith-dnd-content-library)
 
 **AI 原生 TTRPG 平台的系统无关运行时。** `sagasmith-core` 为规则系统、MCP 服务和 UI 提供持久化战役、角色知识、分支时间线、内容导入、规则包与检索能力；它本身不包含 D&D 或 CoC 规则。

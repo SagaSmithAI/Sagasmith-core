@@ -2,7 +2,7 @@
 
 from alembic import op
 
-from sagasmith_core.models import Base
+from sagasmith_core.migrations.schema_20260718_13 import Base
 
 revision = "20260718_13"
 down_revision = "20260715_12"

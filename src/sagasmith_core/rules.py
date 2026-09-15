@@ -41,7 +41,6 @@ from sagasmith_core.retrieval import (
     structured_score,
 )
 from sagasmith_core.vector import VectorStore
-from sagasmith_core.vector_jobs import VectorIndexJobService
 
 
 @dataclass(frozen=True)
@@ -98,6 +97,13 @@ class RuleService:
         # Activation is authoritative relational state, not caller-controlled
         # source metadata.  Strip the former compatibility shadow.
         source_metadata.pop("import_state", None)
+        parsed = (parser or MarkdownHierarchyParser()).parse(content)
+        prepared_vectors = {}
+        if embedder:
+            self.database.require_independent_work()
+            for section in parsed:
+                texts = [strip_page_markers(chunk.content) for chunk in section.chunks]
+                prepared_vectors[section.ordinal] = embedder.encode(texts)
         with self.database.transaction() as session:
             idempotency = IdempotencyService(self.database)
             idempotency.require_uncommitted_in_session(
@@ -156,7 +162,6 @@ class RuleService:
                 }
                 session.flush()
 
-            parsed = (parser or MarkdownHierarchyParser()).parse(content)
             page_locator = PageLocator(content)
             source_id = str(uuid.uuid4())
             session.add(
@@ -200,7 +205,9 @@ class RuleService:
                 )
                 session.flush()
                 chunk_texts = [strip_page_markers(chunk.content) for chunk in section.chunks]
-                vectors = embedder.encode(chunk_texts) if embedder else [None] * len(chunk_texts)
+                vectors = (
+                    prepared_vectors[section.ordinal] if embedder else [None] * len(chunk_texts)
+                )
                 for chunk, chunk_text, vector in zip(
                     section.chunks, chunk_texts, vectors, strict=True
                 ):
@@ -411,116 +418,117 @@ class RuleService:
                 statement = statement.where(RuleSource.id.in_(source_ids))
             if source_keys:
                 statement = statement.where(RuleSource.source_key.in_(source_keys))
-            rows = session.execute(statement).all()
-        if not rows:
-            return []
+            if not 1 <= top_k <= 100:
+                raise ValueError("top_k must be between 1 and 100")
+            from sqlalchemy import func, or_
 
-        exact = [
-            row
-            for row in rows
-            if row.RuleSection.title.casefold() == query.casefold()
-            or row.RuleSource.title.casefold() == query.casefold()
-        ]
-        exact_ids = {row.RuleChunk.id for row in exact}
-
-        # FTS5 lexical channel — indexed BM25 on SQLite, zero deps
-        fts_ids: list[str] = []
-        with self.database.transaction() as session:
-            fts_ids = fts5_hits(
+            eligible = statement.with_only_columns(RuleChunk.id)
+            budget = max(top_k * 4, 20)
+            exact_ids = list(
+                session.scalars(
+                    eligible.where(
+                        or_(
+                            func.lower(RuleSection.title) == query.lower(),
+                            func.lower(RuleSource.title) == query.lower(),
+                        )
+                    )
+                    .order_by(RuleChunk.id)
+                    .limit(budget)
+                )
+            )
+            lexical = fts5_hits(
                 session,
                 "rule_fts",
                 enriched,
-                limit=max(top_k * 4, 20),
-                weights=(
-                    0.0,  # chunk_id UNINDEXED
-                    5.0,  # source_title
-                    5.0,  # section_title
-                    3.0,  # heading_path
-                    1.0,  # content
-                ),
+                limit=budget,
+                weights=(0.0, 5.0, 5.0, 3.0, 1.0),
+                allowed_ids=eligible,
             )
-            if fts_ids:
-                # Prune to rows that match the filter criteria
-                fts_filtered = [
-                    chunk_id
-                    for chunk_id in fts_ids
-                    if chunk_id in {row.RuleChunk.id for row in rows}
-                ]
-                fts_ids = fts_filtered
-
-        if fts_ids:
-            lexical = fts_ids
-        else:
-            # Fallback: Python-side structured_score when FTS5 unavailable
-            lexical = [
-                row.RuleChunk.id
-                for row in sorted(
-                    rows,
-                    key=lambda row: (
-                        -structured_score(
-                            enriched,
-                            section_title=row.RuleSection.title,
-                            source_title=row.RuleSource.title,
-                            heading_paths=" ".join(row.RuleChunk.heading_path or []),
-                            content=row.RuleChunk.content,
-                        )
-                    ),
-                )
-            ]
-
-        rankings: dict[str, list[str]] = {
-            "exact": list(exact_ids),
-            "lexical": lexical,
-        }
+            fallback_rows = []
+            if not lexical or (embedder and not (vector_store and vector_store.enabled)):
+                # Explicit small-corpus fallback; bounded independently of content size.
+                fallback_rows = list(session.execute(statement.order_by(RuleChunk.id).limit(1000)))
+            if not lexical:
+                lexical = [
+                    row.RuleChunk.id
+                    for row in sorted(
+                        fallback_rows,
+                        key=lambda row: (
+                            -structured_score(
+                                enriched,
+                                section_title=row.RuleSection.title,
+                                source_title=row.RuleSource.title,
+                                heading_paths=" ".join(row.RuleChunk.heading_path or []),
+                                content=row.RuleChunk.content,
+                            ),
+                            row.RuleChunk.id,
+                        ),
+                    )
+                ][:budget]
+        rankings = {"exact": exact_ids, "lexical": lexical}
         if embedder:
             query_vector = embedder.encode([query])[0]
             if vector_store and vector_store.enabled:
-                VectorIndexJobService(self.database).flush(
-                    vector_store,
-                    system_id=system_id,
-                    collection="rules",
-                    embedding_model=embedding_model_identity(embedder),
-                    profile=getattr(embedder, "profile", None),
-                )
-                filters: list[dict[str, Any]] = [{"system_id": system_id}]
-                if edition is not None:
-                    filters.append({"edition": edition})
-                if locale is not None:
-                    filters.append({"locale": locale})
+                filters = [{"system_id": system_id}]
+                for key, value in (("edition", edition), ("locale", locale)):
+                    if value is not None:
+                        filters.append({key: value})
+                for key, values in (("publication_id", publications), ("source_id", source_ids)):
+                    if values:
+                        filters.append({key: {"$in": values}})
                 where = filters[0] if len(filters) == 1 else {"$and": filters}
-                rankings["dense"] = [
-                    item_id
-                    for item_id, _score in vector_store.query(
-                        "rules",
-                        query_embedding=query_vector,
-                        limit=max(top_k * 4, 20),
-                        where=where,
-                        profile=getattr(embedder, "profile", None),
-                    )
-                    if item_id in {row.RuleChunk.id for row in rows}
-                ]
-            else:
-                dense = sorted(
-                    (
-                        (
-                            cosine_similarity(query_vector, row.RuleChunk.embedding_json or []),
-                            row,
+                fetch_limit = budget
+                while True:
+                    candidates = [
+                        item_id
+                        for item_id, _score in vector_store.query(
+                            "rules",
+                            query_embedding=query_vector,
+                            limit=fetch_limit,
+                            where=where,
+                            profile=getattr(embedder, "profile", None),
                         )
-                        for row in rows
-                        if row.RuleChunk.embedding_model == embedding_model_identity(embedder)
-                    ),
-                    key=lambda item: -item[0],
-                )
-                rankings["dense"] = [row.RuleChunk.id for _, row in dense]
-
-        by_id = {row.RuleChunk.id: row for row in rows}
+                    ]
+                    with self.database.transaction() as session:
+                        permitted = set(
+                            session.scalars(eligible.where(RuleChunk.id.in_(candidates)))
+                        )
+                    rankings["dense"] = [key for key in candidates if key in permitted][:budget]
+                    if (
+                        len(rankings["dense"]) >= budget
+                        or len(candidates) < fetch_limit
+                        or fetch_limit >= 4096
+                    ):
+                        break
+                    fetch_limit = min(4096, fetch_limit * 2)
+            else:
+                rankings["dense"] = [
+                    row.RuleChunk.id
+                    for row in sorted(
+                        (
+                            row
+                            for row in fallback_rows
+                            if row.RuleChunk.embedding_model == embedding_model_identity(embedder)
+                        ),
+                        key=lambda row: (
+                            -cosine_similarity(query_vector, row.RuleChunk.embedding_json or []),
+                            row.RuleChunk.id,
+                        ),
+                    )
+                ][:budget]
         fused = reciprocal_rank_fusion(
-            rankings,
-            weights={"exact": 1.5, "lexical": 1.0, "dense": 1.0},
+            rankings, weights={"exact": 1.5, "lexical": 1.0, "dense": 1.0}
         )
+        with self.database.transaction() as session:
+            rows = session.execute(
+                statement.where(RuleChunk.id.in_([key for key, _, _ in fused[:top_k]]))
+            ).all()
+        by_id = {row.RuleChunk.id: row for row in rows}
         hits: list[SearchHit] = []
         for chunk_id, score, retrieval in fused[:top_k]:
-            row = by_id[chunk_id]
+            row = by_id.get(chunk_id)
+            if row is None:
+                continue
             hits.append(
                 SearchHit(
                     id=chunk_id,
@@ -867,6 +875,15 @@ class RuleService:
             raise ValueError("portable canonical_source_key must be resolved before source import")
         if canonical_source_id and not source_value["canonical_source_key"]:
             raise ValueError("canonical_source_id requires portable canonical_source_key evidence")
+        prepared_vectors = {}
+        if embedder:
+            self.database.require_independent_work()
+            for section in source_value["sections"]:
+                texts = [
+                    chunk["content"]
+                    for chunk in sorted(section["chunks"], key=lambda item: item["ordinal"])
+                ]
+                prepared_vectors[section["ordinal"]] = embedder.encode(texts)
         with self.database.transaction() as session:
             existing = session.scalar(
                 select(RuleSource).where(
@@ -1037,7 +1054,9 @@ class RuleService:
                 session.flush()
                 portable_chunks = sorted(section["chunks"], key=lambda item: item["ordinal"])
                 chunk_texts = [chunk["content"] for chunk in portable_chunks]
-                vectors = embedder.encode(chunk_texts) if embedder else [None] * len(chunk_texts)
+                vectors = (
+                    prepared_vectors[section["ordinal"]] if embedder else [None] * len(chunk_texts)
+                )
                 for chunk, vector in zip(portable_chunks, vectors, strict=True):
                     chunk_id = str(uuid.uuid4())
                     chunk_map[chunk["key"]] = chunk_id
@@ -1186,9 +1205,7 @@ class RuleService:
             embedder=embedder,
         )
         portable_keys = [
-            chunk["key"]
-            for section in portable_sections
-            for chunk in section["chunks"]
+            chunk["key"] for section in portable_sections for chunk in section["chunks"]
         ]
         result["chunk_map"] = {
             unified_key: result["chunk_map"][portable_key]

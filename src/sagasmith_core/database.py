@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
+import threading
 from collections.abc import Generator, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +43,27 @@ def alembic_config(database_url: str) -> Config:
     return config
 
 
+def _execution_owner() -> tuple[int, object]:
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        task = None
+    return threading.get_ident(), task
+
+
+@dataclass
+class UnitOfWork:
+    session: Session
+    owner: tuple[int, object]
+    rollback_only: bool = False
+    failure: BaseException | None = None
+    closed: bool = False
+
+    def require_owner(self) -> None:
+        if self.closed or self.owner != _execution_owner():
+            raise RuntimeError("unit of work is closed or belongs to another execution owner")
+
+
 class Database:
     """Own the general TTRPG database and transactional session factory."""
 
@@ -67,6 +91,33 @@ class Database:
             f"sagasmith_database_immediate_{id(self)}",
             default=False,
         )
+        self._ambient_uow: ContextVar[UnitOfWork | None] = ContextVar(
+            f"sagasmith_uow_{id(self)}", default=None
+        )
+
+    def require_independent_work(self) -> None:
+        if self._ambient_uow.get() is not None:
+            raise RuntimeError("external work cannot run inside an uncommitted unit of work")
+
+    @contextmanager
+    def unit_of_work(self, *, immediate: bool = False) -> Iterator[UnitOfWork]:
+        with self.transaction(immediate=immediate):
+            work = self._ambient_uow.get()
+            assert work is not None
+            yield work
+
+    @contextmanager
+    def savepoint(self, work: UnitOfWork) -> Iterator[Session]:
+        work.require_owner()
+        if work is not self._ambient_uow.get():
+            raise RuntimeError("savepoint requires the active unit of work")
+        with work.session.begin_nested():
+            previous = work.rollback_only
+            try:
+                yield work.session
+            except BaseException:
+                work.rollback_only = previous
+                raise
 
     @staticmethod
     def _configure_sqlite_connection(dbapi_connection: Any, _record: Any) -> None:
@@ -89,13 +140,23 @@ class Database:
     def transaction(self, *, immediate: bool = False) -> Iterator[Session]:
         ambient = self._ambient_session.get()
         if ambient is not None:
+            work = self._ambient_uow.get()
+            assert work is not None
+            work.require_owner()
             if immediate and not self._ambient_immediate.get():
                 raise RuntimeError(
                     "an immediate transaction is required before entering this ambient transaction"
                 )
-            yield ambient
+            try:
+                yield ambient
+            except BaseException as error:
+                work.rollback_only = True
+                work.failure = error
+                raise
             return
         session = self.session_factory()
+        work = UnitOfWork(session, _execution_owner())
+        work_token = self._ambient_uow.set(work)
         token = self._ambient_session.set(session)
         immediate_token = self._ambient_immediate.set(immediate)
         try:
@@ -103,7 +164,13 @@ class Database:
                 if immediate and self.engine.dialect.name == "sqlite":
                     session.connection().exec_driver_sql("BEGIN IMMEDIATE")
                 yield session
+                if work.rollback_only:
+                    raise RuntimeError(
+                        "unit of work is rollback-only after a nested failure"
+                    ) from work.failure
         finally:
+            work.closed = True
+            self._ambient_uow.reset(work_token)
             self._ambient_immediate.reset(immediate_token)
             self._ambient_session.reset(token)
             session.close()
