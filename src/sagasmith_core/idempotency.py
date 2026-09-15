@@ -7,7 +7,7 @@ import hashlib
 import json
 import uuid
 import zlib
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any, Callable
 
 from sqlalchemy import select
@@ -98,6 +98,25 @@ def _public_response(stored: dict[str, Any]) -> dict[str, Any]:
 
 
 @dataclass(frozen=True)
+class IdempotencyIdentity:
+    scope_type: str
+    campaign_id: str | None
+    branch_id: str | None
+    timeline_epoch: int | None
+    principal: str
+    operation: str
+
+    def scope(self) -> str:
+        if self.scope_type not in {"campaign", "branch", "content"}:
+            raise ValueError("unknown idempotency scope type")
+        if not self.principal or not self.operation:
+            raise ValueError("idempotency identity requires principal and operation")
+        if self.scope_type == "branch" and (not self.campaign_id or not self.branch_id):
+            raise ValueError("branch idempotency requires campaign and branch")
+        return "identity:" + request_hash(asdict(self))
+
+
+@dataclass(frozen=True)
 class IdempotencyWrite:
     """Persist an exact public replay response with its owning transaction."""
 
@@ -132,6 +151,43 @@ def request_hash(payload: Any) -> str:
 class IdempotencyService:
     def __init__(self, database: Database) -> None:
         self.database = database
+
+    def lookup_identity(self, identity: IdempotencyIdentity, key: str, payload: Any):
+        return self.lookup(identity.scope(), key, payload)
+
+    def remember_identity(
+        self,
+        identity: IdempotencyIdentity,
+        key: str,
+        payload: Any,
+        response: dict[str, Any],
+        *,
+        mutation_group_id: str | None = None,
+    ):
+        scope = identity.scope()
+        with self.database.transaction() as session:
+            if identity.branch_id and identity.campaign_id:
+                campaign = session.get(Campaign, identity.campaign_id)
+                if campaign is None or campaign.active_branch_id != identity.branch_id:
+                    raise ValueError("idempotency identity targets a different active branch")
+            result = self.remember_in_session(
+                session,
+                scope,
+                key,
+                payload,
+                response,
+                campaign_id=identity.campaign_id,
+                mutation_group_id=mutation_group_id,
+            )
+            row = session.scalar(
+                select(IdempotencyRecord).where(
+                    IdempotencyRecord.scope == scope, IdempotencyRecord.key == key
+                )
+            )
+            row.identity = asdict(identity)
+            row.scope_type = identity.scope_type
+            row.branch_id = identity.branch_id
+            return result
 
     def lookup(self, scope: str, key: str, payload: Any) -> IdempotencyResult | None:
         with self.database.transaction() as session:
@@ -222,7 +278,9 @@ class IdempotencyService:
                 if candidate_group is not None:
                     if candidate_group.branch_id == effective_branch_id:
                         matched.append((candidate, candidate_group))
-                elif len(rows) == 1:
+                elif (
+                    candidate.branch_id == effective_branch_id or candidate.scope_type == "campaign"
+                ):
                     matched.append((candidate, None))
             if not matched:
                 raise LookupError(
@@ -270,7 +328,7 @@ class IdempotencyService:
                 _public_response(dict(row.response)),
                 group.id if group is not None else row.mutation_group_id,
                 row.request_hash,
-                group.branch_id if group is not None else None,
+                group.branch_id if group is not None else row.branch_id,
                 entity_revisions,
             )
 
@@ -381,31 +439,33 @@ class IdempotencyService:
                 _public_response(dict(row.response)),
                 row.mutation_group_id,
             )
+        campaign = session.get(Campaign, campaign_id) if campaign_id else None
+        branch_id = campaign.active_branch_id if campaign is not None else None
         if mutation_group_id is None and campaign_id is not None:
             groups = list(
                 session.scalars(
                     select(MutationGroup).where(
                         MutationGroup.campaign_id == campaign_id,
+                        MutationGroup.branch_id == branch_id,
                         MutationGroup.idempotency_key == key,
                         MutationGroup.applied.is_(True),
                     )
                 )
             )
-            scope_parts = set(scope.split(":"))
-            scoped_groups = [
-                group
-                for group in groups
-                if group.branch_id is not None and group.branch_id in scope_parts
-            ]
-            if len(scoped_groups) == 1:
-                mutation_group_id = scoped_groups[0].id
-            elif len(groups) == 1:
+            if len(groups) == 1:
                 mutation_group_id = groups[0].id
+        if mutation_group_id:
+            group = session.get(MutationGroup, mutation_group_id)
+            if group is None or group.campaign_id != campaign_id:
+                raise ValueError("receipt mutation group belongs to another campaign")
+            branch_id = group.branch_id
         row = IdempotencyRecord(
             id=str(uuid.uuid4()),
             scope=scope,
             key=key,
             campaign_id=campaign_id,
+            branch_id=branch_id,
+            scope_type="branch" if campaign_id else "content",
             request_hash=digest,
             mutation_group_id=mutation_group_id,
             response=_stored_response(response),

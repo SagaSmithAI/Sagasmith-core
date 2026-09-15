@@ -52,7 +52,7 @@ class ActorKnowledgeTransfer:
     destination_actor_id: str
     knowledge_key_prefix: str
     knowledge_ids: tuple[str, ...] = ()
-    cause: str = "body_thief"
+    cause: str = "knowledge_transfer"
     disclosure_scope: str = "dm"
 
 
@@ -66,6 +66,16 @@ class StateMutationService:
 
     def __init__(self, database: Database) -> None:
         self.database = database
+
+    def commit(self, campaign_id: str, **command: Any) -> list[RevisionInfo] | None:
+        """Runtime command boundary; replacement inputs carry their decision versions."""
+        if not command.get("operation") or command.get("expected_campaign_revision") is None:
+            raise ValueError("runtime commits require operation and expected campaign revision")
+        if not command.get("idempotency_key") or command.get("idempotency_write") is None:
+            raise ValueError("runtime commits require an exact idempotency receipt")
+        if any(item.expected_revision is None for item in command.get("character_updates") or []):
+            raise ValueError("runtime commits require expected character revisions")
+        return StateMutationService.replace(self, campaign_id, **command)
 
     def replace(
         self,
@@ -87,6 +97,8 @@ class StateMutationService:
         updates = list(character_updates or [])
         knowledge_transfers = list(actor_knowledge_transfers or [])
         receipts = list(rule_receipts or [])
+        if operation is None and (idempotency_key or idempotency_write is not None):
+            raise ValueError("idempotency requires an audited operation")
         ids = [item.character_id for item in updates]
         if len(ids) != len(set(ids)):
             raise ValueError("character updates must not contain duplicate ids")
@@ -245,9 +257,7 @@ class StateMutationService:
                 campaign_id,
                 expected_revision=campaign_base_revision,
                 expected_branch_id=effective_branch_id,
-                values=(
-                    {"state": dict(campaign_state)} if campaign_state is not None else None
-                ),
+                values=({"state": dict(campaign_state)} if campaign_state is not None else None),
                 advance_revision=campaign_state is not None,
             )
             session.expire(campaign)

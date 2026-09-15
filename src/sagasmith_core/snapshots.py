@@ -530,7 +530,8 @@ class SnapshotService:
         actor_grants = list(
             session.scalars(
                 select(ActorGrant)
-                .where(ActorGrant.campaign_id == campaign.id)
+                .where(ActorGrant.campaign_id == campaign.id,
+                       ActorGrant.actor_id.in_([row.id for row in characters]))
                 .order_by(ActorGrant.actor_id, ActorGrant.principal_id)
             )
         )
@@ -999,13 +1000,23 @@ class SnapshotService:
         )
         RulePackService._resolve(session, campaign, branch.id)
 
-        session.execute(delete(ActorGrant).where(ActorGrant.campaign_id == campaign.id))
+        # Operational authorization and concurrency tokens are not story state.
+        live_characters = list(
+            session.scalars(select(Character).where(Character.campaign_id == campaign.id))
+        )
+        campaign.revision = max(
+            [
+                campaign.revision,
+                *(row.revision + 1 for row in live_characters),
+                *(int(item.get("revision", 0)) + 1 for item in payload.get("characters", [])),
+            ]
+        )
         session.execute(delete(Character).where(Character.campaign_id == campaign.id))
         for item in payload.get("characters", []):
-            session.add(Character(campaign_id=campaign.id, **item))
+            session.add(
+                Character(campaign_id=campaign.id, **{**item, "revision": campaign.revision})
+            )
         session.flush()
-        for item in payload["actor_grants"]:
-            session.add(ActorGrant(campaign_id=campaign.id, **item))
 
         session.execute(delete(SceneProgress).where(SceneProgress.campaign_id == campaign.id))
         SnapshotService._restore_module_activations(
@@ -1467,6 +1478,12 @@ class SnapshotService:
         expected_campaign = dict(expected.get("campaign") or {})
         current_campaign["revision"] = expected_campaign.get("revision")
         current["campaign"] = current_campaign
+        current["actor_grants"] = expected.get("actor_grants", [])
+        expected_revisions = {
+            item["id"]: item.get("revision") for item in expected.get("characters", [])
+        }
+        for item in current.get("characters", []):
+            item["revision"] = expected_revisions.get(item["id"])
         if current != expected:
             raise ValueError(
                 "checked-out branch has unsaved changes; create a snapshot before switching"

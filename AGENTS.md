@@ -22,7 +22,8 @@ protocols.
 
 - Put reusable deterministic mechanics in the relevant domain package.
 - Put authoritative state, authorization, random streams, revisions,
-  idempotency, and atomic settlement in the relevant MCP server.
+  idempotency, and atomic settlement in the relevant protocol-independent Runtime.
+  MCP authenticates and adapts that application's commands.
 - Put semantic review and reusable Agent procedures in Skills.
 - Keep book-specific decisions inside the Pack draft, evidence, fixture, or
   metadata that justifies them.

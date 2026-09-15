@@ -113,7 +113,7 @@ def test_actor_lifecycle_retry_rejects_changed_payload(database) -> None:
         service.create(**{**arguments, "name": "Different"})
 
 
-def test_actor_lifecycle_grants_follow_snapshot_branch_checkout(database) -> None:
+def test_actor_lifecycle_grants_remain_operational_across_branch_checkout(database) -> None:
     campaign = CampaignService(database).create(system_id="test", name="Branches")
     access = AccessService(database)
     access.ensure_principal("user:dm")
@@ -168,7 +168,7 @@ def test_actor_lifecycle_grants_follow_snapshot_branch_checkout(database) -> Non
     with database.transaction() as session:
         assert session.scalar(
             select(ActorGrant).where(ActorGrant.actor_id == second.character.id)
-        ) is None
+        ) is not None
 
     branches.checkout(campaign.id, fork.id)
     assert access.require_actor(

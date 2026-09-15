@@ -51,7 +51,6 @@ from sagasmith_core.retrieval import (
     structured_score,
 )
 from sagasmith_core.vector import VectorStore
-from sagasmith_core.vector_jobs import VectorIndexJobService
 from sagasmith_core.visibility import MODULE_VISIBILITY_SCOPES
 
 MANAGED_MODULE_SOURCE_FIELDS = frozenset({"module_id", "scene_id", "chunk_id", "content_sha256"})
@@ -602,6 +601,14 @@ class ModuleService:
             if activate
             else (f"{logical_key}--staged-{checksum[:12]}-{parser_profile}-{parser_version}")
         )
+        prepared_vectors = {}
+        if embedder:
+            self.database.require_independent_work()
+            for chapter in parsed:
+                for scene in chapter.scenes:
+                    prepared_vectors[id(scene)] = embedder.encode(
+                        [chunk.content for chunk in scene.chunks]
+                    )
         with self.database.transaction() as session:
             idempotency = IdempotencyService(self.database)
             idempotency.require_uncommitted_in_session(
@@ -748,7 +755,7 @@ class ModuleService:
                     )
                     session.flush()
                     texts = [chunk.content for chunk in scene.chunks]
-                    vectors = embedder.encode(texts) if embedder else [None] * len(texts)
+                    vectors = prepared_vectors[id(scene)] if embedder else [None] * len(texts)
                     for chunk, vector in zip(scene.chunks, vectors, strict=True):
                         chunk_id = str(uuid.uuid4())
                         session.add(
@@ -1522,8 +1529,7 @@ class ModuleService:
         value = validate_content_package(package)
         expected_blobs = {str(asset["checksum"]): asset for asset in value["assets"]}
         supplied_blobs = {
-            str(key).removeprefix("blobs/sha256/"): bytes(content)
-            for key, content in blobs.items()
+            str(key).removeprefix("blobs/sha256/"): bytes(content) for key, content in blobs.items()
         }
         if set(supplied_blobs) != set(expected_blobs):
             raise ValueError("content package blobs do not match asset descriptors")
@@ -2852,19 +2858,12 @@ class ModuleService:
             ]
 
         rankings: dict[str, list[str]] = {
-            "exact": list(exact_ids),
+            "exact": sorted(exact_ids),
             "lexical": lexical,
         }
         if embedder:
             query_vector = embedder.encode([query])[0]
             if vector_store and vector_store.enabled:
-                VectorIndexJobService(self.database).flush(
-                    vector_store,
-                    system_id=rows[0].ModuleSource.system_id,
-                    collection="modules",
-                    embedding_model=embedding_model_identity(embedder),
-                    profile=getattr(embedder, "profile", None),
-                )
                 rankings["dense"] = [
                     item_id
                     for item_id, _score in vector_store.query(

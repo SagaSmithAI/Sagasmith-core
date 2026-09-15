@@ -194,11 +194,15 @@ class RulePackService:
             return [self._version_info(row) for row in session.scalars(query)]
 
     def get_version(self, pack_id: str, version: str) -> RulePackVersionInfo:
+        value = self.find_version(pack_id, version)
+        if value is None:
+            raise LookupError(f"{pack_id}@{version}")
+        return value
+
+    def find_version(self, pack_id: str, version: str) -> RulePackVersionInfo | None:
         with self.database.transaction() as session:
             row = session.get(RulePackVersion, {"pack_id": pack_id, "version": version})
-            if row is None:
-                raise LookupError(f"{pack_id}@{version}")
-            return self._version_info(row)
+            return self._version_info(row) if row is not None else None
 
     def provenance(self, pack_id: str, version: str) -> dict[str, Any]:
         """Return provenance for one exact immutable pack version."""

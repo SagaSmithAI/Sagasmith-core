@@ -205,9 +205,7 @@ class AuthContext:
         if expires_at - issued_at > _MAX_DELEGATION_TTL:
             raise ValueError("delegated auth context lifetime exceeds 15 minutes")
         requester = _required_text(value.get("requester_principal"), "requester_principal")
-        acting_host = _required_text(
-            value.get("acting_host_principal"), "acting_host_principal"
-        )
+        acting_host = _required_text(value.get("acting_host_principal"), "acting_host_principal")
         room_turn_id = _required_text(value.get("room_turn_id"), "room_turn_id")
         base_revision = _non_negative_integer(value.get("base_revision"), "base_revision")
         issuer = _required_text(value.get("issuer"), "issuer")
@@ -365,9 +363,7 @@ def sign_auth_context(
         "host": _required_text(host, "host"),
         "channel": _required_text(channel, "channel"),
         "actor_principal": _required_text(actor_principal, "actor_principal"),
-        "conversation_principal": _required_text(
-            conversation_principal, "conversation_principal"
-        ),
+        "conversation_principal": _required_text(conversation_principal, "conversation_principal"),
         "tenant_id": _optional_text(tenant_id, "tenant_id"),
         "campaign_id": _optional_text(campaign_id, "campaign_id"),
         "session_id": _required_text(session_id, "session_id"),
@@ -420,15 +416,11 @@ def sign_delegated_auth_context(
         "resource_owner_principal": _required_text(
             resource_owner_principal, "resource_owner_principal"
         ),
-        "acting_host_principal": _required_text(
-            acting_host_principal, "acting_host_principal"
-        ),
+        "acting_host_principal": _required_text(acting_host_principal, "acting_host_principal"),
         "acting_character_id": _optional_text(acting_character_id, "acting_character_id"),
         "authorized_audience": _required_text(authorized_audience, "authorized_audience"),
         "allowed_operations": list(operations),
-        "conversation_principal": _required_text(
-            conversation_principal, "conversation_principal"
-        ),
+        "conversation_principal": _required_text(conversation_principal, "conversation_principal"),
         "tenant_id": _optional_text(tenant_id, "tenant_id"),
         "campaign_id": _required_text(campaign_id, "campaign_id"),
         "room_turn_id": _required_text(room_turn_id, "room_turn_id"),
@@ -525,10 +517,7 @@ def verify_auth_context(
         and context.acting_character_id != expected_acting_character
     ):
         raise ValueError("auth context acting character does not match the tool call")
-    if (
-        expected_requester is not None
-        and context.requester_principal != expected_requester
-    ):
+    if expected_requester is not None and context.requester_principal != expected_requester:
         raise ValueError("auth context requester does not match the tool caller")
     return context
 
@@ -536,11 +525,14 @@ def verify_auth_context(
 class AuthContextNonceGuard:
     """Bounded in-memory replay rejection for short-lived signed envelopes."""
 
-    def __init__(self, *, retention: timedelta = _MAX_AGE, maximum_entries: int = 100_000) -> None:
+    def __init__(
+        self, *, retention: timedelta = _MAX_AGE, maximum_entries: int = 100_000, store=None
+    ) -> None:
         self.retention = retention
         self.maximum_entries = maximum_entries
         self._seen: dict[str, datetime] = {}
         self._lock = threading.Lock()
+        self.store = store
 
     def remember(self, context: AuthContext, *, now: datetime | None = None) -> None:
         current = (now or datetime.now(UTC)).astimezone(UTC)
@@ -549,6 +541,11 @@ class AuthContextNonceGuard:
             retain_until = max(retain_until, context.expires_at)
         issuer = context.workload_identity or context.host
         key = f"{issuer}:{context.nonce}"
+        if self.store is not None:
+            self.store.claim(
+                key, retain_until.timestamp(), current.timestamp(), self.maximum_entries
+            )
+            return
         with self._lock:
             for nonce in [item for item, expiry in self._seen.items() if expiry < current]:
                 self._seen.pop(nonce, None)
