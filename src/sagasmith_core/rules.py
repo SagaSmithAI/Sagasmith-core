@@ -29,9 +29,10 @@ from sagasmith_core.indexed_source import (
     rule_chunk_key,
     validate_indexed_rule_source,
 )
-from sagasmith_core.integrity import unique_retired_source_key
+from sagasmith_core.integrity import json_sha256, unique_retired_source_key
 from sagasmith_core.models import RuleChunk, RuleSection, RuleSource, VectorIndexJob
 from sagasmith_core.parsing import MarkdownHierarchyParser
+from sagasmith_core.prepared_imports import PreparedImport
 from sagasmith_core.retrieval import (
     SearchHit,
     cosine_similarity,
@@ -104,6 +105,12 @@ class RuleService:
             for section in parsed:
                 texts = [strip_page_markers(chunk.content) for chunk in section.chunks]
                 prepared_vectors[section.ordinal] = embedder.encode(texts)
+                if len(prepared_vectors[section.ordinal]) != len(texts):
+                    raise ValueError("embedding count does not match prepared chunks")
+        prepared = PreparedImport.build(
+            parsed, prepared_vectors, embedding_model_identity(embedder) if embedder else None
+        )
+        parsed, prepared_vectors = prepared.document, prepared.embeddings
         with self.database.transaction() as session:
             idempotency = IdempotencyService(self.database)
             idempotency.require_uncommitted_in_session(
@@ -258,7 +265,8 @@ class RuleService:
                                 payload={
                                     "document": chunk_text,
                                     "metadata": vector_metadata,
-                                    "embedding_model": embedding_model_identity(embedder),
+                                    "embedding_model": prepared.embedding_model,
+                                    "embedding_digest": json_sha256(list(vector)),
                                 },
                             )
                         )
@@ -884,6 +892,12 @@ class RuleService:
                     for chunk in sorted(section["chunks"], key=lambda item: item["ordinal"])
                 ]
                 prepared_vectors[section["ordinal"]] = embedder.encode(texts)
+                if len(prepared_vectors[section["ordinal"]]) != len(texts):
+                    raise ValueError("embedding count does not match prepared chunks")
+        prepared = PreparedImport.build(
+            source_value, prepared_vectors, embedding_model_identity(embedder) if embedder else None
+        )
+        source_value, prepared_vectors = prepared.document, prepared.embeddings
         with self.database.transaction() as session:
             existing = session.scalar(
                 select(RuleSource).where(
@@ -1095,7 +1109,8 @@ class RuleService:
                                         "source_id": source_id,
                                         "section_id": section_id,
                                     },
-                                    "embedding_model": embedding_model_identity(embedder),
+                                    "embedding_model": prepared.embedding_model,
+                                    "embedding_digest": json_sha256(list(vector)),
                                 },
                             )
                         )

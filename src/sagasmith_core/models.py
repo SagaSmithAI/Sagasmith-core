@@ -54,6 +54,7 @@ class Campaign(TimestampMixin, Base):
     settings: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     state: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     revision: Mapped[int] = mapped_column(Integer, default=1)
+    timeline_epoch: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     event_sequence: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     active_branch_id: Mapped[str | None] = mapped_column(
         ForeignKey("campaign_branches.id", ondelete="SET NULL"), nullable=True, index=True

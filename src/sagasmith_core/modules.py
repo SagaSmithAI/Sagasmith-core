@@ -14,7 +14,7 @@ from sqlalchemy import select
 
 from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.content_pack import build_actor_card, validate_content_package
-from sagasmith_core.database import Database
+from sagasmith_core.database import Database, UnitOfWork
 from sagasmith_core.documents import (
     GENERIC_DOCUMENT_LAYOUT_PROFILE,
     DocumentLayoutProfile,
@@ -42,6 +42,7 @@ from sagasmith_core.models import (
     VectorIndexJob,
 )
 from sagasmith_core.parsing import MarkdownHierarchyParser, ParsedChunk
+from sagasmith_core.prepared_imports import PreparedImport
 from sagasmith_core.retrieval import (
     SearchHit,
     cosine_similarity,
@@ -606,9 +607,15 @@ class ModuleService:
             self.database.require_independent_work()
             for chapter in parsed:
                 for scene in chapter.scenes:
-                    prepared_vectors[id(scene)] = embedder.encode(
+                    prepared_vectors[(chapter.ordinal, scene.ordinal)] = embedder.encode(
                         [chunk.content for chunk in scene.chunks]
                     )
+                    if len(prepared_vectors[(chapter.ordinal, scene.ordinal)]) != len(scene.chunks):
+                        raise ValueError("embedding count does not match prepared chunks")
+        prepared = PreparedImport.build(
+            parsed, prepared_vectors, embedding_model_identity(embedder) if embedder else None
+        )
+        parsed, prepared_vectors = prepared.document, prepared.embeddings
         with self.database.transaction() as session:
             idempotency = IdempotencyService(self.database)
             idempotency.require_uncommitted_in_session(
@@ -755,7 +762,11 @@ class ModuleService:
                     )
                     session.flush()
                     texts = [chunk.content for chunk in scene.chunks]
-                    vectors = prepared_vectors[id(scene)] if embedder else [None] * len(texts)
+                    vectors = (
+                        prepared_vectors[(chapter.ordinal, scene.ordinal)]
+                        if embedder
+                        else [None] * len(texts)
+                    )
                     for chunk, vector in zip(scene.chunks, vectors, strict=True):
                         chunk_id = str(uuid.uuid4())
                         session.add(
@@ -802,7 +813,8 @@ class ModuleService:
                                     payload={
                                         "document": chunk.content,
                                         "metadata": vector_metadata,
-                                        "embedding_model": embedding_model_identity(embedder),
+                                        "embedding_model": prepared.embedding_model,
+                                        "embedding_digest": json_sha256(list(vector)),
                                     },
                                 )
                             )
@@ -2936,11 +2948,45 @@ class ModuleService:
         idempotency_key: str | None = None,
         idempotency_write: IdempotencyWrite | None = None,
     ) -> dict[str, Any]:
-        if state is not None and spatial_review is not None:
-            raise ValueError("state and spatial_review cannot be changed in the same request")
-        if progress is not None:
-            progress = max(0, min(100, progress))
-        with self.database.transaction() as session:
+        with self.database.unit_of_work() as work:
+            return self.set_scene_progress_in_work(
+                work,
+                campaign_id=campaign_id,
+                scene_id=scene_id,
+                status=status,
+                progress=progress,
+                state=state,
+                current_room=current_room,
+                current_location_key=current_location_key,
+                scope_id=scope_id,
+                expected_state_version=expected_state_version,
+                spatial_review=spatial_review,
+                idempotency_key=idempotency_key,
+                idempotency_write=idempotency_write,
+            )
+
+    def set_scene_progress_in_work(
+        self,
+        work: UnitOfWork,
+        *,
+        campaign_id: str,
+        scene_id: str,
+        status: str | None = None,
+        progress: int | None = None,
+        state: dict[str, Any] | None = None,
+        current_room: str | None = None,
+        current_location_key: str | None = None,
+        scope_id: str = "party",
+        expected_state_version: int | None = None,
+        spatial_review: dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
+        idempotency_write: IdempotencyWrite | None = None,
+    ) -> dict[str, Any]:
+        with self.database.operation(work) as session:
+            if state is not None and spatial_review is not None:
+                raise ValueError("state and spatial_review cannot be changed in the same request")
+            if progress is not None:
+                progress = max(0, min(100, progress))
             scene = session.get(ModuleScene, scene_id)
             if scene is None:
                 raise LookupError(scene_id)
@@ -3004,8 +3050,7 @@ class ModuleService:
                     matching_scenes = []
                     for candidate in session.scalars(
                         select(ModuleScene).where(
-                            ModuleScene.module_id == scene.module_id,
-                            ModuleScene.id != scene.id,
+                            ModuleScene.module_id == scene.module_id, ModuleScene.id != scene.id
                         )
                     ):
                         candidate_locations = {
@@ -3019,8 +3064,8 @@ class ModuleService:
                             matching_scenes.append(candidate.id)
                     if len(matching_scenes) != 1:
                         raise ValueError(
-                            "current_location_key must identify one location in the "
-                            "current scene or exactly one scene in the same module"
+                        "current_location_key must identify one location in the current scene "
+                        "or exactly one scene in the same module"
                         )
                 row.current_location_key = current_location_key
             row.state_version = (row.state_version or 0) + 1

@@ -15,7 +15,8 @@ from sqlalchemy import delete, func, or_, select, update
 from sagasmith_core.branches import BranchService, resolve_branch
 from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.concurrency import compare_and_swap_campaign
-from sagasmith_core.database import Database
+from sagasmith_core.database import Database, UnitOfWork
+from sagasmith_core.extensions import capture_extensions, prepare_extension_restore
 from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
 from sagasmith_core.models import (
     ActorGrant,
@@ -114,6 +115,26 @@ class SnapshotService:
                 result=result,
             )
             return result
+
+    def create_in_work(
+        self,
+        work: UnitOfWork,
+        campaign: Campaign,
+        *,
+        label: str = "",
+        recap: dict[str, Any] | None = None,
+        parent_id: str | None = None,
+        parent_payload: dict[str, Any] | None = None,
+    ) -> SnapshotInfo:
+        with self.database.operation(work) as session:
+            return self._create_in_session(
+                session,
+                campaign,
+                label=label,
+                recap=recap,
+                parent_id=parent_id,
+                parent_payload=parent_payload,
+            )
 
     def _create_in_session(
         self,
@@ -530,8 +551,10 @@ class SnapshotService:
         actor_grants = list(
             session.scalars(
                 select(ActorGrant)
-                .where(ActorGrant.campaign_id == campaign.id,
-                       ActorGrant.actor_id.in_([row.id for row in characters]))
+                .where(
+                    ActorGrant.campaign_id == campaign.id,
+                    ActorGrant.actor_id.in_([row.id for row in characters]),
+                )
                 .order_by(ActorGrant.actor_id, ActorGrant.principal_id)
             )
         )
@@ -614,6 +637,11 @@ class SnapshotService:
                 "state": dict(campaign.state),
                 "revision": campaign.revision,
             },
+            **(
+                {"extensions": extensions}
+                if (extensions := capture_extensions(session, campaign))
+                else {}
+            ),
             "rule_profile": (
                 {
                     "system_id": profile.system_id,
@@ -890,6 +918,7 @@ class SnapshotService:
 
     @staticmethod
     def _apply(session, campaign: Campaign, payload: dict[str, Any]) -> None:
+        extension_states = prepare_extension_restore(session, campaign, payload)
         rule_lock = list(payload.get("rule_lock") or [])
         for item in rule_lock:
             version = session.get(
@@ -918,6 +947,9 @@ class SnapshotService:
                 raise SnapshotIntegrityError(
                     "snapshot addon lock is unavailable; install the exact addon version first"
                 )
+        for adapter, _ in extension_states:
+            adapter.clear(session, campaign.id)
+        session.flush()
         value = payload["campaign"]
         campaign.name = value["name"]
         campaign.status = value["status"]
@@ -928,6 +960,7 @@ class SnapshotService:
         # optimistic-concurrency token.  Never move the live token backwards
         # when switching to an older branch or restoring an earlier snapshot.
         campaign.revision = max(int(campaign.revision), int(value["revision"])) + 1
+        campaign.timeline_epoch += 1
 
         profile_value = payload.get("rule_profile")
         profile = session.get(CampaignRuleProfile, campaign.id)
@@ -1067,6 +1100,9 @@ class SnapshotService:
         # Database sessions deliberately disable autoflush.  A restore immediately
         # creates its new branch-head snapshot, so materialized characters and scene
         # progress must reach the database before that snapshot queries live state.
+        session.flush()
+        for adapter, state in extension_states:
+            adapter.restore(session, campaign.id, state)
         session.flush()
 
     @staticmethod

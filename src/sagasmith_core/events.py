@@ -10,7 +10,7 @@ from sqlalchemy import select, update
 
 from sagasmith_core.branches import resolve_branch
 from sagasmith_core.campaigns import CampaignNotFoundError
-from sagasmith_core.database import Database
+from sagasmith_core.database import Database, UnitOfWork
 from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
 from sagasmith_core.models import (
     ActorKnowledge,
@@ -205,6 +205,32 @@ class EventService:
                 result=result,
             )
             return result
+
+    def add_in_work(
+        self,
+        work: UnitOfWork,
+        campaign: Campaign,
+        branch_id: str,
+        *,
+        event_type: str,
+        summary: str,
+        retrieval_text: str | None,
+        payload: dict[str, Any] | None,
+        audience_scope: str,
+        participants: list[dict[str, str]] | None = None,
+    ) -> CampaignEventInfo:
+        with self.database.operation(work) as session:
+            return self._add_in_session(
+                session,
+                campaign,
+                branch_id,
+                event_type=event_type,
+                summary=summary,
+                retrieval_text=retrieval_text,
+                payload=payload,
+                audience_scope=audience_scope,
+                participants=participants,
+            )
 
     def _add_in_session(
         self,
@@ -450,16 +476,13 @@ class EventService:
         if unknown_roles:
             raise ValueError(f"invalid event participant roles: {sorted(unknown_roles)}")
         selected_disclosure_scopes = (
-            None
-            if knowledge_disclosure_scopes is None
-            else set(knowledge_disclosure_scopes)
+            None if knowledge_disclosure_scopes is None else set(knowledge_disclosure_scopes)
         )
         if selected_disclosure_scopes is not None:
             unknown_scopes = selected_disclosure_scopes - ACTOR_KNOWLEDGE_DISCLOSURE_SCOPES
             if unknown_scopes:
                 raise ValueError(
-                    "invalid actor-knowledge disclosure scopes: "
-                    f"{sorted(unknown_scopes)}"
+                    f"invalid actor-knowledge disclosure scopes: {sorted(unknown_scopes)}"
                 )
         if audience is not None and audience not in CONTINUITY_AUDIENCES:
             raise ValueError("audience must be 'dm' or 'player'")
@@ -501,9 +524,7 @@ class EventService:
                         BranchActorKnowledgeHead.branch_id == branch_id,
                         ActorKnowledge.actor_id == actor_id,
                         ActorKnowledgeRevision.source_event_id.is_not(None),
-                        ActorKnowledgeRevision.disclosure_scope.in_(
-                            knowledge_disclosure_scopes
-                        ),
+                        ActorKnowledgeRevision.disclosure_scope.in_(knowledge_disclosure_scopes),
                     )
                 )
             )
@@ -518,8 +539,7 @@ class EventService:
         return [
             row
             for row in rows
-            if row.audience_scope in PLAYER_EVENT_AUDIENCE_SCOPES
-            or row.audience_scope == "actor"
+            if row.audience_scope in PLAYER_EVENT_AUDIENCE_SCOPES or row.audience_scope == "actor"
         ]
 
     def list_for_audience(
@@ -589,9 +609,7 @@ class EventService:
             return [self._info(row, participants.get(row.id, [])) for row in rows]
 
     @staticmethod
-    def _recent_page(
-        rows: list[CampaignEvent], *, limit: int, offset: int
-    ) -> list[CampaignEvent]:
+    def _recent_page(rows: list[CampaignEvent], *, limit: int, offset: int) -> list[CampaignEvent]:
         """Return a bounded newest-first window while preserving chronological output.
 
         ``offset`` counts backwards from the newest visible event.  Keeping it in
@@ -601,11 +619,7 @@ class EventService:
 
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
             raise ValueError("limit must be an integer between 1 and 500")
-        if (
-            isinstance(offset, bool)
-            or not isinstance(offset, int)
-            or not 0 <= offset <= 100_000
-        ):
+        if isinstance(offset, bool) or not isinstance(offset, int) or not 0 <= offset <= 100_000:
             raise ValueError("offset must be an integer between 0 and 100000")
         stop = len(rows) - offset
         if stop <= 0:

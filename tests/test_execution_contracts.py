@@ -176,6 +176,27 @@ def test_frozen_migration_chain_reconstructs_current_columns(tmp_path):
             assert {column["name"] for column in inspector.get_columns(table.name)} == set(
                 table.columns.keys()
             ), table.name
+            columns = {column["name"]: column for column in inspector.get_columns(table.name)}
+            assert {name: value["nullable"] for name, value in columns.items()} == {
+                column.name: column.nullable for column in table.columns
+            }, table.name
+            assert {
+                (
+                    tuple(f["constrained_columns"]),
+                    f["referred_table"],
+                    tuple(f["referred_columns"]),
+                    f["options"].get("ondelete"),
+                )
+                for f in inspector.get_foreign_keys(table.name)
+            } == {
+                (
+                    tuple(c.name for c in f.columns),
+                    f.referred_table.name,
+                    tuple(e.column.name for e in f.elements),
+                    f.ondelete,
+                )
+                for f in table.foreign_key_constraints
+            }, table.name
     finally:
         database.dispose()
 
