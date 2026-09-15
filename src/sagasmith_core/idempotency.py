@@ -8,11 +8,12 @@ import json
 import uuid
 import zlib
 from dataclasses import asdict, dataclass
-from typing import Any, Callable
+from typing import Any
 
 from sqlalchemy import select
 
-from sagasmith_core.database import Database
+from sagasmith_core.database import Database, UnitOfWork
+from sagasmith_core.identity_contracts import IdempotencyIdentity, IdempotencyWrite
 from sagasmith_core.integrity import canonical_json, json_sha256
 from sagasmith_core.models import Campaign, IdempotencyRecord, MutationGroup, StateRevision
 from sagasmith_core.state_documents import load_state_document
@@ -97,32 +98,8 @@ def _public_response(stored: dict[str, Any]) -> dict[str, Any]:
     return response
 
 
-@dataclass(frozen=True)
-class IdempotencyIdentity:
-    scope_type: str
-    campaign_id: str | None
-    branch_id: str | None
-    timeline_epoch: int | None
-    principal: str
-    operation: str
-
-    def scope(self) -> str:
-        if self.scope_type not in {"campaign", "branch", "content"}:
-            raise ValueError("unknown idempotency scope type")
-        if not self.principal or not self.operation:
-            raise ValueError("idempotency identity requires principal and operation")
-        if self.scope_type == "branch" and (not self.campaign_id or not self.branch_id):
-            raise ValueError("branch idempotency requires campaign and branch")
-        return "identity:" + request_hash(asdict(self))
 
 
-@dataclass(frozen=True)
-class IdempotencyWrite:
-    """Persist an exact public replay response with its owning transaction."""
-
-    scope: str
-    payload: Any
-    response: dict[str, Any] | Callable[[Any], dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -153,7 +130,22 @@ class IdempotencyService:
         self.database = database
 
     def lookup_identity(self, identity: IdempotencyIdentity, key: str, payload: Any):
-        return self.lookup(identity.scope(), key, payload)
+        with self.database.transaction() as session:
+            self._require_identity(session, identity)
+            return self.lookup_in_session(session, identity.scope(), key, payload)
+
+    @staticmethod
+    def _require_identity(session, identity):
+        identity.scope()
+        if identity.campaign_id:
+            campaign = session.get(Campaign, identity.campaign_id, populate_existing=True)
+            if campaign is None:
+                raise LookupError(identity.campaign_id)
+            if identity.scope_type == "branch" and (
+                campaign.active_branch_id,
+                campaign.timeline_epoch,
+            ) != (identity.branch_id, identity.timeline_epoch):
+                raise ValueError("idempotency identity targets a different active timeline")
 
     def remember_identity(
         self,
@@ -164,12 +156,25 @@ class IdempotencyService:
         *,
         mutation_group_id: str | None = None,
     ):
+        with self.database.unit_of_work() as work:
+            return self.remember_identity_in_work(
+                work, identity, key, payload, response, mutation_group_id=mutation_group_id
+            )
+
+    def remember_identity_in_work(
+        self,
+        work: UnitOfWork,
+        identity: IdempotencyIdentity,
+        key: str,
+        payload: Any,
+        response: dict[str, Any],
+        *,
+        mutation_group_id: str | None = None,
+    ):
         scope = identity.scope()
-        with self.database.transaction() as session:
-            if identity.branch_id and identity.campaign_id:
-                campaign = session.get(Campaign, identity.campaign_id)
-                if campaign is None or campaign.active_branch_id != identity.branch_id:
-                    raise ValueError("idempotency identity targets a different active branch")
+        with self.database.operation(work) as session:
+            session.flush()
+            self._require_identity(session, identity)
             result = self.remember_in_session(
                 session,
                 scope,

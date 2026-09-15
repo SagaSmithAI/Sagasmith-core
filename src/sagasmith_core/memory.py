@@ -18,7 +18,7 @@ from sagasmith_core.context_anchors import (
     normalize_context_anchor_metadata,
     normalize_context_entity_ref,
 )
-from sagasmith_core.database import Database
+from sagasmith_core.database import Database, UnitOfWork
 from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
 from sagasmith_core.models import (
     BranchFactHead,
@@ -128,7 +128,7 @@ class MemoryService:
                     )
                 )
                 if existing is not None:
-                    self._require_existing_fact_identity(
+                    self.require_existing_fact_identity(
                         existing,
                         {
                             "kind": kind,
@@ -334,7 +334,7 @@ class MemoryService:
                     disclosure_scope=disclosure_scope,
                 )
             else:
-                self._require_existing_fact_identity(
+                self.require_existing_fact_identity(
                     memory,
                     {
                         key: value
@@ -433,11 +433,7 @@ class MemoryService:
     ) -> list[MemoryInfo]:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
             raise ValueError("limit must be an integer between 1 and 500")
-        if (
-            isinstance(offset, bool)
-            or not isinstance(offset, int)
-            or not 0 <= offset <= 100_000
-        ):
+        if isinstance(offset, bool) or not isinstance(offset, int) or not 0 <= offset <= 100_000:
             raise ValueError("offset must be an integer between 0 and 100000")
         selected_scopes = None if disclosure_scopes is None else set(disclosure_scopes)
         if selected_scopes is not None:
@@ -519,6 +515,48 @@ class MemoryService:
                 statement = statement.where(MemoryRevision.status == "active")
             return [self._info(*row) for row in session.execute(statement)]
 
+    def add_in_work(
+        self,
+        work: UnitOfWork,
+        campaign_id: str,
+        branch_id: str,
+        *,
+        content: str,
+        kind: str,
+        subject: str,
+        metadata: dict[str, Any] | None,
+        snapshot_id: str | None,
+        fact_key: str | None,
+        subject_ref: str,
+        predicate: str,
+        status: str,
+        valid_from: datetime | None,
+        valid_to: datetime | None,
+        source_event_ids: list[str] | None,
+        importance: int,
+        disclosure_scope: str | None,
+    ) -> MemoryInfo:
+        with self.database.operation(work) as session:
+            return self._add_in_session(
+                session,
+                campaign_id,
+                branch_id,
+                content=content,
+                kind=kind,
+                subject=subject,
+                metadata=metadata,
+                snapshot_id=snapshot_id,
+                fact_key=fact_key,
+                subject_ref=subject_ref,
+                predicate=predicate,
+                status=status,
+                valid_from=valid_from,
+                valid_to=valid_to,
+                source_event_ids=source_event_ids,
+                importance=importance,
+                disclosure_scope=disclosure_scope,
+            )
+
     def _add_in_session(
         self,
         session,
@@ -567,6 +605,38 @@ class MemoryService:
             importance=importance,
             disclosure_scope=disclosure_scope,
         )
+
+    def add_branch_revision_in_work(
+        self,
+        work: UnitOfWork,
+        memory: CampaignMemory,
+        branch_id: str,
+        *,
+        content: str,
+        metadata: dict[str, Any] | None,
+        snapshot_id: str | None,
+        status: str,
+        valid_from: datetime | None,
+        valid_to: datetime | None,
+        source_event_ids: list[str] | None,
+        importance: int,
+        disclosure_scope: str | None,
+    ) -> MemoryInfo:
+        with self.database.operation(work) as session:
+            return self._add_branch_revision_in_session(
+                session,
+                memory,
+                branch_id,
+                content=content,
+                metadata=metadata,
+                snapshot_id=snapshot_id,
+                status=status,
+                valid_from=valid_from,
+                valid_to=valid_to,
+                source_event_ids=source_event_ids,
+                importance=importance,
+                disclosure_scope=disclosure_scope,
+            )
 
     def _add_branch_revision_in_session(
         self,
@@ -620,6 +690,40 @@ class MemoryService:
         )
         memory.updated_at = operational_utcnow()
         return self._info(memory, revision)
+
+    def revise_in_work(
+        self,
+        work: UnitOfWork,
+        memory: CampaignMemory,
+        branch_id: str,
+        *,
+        content: str,
+        metadata: dict[str, Any] | None,
+        snapshot_id: str | None,
+        expected_revision_id: str | None,
+        status: str | None,
+        valid_from: datetime | None,
+        valid_to: datetime | None,
+        source_event_ids: list[str] | None,
+        importance: int | None,
+        disclosure_scope: str | None,
+    ) -> MemoryInfo:
+        with self.database.operation(work) as session:
+            return self._revise_in_session(
+                session,
+                memory,
+                branch_id,
+                content=content,
+                metadata=metadata,
+                snapshot_id=snapshot_id,
+                expected_revision_id=expected_revision_id,
+                status=status,
+                valid_from=valid_from,
+                valid_to=valid_to,
+                source_event_ids=source_event_ids,
+                importance=importance,
+                disclosure_scope=disclosure_scope,
+            )
 
     def _revise_in_session(
         self,
@@ -717,7 +821,7 @@ class MemoryService:
         return value
 
     @staticmethod
-    def _require_existing_fact_identity(
+    def require_existing_fact_identity(
         memory: CampaignMemory,
         proposed: Mapping[str, Any],
     ) -> None:

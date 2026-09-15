@@ -2,40 +2,20 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from importlib.metadata import entry_points
-from typing import Any, Callable, Protocol
 
-from sagasmith_core.modules import MarkdownModuleParser
-from sagasmith_core.parsing import MarkdownHierarchyParser
-
-
-class SheetValidator(Protocol):
-    def __call__(self, sheet: dict[str, Any]) -> dict[str, Any]: ...
-
-
-class RuleParser(Protocol):
-    def parse(self, content: str) -> Any: ...
-
-
-class ModuleParser(RuleParser, Protocol):
-    def document_metadata(self, content: str) -> dict[str, Any]: ...
-
-
-@dataclass(frozen=True)
-class SystemDefinition:
-    id: str
-    display_name: str
-    character_types: tuple[str, ...] = ("pc", "npc")
-    campaign_defaults: dict[str, Any] = field(default_factory=dict)
-    validate_sheet: SheetValidator | None = None
-    rule_parser_factory: Callable[[], RuleParser] = MarkdownHierarchyParser
-    module_parser_factory: Callable[[], ModuleParser] = MarkdownModuleParser
-    protocol_version: int = 1
-    implementation_version: str = "1"
-    sheet_schema_version: int = 1
-    capabilities: tuple[str, ...] = ()
-    migrate_sheet: Callable[[dict[str, Any], int], dict[str, Any]] | None = None
+from sagasmith_core.system_contracts import (
+    ModuleParser as ModuleParser,
+)
+from sagasmith_core.system_contracts import (
+    RuleParser as RuleParser,
+)
+from sagasmith_core.system_contracts import (
+    SheetValidator as SheetValidator,
+)
+from sagasmith_core.system_contracts import (
+    SystemDefinition,
+)
 
 
 class SystemRegistry:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from typing import Any
 
 from sqlalchemy import select
@@ -13,7 +13,7 @@ from sagasmith_core.branches import resolve_branch
 from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.characters import CharacterNotFoundError
 from sagasmith_core.concurrency import compare_and_swap_campaign
-from sagasmith_core.database import Database
+from sagasmith_core.database import Database, UnitOfWork
 from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite, request_hash
 from sagasmith_core.knowledge import (
     INACTIVE_ACTOR_KNOWLEDGE_STATUSES,
@@ -29,31 +29,7 @@ from sagasmith_core.models import (
     RuleResolutionReceipt,
 )
 from sagasmith_core.revisions import RevisionInfo, RevisionService
-
-
-@dataclass(frozen=True)
-class CharacterStateUpdate:
-    """A fully validated replacement for a character's JSON documents."""
-
-    character_id: str
-    sheet: dict[str, Any]
-    notes: dict[str, Any]
-    expected_revision: int | None = None
-    name: str | None = None
-    player_name: str | None = None
-    summary: str | None = None
-
-
-@dataclass(frozen=True)
-class ActorKnowledgeTransfer:
-    """Copy selected or complete current subjective knowledge to another actor."""
-
-    source_actor_id: str
-    destination_actor_id: str
-    knowledge_key_prefix: str
-    knowledge_ids: tuple[str, ...] = ()
-    cause: str = "knowledge_transfer"
-    disclosure_scope: str = "dm"
+from sagasmith_core.state_contracts import ActorKnowledgeTransfer, CharacterStateUpdate
 
 
 class StateMutationService:
@@ -94,51 +70,82 @@ class StateMutationService:
         rule_receipts: list[dict[str, Any]] | None = None,
         reversible: bool = True,
     ) -> list[RevisionInfo] | None:
-        updates = list(character_updates or [])
-        knowledge_transfers = list(actor_knowledge_transfers or [])
-        receipts = list(rule_receipts or [])
-        if operation is None and (idempotency_key or idempotency_write is not None):
-            raise ValueError("idempotency requires an audited operation")
-        ids = [item.character_id for item in updates]
-        if len(ids) != len(set(ids)):
-            raise ValueError("character updates must not contain duplicate ids")
-        if campaign_state is None and not updates and not knowledge_transfers:
-            raise ValueError("at least one state document must be supplied")
-        if receipts and operation is None:
-            raise ValueError("rule receipts require an audited operation")
-        if idempotency_request_hash is not None:
-            if not idempotency_key:
-                raise ValueError("idempotency_request_hash requires an idempotency_key")
-            if len(idempotency_request_hash) != 64 or any(
-                character not in "0123456789abcdef" for character in idempotency_request_hash
-            ):
-                raise ValueError("idempotency_request_hash must be a SHA-256 hex digest")
-        if idempotency_write is not None:
-            if not idempotency_key:
-                raise ValueError("idempotency_write requires an idempotency_key")
-            if not str(idempotency_write.scope).strip():
-                raise ValueError("idempotency_write.scope is required")
-            replay_request_hash = request_hash(idempotency_write.payload)
-            if (
-                idempotency_request_hash is not None
-                and idempotency_request_hash != replay_request_hash
-            ):
-                raise ValueError(
-                    "idempotency_request_hash does not match idempotency_write.payload"
-                )
+        with self.database.unit_of_work() as work:
+            return self.replace_in_work(
+                work,
+                campaign_id,
+                campaign_state=campaign_state,
+                character_updates=character_updates,
+                actor_knowledge_transfers=actor_knowledge_transfers,
+                expected_campaign_revision=expected_campaign_revision,
+                operation=operation,
+                actor=actor,
+                branch_id=branch_id,
+                idempotency_key=idempotency_key,
+                idempotency_request_hash=idempotency_request_hash,
+                idempotency_write=idempotency_write,
+                rule_receipts=rule_receipts,
+                reversible=reversible,
+            )
 
-        with self.database.transaction() as session:
+    def replace_in_work(
+        self,
+        work: UnitOfWork,
+        campaign_id: str,
+        *,
+        campaign_state: dict[str, Any] | None = None,
+        character_updates: list[CharacterStateUpdate] | None = None,
+        actor_knowledge_transfers: list[ActorKnowledgeTransfer] | None = None,
+        expected_campaign_revision: int | None = None,
+        operation: str | None = None,
+        actor: str = "runtime",
+        branch_id: str | None = None,
+        idempotency_key: str | None = None,
+        idempotency_request_hash: str | None = None,
+        idempotency_write: IdempotencyWrite | None = None,
+        rule_receipts: list[dict[str, Any]] | None = None,
+        reversible: bool = True,
+    ) -> list[RevisionInfo] | None:
+        with self.database.operation(work) as session:
+            updates = list(character_updates or [])
+            knowledge_transfers = list(actor_knowledge_transfers or [])
+            receipts = list(rule_receipts or [])
+            if operation is None and (idempotency_key or idempotency_write is not None):
+                raise ValueError("idempotency requires an audited operation")
+            ids = [item.character_id for item in updates]
+            if len(ids) != len(set(ids)):
+                raise ValueError("character updates must not contain duplicate ids")
+            if campaign_state is None and (not updates) and (not knowledge_transfers):
+                raise ValueError("at least one state document must be supplied")
+            if receipts and operation is None:
+                raise ValueError("rule receipts require an audited operation")
+            if idempotency_request_hash is not None:
+                if not idempotency_key:
+                    raise ValueError("idempotency_request_hash requires an idempotency_key")
+                if len(idempotency_request_hash) != 64 or any(
+                    (character not in "0123456789abcdef" for character in idempotency_request_hash)
+                ):
+                    raise ValueError("idempotency_request_hash must be a SHA-256 hex digest")
+            if idempotency_write is not None:
+                if not idempotency_key:
+                    raise ValueError("idempotency_write requires an idempotency_key")
+                if not str(idempotency_write.scope).strip():
+                    raise ValueError("idempotency_write.scope is required")
+                replay_request_hash = request_hash(idempotency_write.payload)
+                if (
+                    idempotency_request_hash is not None
+                    and idempotency_request_hash != replay_request_hash
+                ):
+                    raise ValueError(
+                        "idempotency_request_hash does not match idempotency_write.payload"
+                    )
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 raise CampaignNotFoundError(campaign_id)
             effective_branch_id = branch_id or campaign.active_branch_id
             branch = resolve_branch(session, campaign, effective_branch_id)
-
             rows: list[tuple[Character, CharacterStateUpdate]] = []
-            before_campaign = {
-                "state": dict(campaign.state),
-                "revision": campaign.revision,
-            }
+            before_campaign = {"state": dict(campaign.state), "revision": campaign.revision}
             campaign_base_revision = (
                 campaign.revision
                 if expected_campaign_revision is None
@@ -172,7 +179,6 @@ class StateMutationService:
                     "revision": row.revision,
                 }
                 rows.append((row, update))
-
             transfer_pairs = [
                 (item.source_actor_id, item.destination_actor_id) for item in knowledge_transfers
             ]
@@ -183,19 +189,16 @@ class StateMutationService:
                     not transfer.source_actor_id
                     or not transfer.destination_actor_id
                     or transfer.source_actor_id == transfer.destination_actor_id
-                    or not transfer.knowledge_key_prefix
+                    or (not transfer.knowledge_key_prefix)
                 ):
                     raise ValueError(
                         "actor knowledge transfer requires distinct actors and a key prefix"
                     )
-                if any(not str(item).strip() for item in transfer.knowledge_ids) or len(
+                if any((not str(item).strip() for item in transfer.knowledge_ids)) or len(
                     transfer.knowledge_ids
                 ) != len(set(transfer.knowledge_ids)):
                     raise ValueError("actor knowledge transfer ids must be non-empty and unique")
-                for actor_id in (
-                    transfer.source_actor_id,
-                    transfer.destination_actor_id,
-                ):
+                for actor_id in (transfer.source_actor_id, transfer.destination_actor_id):
                     actor_row = session.get(Character, actor_id)
                     if actor_row is None:
                         raise CharacterNotFoundError(actor_id)
@@ -203,7 +206,6 @@ class StateMutationService:
                         raise ValueError(
                             "knowledge transfer actors must belong to the target campaign"
                         )
-
             knowledge_service = ActorKnowledgeService(self.database)
             for transfer in knowledge_transfers:
                 statement = (
@@ -232,17 +234,17 @@ class StateMutationService:
                     source_knowledge.id for source_knowledge, _source_revision in source_rows
                 } != set(transfer.knowledge_ids):
                     raise ValueError(
-                        "actor knowledge transfer ids must identify current active "
-                        "knowledge owned by the source actor"
+                        "actor knowledge transfer ids must identify current active knowledge "
+                        "owned by the source actor"
                     )
                 for source_knowledge, source_revision in source_rows:
-                    knowledge_service._add_in_session(
-                        session,
+                    knowledge_service.add_in_work(
+                        work,
                         campaign,
                         branch.id,
                         branch.head_snapshot_id,
                         actor_id=transfer.destination_actor_id,
-                        knowledge_key=(f"{transfer.knowledge_key_prefix}.{source_knowledge.id}"),
+                        knowledge_key=f"{transfer.knowledge_key_prefix}.{source_knowledge.id}",
                         proposition=source_revision.proposition,
                         subject_ref=source_knowledge.subject_ref,
                         epistemic_status=source_revision.epistemic_status,
@@ -251,13 +253,12 @@ class StateMutationService:
                         cause=transfer.cause,
                         disclosure_scope=transfer.disclosure_scope,
                     )
-
             compare_and_swap_campaign(
                 session,
                 campaign_id,
                 expected_revision=campaign_base_revision,
                 expected_branch_id=effective_branch_id,
-                values=({"state": dict(campaign_state)} if campaign_state is not None else None),
+                values={"state": dict(campaign_state)} if campaign_state is not None else None,
                 advance_revision=campaign_state is not None,
             )
             session.expire(campaign)
@@ -301,10 +302,7 @@ class StateMutationService:
                         "entity_type": "campaign",
                         "entity_id": campaign_id,
                         "before": before_campaign,
-                        "after": {
-                            "state": dict(campaign.state),
-                            "revision": campaign.revision,
-                        },
+                        "after": {"state": dict(campaign.state), "revision": campaign.revision},
                     }
                 )
             for row, _update in rows:
@@ -357,10 +355,7 @@ class StateMutationService:
                 )
                 if idempotency_key
                 else None,
-                # Actor-knowledge revisions live in a separate branch ledger.
-                # Document-only undo must never rewind the campaign while
-                # leaving a copied belief behind.
-                reversible=reversible and not knowledge_transfers,
+                reversible=reversible and (not knowledge_transfers),
             )
             mutation_group_id = revisions[0].mutation_group_id
             if receipts and mutation_group_id is None:
@@ -369,7 +364,7 @@ class StateMutationService:
                 fingerprint = str(receipt.get("ruleset_fingerprint") or "")
                 mechanic_id = str(receipt.get("mechanic_id") or "")
                 event = str(receipt.get("event") or "")
-                if not fingerprint or not mechanic_id or not event:
+                if not fingerprint or not mechanic_id or (not event):
                     raise ValueError(
                         "rule receipts require ruleset_fingerprint, mechanic_id, and event"
                     )

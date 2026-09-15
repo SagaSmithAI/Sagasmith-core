@@ -7,9 +7,10 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Sequence
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, update
 
 from sagasmith_core.database import Database
+from sagasmith_core.integrity import json_sha256
 from sagasmith_core.models import ModuleChunk, RuleChunk, VectorIndexJob
 from sagasmith_core.vector import VectorStore
 
@@ -26,6 +27,27 @@ class VectorIndexJobService:
 
     def __init__(self, database: Database) -> None:
         self.database = database
+
+    def status(self, *, system_id: str, collection: str) -> dict[str, Any]:
+        """Report index readiness without claiming or delivering any work."""
+        with self.database.transaction() as session:
+            counts = dict(
+                session.execute(
+                    select(VectorIndexJob.status, func.count())
+                    .where(
+                        VectorIndexJob.system_id == system_id,
+                        VectorIndexJob.collection == collection,
+                    )
+                    .group_by(VectorIndexJob.status)
+                ).all()
+            )
+        return {
+            "ready": not any(
+                counts.get(s, 0) for s in ("pending", "delivering", "failed", "permanent_failure")
+            ),
+            "counts": counts,
+            "fallback": "lexical",
+        }
 
     def flush(
         self,
@@ -54,6 +76,26 @@ class VectorIndexJobService:
             raise ValueError("vector profile does not match the requested embedding_model")
         selected_ids = tuple(dict.fromkeys(str(item) for item in job_ids or ()))
         with self.database.transaction(immediate=True) as session:
+            exhausted = update(VectorIndexJob).where(
+                VectorIndexJob.system_id == system_id,
+                VectorIndexJob.collection == collection,
+                VectorIndexJob.payload["embedding_model"].as_string() == embedding_model,
+                VectorIndexJob.attempts >= max_attempts,
+                or_(
+                    VectorIndexJob.status.in_(("pending", "failed")),
+                    (VectorIndexJob.status == "delivering") & (VectorIndexJob.lease_until < now),
+                ),
+            )
+            if selected_ids:
+                exhausted = exhausted.where(VectorIndexJob.id.in_(selected_ids))
+            session.execute(
+                exhausted.values(
+                    status="permanent_failure",
+                    lease_token=None,
+                    lease_until=None,
+                    error="delivery attempt budget exhausted",
+                )
+            )
             statement = (
                 select(VectorIndexJob)
                 .where(
@@ -113,6 +155,17 @@ class VectorIndexJobService:
                     invalid[job.id] = "vector entity has no stored embedding"
                     continue
                 payload = dict(job.payload or {})
+                if entity.embedding_model != embedding_model:
+                    invalid[job.id] = "vector entity embedding version changed"
+                    continue
+                if "document" in payload and payload["document"] != entity.content:
+                    invalid[job.id] = "vector entity content changed"
+                    continue
+                if payload.get("embedding_digest") and payload["embedding_digest"] != json_sha256(
+                    embedding
+                ):
+                    invalid[job.id] = "vector entity embedding bytes changed"
+                    continue
                 deliverable.append(
                     (
                         job.id,
@@ -147,6 +200,7 @@ class VectorIndexJobService:
                 delivered_ids = [item[0] for item in deliverable]
 
         deliverable_ids = [item[0] for item in deliverable]
+        completed = 0
         if deliverable_ids:
             with self.database.transaction() as session:
                 for job in session.scalars(
@@ -159,6 +213,7 @@ class VectorIndexJobService:
                     if job.id in delivered_ids:
                         job.status = "completed"
                         job.error = ""
+                        completed += 1
                     else:
                         job.status = (
                             "permanent_failure" if job.attempts >= max_attempts else "failed"
@@ -167,6 +222,6 @@ class VectorIndexJobService:
                         job.error = delivery_error or "vector delivery failed"
         return VectorFlushResult(
             attempted=len(jobs),
-            completed=len(delivered_ids),
-            failed=len(jobs) - len(delivered_ids),
+            completed=completed,
+            failed=len(jobs) - completed,
         )

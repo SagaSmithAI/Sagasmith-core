@@ -11,7 +11,7 @@ from typing import Any
 from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.characters import CharacterInfo, CharacterNotFoundError
 from sagasmith_core.concurrency import compare_and_swap_campaign
-from sagasmith_core.database import Database
+from sagasmith_core.database import Database, UnitOfWork
 from sagasmith_core.idempotency import IdempotencyService, request_hash
 from sagasmith_core.integrity import canonical_json
 from sagasmith_core.models import ActorGrant, Campaign, Character, Principal
@@ -68,33 +68,83 @@ class ActorLifecycleService:
         idempotency_payload: dict[str, Any] | None = None,
         response_extra: dict[str, Any] | None = None,
     ) -> ActorLifecycleResult:
-        key = str(idempotency_key or "").strip()
-        if not key:
-            raise ValueError("idempotency_key is required")
-        grant_principals = [item.principal_id for item in initial_grants]
-        if len(grant_principals) != len(set(grant_principals)):
-            raise ValueError("initial actor grants must not duplicate principals")
-        lifecycle_payload = {
-            "campaign_id": campaign_id,
-            "system_id": system_id,
-            "name": name,
-            "character_type": character_type,
-            "player_name": player_name,
-            "summary": summary,
-            "sheet": copy.deepcopy(sheet),
-            "notes": copy.deepcopy(notes),
-            "template_id": template_id,
-            "initial_grants": [asdict(item) for item in initial_grants],
-            "campaign_state": copy.deepcopy(campaign_state),
-            "expected_campaign_revision": expected_campaign_revision,
-            "operation": operation,
-            "branch_id": branch_id,
-            "actor_id": actor_id,
-        }
-        payload = copy.deepcopy(idempotency_payload or lifecycle_payload)
-        scope = f"actor-lifecycle:{campaign_id}:{principal_id}"
-        idempotency = IdempotencyService(self.database)
-        with self.database.transaction() as session:
+        with self.database.unit_of_work() as work:
+            return self.create_in_work(
+                work,
+                campaign_id,
+                system_id=system_id,
+                name=name,
+                character_type=character_type,
+                sheet=sheet,
+                notes=notes,
+                principal_id=principal_id,
+                idempotency_key=idempotency_key,
+                player_name=player_name,
+                summary=summary,
+                template_id=template_id,
+                initial_grants=initial_grants,
+                campaign_state=campaign_state,
+                expected_campaign_revision=expected_campaign_revision,
+                operation=operation,
+                actor=actor,
+                branch_id=branch_id,
+                actor_id=actor_id,
+                idempotency_payload=idempotency_payload,
+                response_extra=response_extra,
+            )
+
+    def create_in_work(
+        self,
+        work: UnitOfWork,
+        campaign_id: str,
+        *,
+        system_id: str,
+        name: str,
+        character_type: str,
+        sheet: dict[str, Any],
+        notes: dict[str, Any],
+        principal_id: str,
+        idempotency_key: str,
+        player_name: str | None = None,
+        summary: str = "",
+        template_id: str | None = None,
+        initial_grants: tuple[InitialActorGrant, ...] = (),
+        campaign_state: dict[str, Any] | None = None,
+        expected_campaign_revision: int | None = None,
+        operation: str = "actor.lifecycle.create",
+        actor: str = "runtime",
+        branch_id: str | None = None,
+        actor_id: str | None = None,
+        idempotency_payload: dict[str, Any] | None = None,
+        response_extra: dict[str, Any] | None = None,
+    ) -> ActorLifecycleResult:
+        with self.database.operation(work) as session:
+            key = str(idempotency_key or "").strip()
+            if not key:
+                raise ValueError("idempotency_key is required")
+            grant_principals = [item.principal_id for item in initial_grants]
+            if len(grant_principals) != len(set(grant_principals)):
+                raise ValueError("initial actor grants must not duplicate principals")
+            lifecycle_payload = {
+                "campaign_id": campaign_id,
+                "system_id": system_id,
+                "name": name,
+                "character_type": character_type,
+                "player_name": player_name,
+                "summary": summary,
+                "sheet": copy.deepcopy(sheet),
+                "notes": copy.deepcopy(notes),
+                "template_id": template_id,
+                "initial_grants": [asdict(item) for item in initial_grants],
+                "campaign_state": copy.deepcopy(campaign_state),
+                "expected_campaign_revision": expected_campaign_revision,
+                "operation": operation,
+                "branch_id": branch_id,
+                "actor_id": actor_id,
+            }
+            payload = copy.deepcopy(idempotency_payload or lifecycle_payload)
+            scope = f"actor-lifecycle:{campaign_id}:{principal_id}"
+            idempotency = IdempotencyService(self.database)
             replay = idempotency.lookup_in_session(session, scope, key, payload)
             if replay is not None and replay.response is not None:
                 return self._result_from_response(replay.response, replayed=True)
@@ -108,8 +158,8 @@ class ActorLifecycleService:
                 and campaign.revision != expected_campaign_revision
             ):
                 raise ValueError(
-                    "campaign revision conflict: "
-                    f"expected {expected_campaign_revision}, found {campaign.revision}"
+                    f"campaign revision conflict: expected {expected_campaign_revision}, "
+                    f"found {campaign.revision}"
                 )
             template = session.get(Character, template_id) if template_id else None
             if template_id and template is None:
@@ -122,7 +172,6 @@ class ActorLifecycleService:
             for grant in initial_grants:
                 if session.get(Principal, grant.principal_id) is None:
                     raise LookupError(grant.principal_id)
-
             before_campaign = {
                 "state": copy.deepcopy(campaign.state),
                 "revision": campaign.revision,
@@ -131,17 +180,14 @@ class ActorLifecycleService:
                 compare_and_swap_campaign(
                     session,
                     campaign_id,
-                    expected_revision=(
-                        campaign.revision
-                        if expected_campaign_revision is None
-                        else expected_campaign_revision
-                    ),
+                    expected_revision=campaign.revision
+                    if expected_campaign_revision is None
+                    else expected_campaign_revision,
                     expected_branch_id=branch_id or campaign.active_branch_id,
                     values={"state": copy.deepcopy(campaign_state)},
                 )
                 session.expire(campaign)
                 session.refresh(campaign)
-
             row = Character(
                 id=actor_id or str(uuid.uuid4()),
                 system_id=system_id,
@@ -258,9 +304,7 @@ class ActorLifecycleService:
         }
 
     @staticmethod
-    def _result_from_response(
-        response: dict[str, Any], *, replayed: bool
-    ) -> ActorLifecycleResult:
+    def _result_from_response(response: dict[str, Any], *, replayed: bool) -> ActorLifecycleResult:
         return ActorLifecycleResult(
             character=CharacterInfo(**dict(response["character"])),
             revisions=tuple(RevisionInfo(**dict(item)) for item in response["revisions"]),

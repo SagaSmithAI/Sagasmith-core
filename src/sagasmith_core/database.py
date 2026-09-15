@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
-import threading
 from collections.abc import Generator, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +16,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from sagasmith_core.models import Base
 from sagasmith_core.paths import data_root
+from sagasmith_core.work import UnitOfWork, _execution_owner
 
 
 def sqlite_database_url(path: str | Path) -> str:
@@ -43,31 +41,21 @@ def alembic_config(database_url: str) -> Config:
     return config
 
 
-def _execution_owner() -> tuple[int, object]:
-    try:
-        task = asyncio.current_task()
-    except RuntimeError:
-        task = None
-    return threading.get_ident(), task
-
-
-@dataclass
-class UnitOfWork:
-    session: Session
-    owner: tuple[int, object]
-    rollback_only: bool = False
-    failure: BaseException | None = None
-    closed: bool = False
-
-    def require_owner(self) -> None:
-        if self.closed or self.owner != _execution_owner():
-            raise RuntimeError("unit of work is closed or belongs to another execution owner")
-
-
 class Database:
     """Own the general TTRPG database and transactional session factory."""
 
-    def __init__(self, url: str | None = None, *, echo: bool = False) -> None:
+    def __init__(
+        self, url: str | None = None, *, echo: bool = False, state_extensions: tuple = ()
+    ) -> None:
+        identities = [(item.system_id, item.id) for item in state_extensions]
+        if len(identities) != len(set(identities)):
+            raise ValueError("duplicate state extension identity")
+        if any(
+            not item.id or not item.system_id or item.schema_version < 1
+            for item in state_extensions
+        ):
+            raise ValueError("invalid state extension identity or schema version")
+        self.state_extensions = tuple(state_extensions)
         self.url = url or default_database_url()
         connect_args = {"check_same_thread": False} if self.url.startswith("sqlite") else {}
         self.engine: Engine = create_engine(
@@ -94,10 +82,52 @@ class Database:
         self._ambient_uow: ContextVar[UnitOfWork | None] = ContextVar(
             f"sagasmith_uow_{id(self)}", default=None
         )
+        event.listen(self.engine, "before_cursor_execute", self._track_command_writes)
+
+    def _track_command_writes(
+        self, connection, cursor, statement, parameters, context, executemany
+    ):
+        work = self._ambient_uow.get()
+        if work is None:
+            return
+        sql = statement.lstrip().upper()
+        if (
+            context.isinsert
+            or context.isupdate
+            or context.isdelete
+            or context.isddl
+            or not (
+                sql.startswith(("SELECT", "EXPLAIN", "PRAGMA", "BEGIN", "SAVEPOINT", "RELEASE"))
+            )
+        ):
+            work.write_count += 1
 
     def require_independent_work(self) -> None:
         if self._ambient_uow.get() is not None:
             raise RuntimeError("external work cannot run inside an uncommitted unit of work")
+
+    def work_for_session(self, session: Session) -> UnitOfWork:
+        """Validate a legacy consumer session without opening or inheriting a transaction."""
+        work = self._ambient_uow.get()
+        if work is None or work.session is not session:
+            raise RuntimeError("session does not belong to this database's active unit of work")
+        work.require_owner()
+        return work
+
+    @contextmanager
+    def operation(self, work: UnitOfWork) -> Iterator[Session]:
+        """Join an explicitly supplied owner; a failed operation poisons its commit."""
+        work.require_owner()
+        if work is not self._ambient_uow.get():
+            raise RuntimeError("operation requires this database's active unit of work")
+        if work.rollback_only:
+            raise RuntimeError("unit of work is rollback-only") from work.failure
+        try:
+            yield work.session
+        except BaseException as error:
+            work.rollback_only = True
+            work.failure = error
+            raise
 
     @contextmanager
     def unit_of_work(self, *, immediate: bool = False) -> Iterator[UnitOfWork]:
@@ -113,10 +143,12 @@ class Database:
             raise RuntimeError("savepoint requires the active unit of work")
         with work.session.begin_nested():
             previous = work.rollback_only
+            previous_failure = work.failure
             try:
                 yield work.session
             except BaseException:
                 work.rollback_only = previous
+                work.failure = previous_failure
                 raise
 
     @staticmethod
@@ -155,6 +187,7 @@ class Database:
                 raise
             return
         session = self.session_factory()
+        session.info["state_extensions"] = self.state_extensions
         work = UnitOfWork(session, _execution_owner())
         work_token = self._ambient_uow.set(work)
         token = self._ambient_session.set(session)

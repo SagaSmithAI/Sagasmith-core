@@ -10,7 +10,7 @@ from sqlalchemy import select, update
 from sagasmith_core.branches import resolve_branch
 from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.concurrency import compare_and_swap_campaign
-from sagasmith_core.database import Database
+from sagasmith_core.database import Database, UnitOfWork
 from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
 from sagasmith_core.models import (
     ActorKnowledge,
@@ -182,6 +182,40 @@ class ActorKnowledgeService:
             )
             return result
 
+    def add_in_work(
+        self,
+        work: UnitOfWork,
+        campaign: Campaign,
+        branch_id: str,
+        head_snapshot_id: str | None,
+        *,
+        actor_id: str,
+        knowledge_key: str,
+        proposition: str,
+        subject_ref: str,
+        epistemic_status: str,
+        confidence: int,
+        source_event_id: str | None,
+        cause: str,
+        disclosure_scope: str,
+    ) -> ActorKnowledgeInfo:
+        with self.database.operation(work) as session:
+            return self._add_in_session(
+                session,
+                campaign,
+                branch_id,
+                head_snapshot_id,
+                actor_id=actor_id,
+                knowledge_key=knowledge_key,
+                proposition=proposition,
+                subject_ref=subject_ref,
+                epistemic_status=epistemic_status,
+                confidence=confidence,
+                source_event_id=source_event_id,
+                cause=cause,
+                disclosure_scope=disclosure_scope,
+            )
+
     def _add_in_session(
         self,
         session,
@@ -247,6 +281,36 @@ class ActorKnowledgeService:
         )
         return self._info(knowledge, revision)
 
+    def revise_in_work(
+        self,
+        work: UnitOfWork,
+        knowledge: ActorKnowledge,
+        branch_id: str,
+        head_snapshot_id: str | None,
+        *,
+        proposition: str,
+        epistemic_status: str | None,
+        confidence: int | None,
+        source_event_id: str | None | _UnsetSourceEvent,
+        cause: str | None,
+        disclosure_scope: str | None,
+        expected_revision_id: str | None,
+    ) -> ActorKnowledgeInfo:
+        with self.database.operation(work) as session:
+            return self._revise_in_session(
+                session,
+                knowledge,
+                branch_id,
+                head_snapshot_id,
+                proposition=proposition,
+                epistemic_status=epistemic_status,
+                confidence=confidence,
+                source_event_id=source_event_id,
+                cause=cause,
+                disclosure_scope=disclosure_scope,
+                expected_revision_id=expected_revision_id,
+            )
+
     def _revise_in_session(
         self,
         session,
@@ -276,9 +340,7 @@ class ActorKnowledgeService:
         current = session.get(ActorKnowledgeRevision, head.revision_id)
         if current is None:
             raise LookupError(head.revision_id)
-        resolved_status = (
-            current.epistemic_status if epistemic_status is None else epistemic_status
-        )
+        resolved_status = current.epistemic_status if epistemic_status is None else epistemic_status
         resolved_confidence = current.confidence if confidence is None else confidence
         resolved_source_event_id = (
             current.source_event_id
@@ -338,17 +400,12 @@ class ActorKnowledgeService:
         include_inactive: bool = False,
         disclosure_scopes: set[str] | frozenset[str] | None = None,
     ) -> list[ActorKnowledgeInfo]:
-        selected_disclosure_scopes = (
-            None if disclosure_scopes is None else set(disclosure_scopes)
-        )
+        selected_disclosure_scopes = None if disclosure_scopes is None else set(disclosure_scopes)
         if selected_disclosure_scopes is not None:
-            unknown_scopes = (
-                selected_disclosure_scopes - ACTOR_KNOWLEDGE_DISCLOSURE_SCOPES
-            )
+            unknown_scopes = selected_disclosure_scopes - ACTOR_KNOWLEDGE_DISCLOSURE_SCOPES
             if unknown_scopes:
                 raise ValueError(
-                    "invalid actor-knowledge disclosure scopes: "
-                    f"{sorted(unknown_scopes)}"
+                    f"invalid actor-knowledge disclosure scopes: {sorted(unknown_scopes)}"
                 )
         with self.database.transaction() as session:
             campaign = session.get(Campaign, campaign_id)
@@ -379,9 +436,7 @@ class ActorKnowledgeService:
                 )
             if selected_disclosure_scopes is not None:
                 statement = statement.where(
-                    ActorKnowledgeRevision.disclosure_scope.in_(
-                        selected_disclosure_scopes
-                    )
+                    ActorKnowledgeRevision.disclosure_scope.in_(selected_disclosure_scopes)
                 )
             rows = session.execute(statement)
             return [self._info(*row) for row in rows]
@@ -420,11 +475,7 @@ class ActorKnowledgeService:
     ) -> list[ActorKnowledgeInfo]:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
             raise ValueError("limit must be an integer between 1 and 500")
-        if (
-            isinstance(offset, bool)
-            or not isinstance(offset, int)
-            or not 0 <= offset <= 100_000
-        ):
+        if isinstance(offset, bool) or not isinstance(offset, int) or not 0 <= offset <= 100_000:
             raise ValueError("offset must be an integer between 0 and 100000")
         values = self.list(
             campaign_id,
