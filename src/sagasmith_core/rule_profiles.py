@@ -7,6 +7,7 @@ from typing import Any
 
 from sqlalchemy import select
 
+from sagasmith_core.branches import resolve_branch
 from sagasmith_core.campaigns import CampaignNotFoundError
 from sagasmith_core.concurrency import compare_and_swap_campaign
 from sagasmith_core.database import Database
@@ -14,6 +15,20 @@ from sagasmith_core.idempotency import IdempotencyService, IdempotencyWrite
 from sagasmith_core.models import Campaign, CampaignRuleProfile, Character
 from sagasmith_core.rule_profile_contract import RULE_PROFILE_OWNED_SETTING_FIELDS
 from sagasmith_core.runtime_locks import mutation_lock
+from sagasmith_core.snapshots import SnapshotService
+
+
+@dataclass(frozen=True)
+class RuleProfileMaintenance:
+    """Trusted Runtime permission for checkpointed, option-only maintenance.
+
+    Never populate the option allowlist from untrusted request arguments.
+    """
+
+    lock_id: str
+    option_keys: frozenset[str]
+    branch_id: str
+    head_snapshot_id: str
 
 
 @dataclass(frozen=True)
@@ -41,6 +56,7 @@ class RuleProfileService:
         expected_campaign_revision: int | None = None,
         idempotency_key: str | None = None,
         idempotency_write: IdempotencyWrite | None = None,
+        maintenance: RuleProfileMaintenance | None = None,
     ) -> RuleProfileInfo:
         with self.database.transaction() as session:
             campaign = session.get(Campaign, campaign_id)
@@ -59,10 +75,24 @@ class RuleProfileService:
                 else expected_campaign_revision
             )
             lock = mutation_lock(campaign.state, "rule_profile")
+            if maintenance is not None:
+                if expected_campaign_revision is None or not idempotency_key:
+                    raise ValueError("rule maintenance requires revision and idempotency key")
+                if not maintenance.lock_id or not maintenance.option_keys:
+                    raise ValueError("rule maintenance requires a lock and option allowlist")
+                branch = resolve_branch(session, campaign)
+                if (branch.id != maintenance.branch_id
+                        or branch.head_snapshot_id != maintenance.head_snapshot_id):
+                    raise ValueError("rule maintenance checkpoint head changed")
+                if lock is not None and lock.get("id") != maintenance.lock_id:
+                    raise ValueError("rule maintenance cannot override a different activity lock")
+                SnapshotService(database=self.database).assert_clean(campaign_id)
             if lock is not None:
                 mutable_option_keys = {
                     str(item) for item in lock.get("mutable_option_keys", []) if str(item)
                 }
+                if maintenance is not None:
+                    mutable_option_keys = set(maintenance.option_keys)
                 if not mutable_option_keys:
                     raise ValueError("rule profile cannot change while locked")
                 if (
