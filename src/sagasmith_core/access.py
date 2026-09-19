@@ -203,21 +203,29 @@ class AccessService:
             )
 
     def authorization_fingerprint(self, campaign_id: str, principal_id: str) -> str:
-        """Hash one principal's complete, system-neutral campaign authority."""
+        """Hash one principal's effective, system-neutral campaign authority."""
 
         with self.database.transaction() as session:
             membership = session.get(
                 CampaignMembership,
                 {"campaign_id": campaign_id, "principal_id": principal_id},
             )
-            grants = list(
-                session.scalars(
-                    select(ActorGrant)
-                    .where(
-                        ActorGrant.campaign_id == campaign_id,
-                        ActorGrant.principal_id == principal_id,
+            # Owner/DM authority already covers every campaign actor. Redundant
+            # actor grants must not invalidate their context after each import.
+            # A role change still changes the fingerprint and exposes the stored
+            # grants again when the principal no longer has campaign-wide access.
+            grants = (
+                []
+                if membership is not None and membership.role in CAMPAIGN_DM_ROLES
+                else list(
+                    session.scalars(
+                        select(ActorGrant)
+                        .where(
+                            ActorGrant.campaign_id == campaign_id,
+                            ActorGrant.principal_id == principal_id,
+                        )
+                        .order_by(ActorGrant.actor_id)
                     )
-                    .order_by(ActorGrant.actor_id)
                 )
             )
             return json_sha256(

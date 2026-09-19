@@ -171,6 +171,32 @@ def test_authorization_fingerprint_tracks_role_and_sorted_actor_grants(database)
     assert access.authorization_fingerprint(campaign.id, "user:alice") == absent
 
 
+@pytest.mark.parametrize("role", ["owner", "dm"])
+def test_privileged_fingerprint_ignores_redundant_grants_but_tracks_demotion(
+    database, role
+) -> None:
+    campaigns = CampaignService(database)
+    characters = CharacterService(database)
+    access = AccessService(database)
+    campaign = campaigns.create(system_id="test", name="Effective authority")
+    actor = characters.create(system_id="test", campaign_id=campaign.id, name="Guard")
+    access.ensure_principal("user:dm")
+    access.grant_campaign(campaign.id, "user:dm", role=role)
+    privileged = access.authorization_fingerprint(campaign.id, "user:dm")
+    access.grant_actor(campaign.id, "user:dm", actor.id, can_control=False, can_view_private=False)
+    assert access.authorization_fingerprint(campaign.id, "user:dm") == privileged
+    access.require_actor(campaign.id, actor.id, "user:dm", control=True, private=True)
+
+    access.grant_campaign(campaign.id, "user:dm", role="player")
+    player = access.authorization_fingerprint(campaign.id, "user:dm")
+    assert player != privileged
+    with pytest.raises(AccessDeniedError):
+        access.require_actor(campaign.id, actor.id, "user:dm", control=True, private=True)
+    access.grant_actor(campaign.id, "user:dm", actor.id, can_control=True, can_view_private=True)
+    assert access.authorization_fingerprint(campaign.id, "user:dm") != player
+    access.require_actor(campaign.id, actor.id, "user:dm", control=True, private=True)
+
+
 def test_campaign_role_cannot_forge_unknown_actor(database) -> None:
     campaigns = CampaignService(database)
     campaign = campaigns.create(system_id="dnd5e", name="Access owner")
