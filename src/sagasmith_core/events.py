@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 
 from sagasmith_core.branches import resolve_branch
 from sagasmith_core.campaigns import CampaignNotFoundError
@@ -334,18 +334,15 @@ class EventService:
             if actor is None or actor.campaign_id != campaign_id:
                 raise LookupError(actor_id)
             branch = resolve_branch(session, campaign, branch_id)
-            actor_event_ids = self._actor_event_ids(
-                session,
+            actor_event_ids = self._actor_event_query(
                 branch_id=branch.id,
                 actor_id=actor_id,
                 roles=selected_roles,
                 knowledge_disclosure_scopes=selected_disclosure_scopes,
             )
-            rows = [
-                row
-                for row in self._branch_rows(session, campaign_id, branch)
-                if row.id in actor_event_ids
-            ]
+            rows = self._branch_rows(
+                session, campaign_id, branch, actor_event_ids=actor_event_ids
+            )
             rows = self._actor_audience_rows(rows, audience=audience)
             rows = self._recent_page(rows, limit=limit, offset=offset)
             participants = self._participant_map(session, [row.id for row in rows])
@@ -383,18 +380,16 @@ class EventService:
             if actor is None or actor.campaign_id != campaign_id:
                 raise LookupError(actor_id)
             branch = resolve_branch(session, campaign, branch_id)
-            actor_event_ids = self._actor_event_ids(
-                session,
+            actor_event_ids = self._actor_event_query(
                 branch_id=branch.id,
                 actor_id=actor_id,
                 roles=selected_roles,
                 knowledge_disclosure_scopes=selected_disclosure_scopes,
             )
-            rows = [
-                row
-                for row in self._branch_rows(session, campaign_id, branch)
-                if row.id in requested_ids and row.id in actor_event_ids
-            ]
+            rows = self._branch_rows(
+                session, campaign_id, branch,
+                actor_event_ids=actor_event_ids, requested_ids=requested_ids,
+            )
             rows = self._actor_audience_rows(rows, audience=audience)
             participants = self._participant_map(session, [row.id for row in rows])
             return [self._info(row, participants.get(row.id, [])) for row in rows]
@@ -429,18 +424,15 @@ class EventService:
             if actor is None or actor.campaign_id != campaign_id:
                 raise LookupError(actor_id)
             branch = resolve_branch(session, campaign, branch_id)
-            actor_event_ids = self._actor_event_ids(
-                session,
+            actor_event_ids = self._actor_event_query(
                 branch_id=branch.id,
                 actor_id=actor_id,
                 roles=selected_roles,
                 knowledge_disclosure_scopes=selected_disclosure_scopes,
             )
-            rows = [
-                row
-                for row in self._branch_rows(session, campaign_id, branch)
-                if row.id in actor_event_ids
-            ]
+            rows = self._branch_rows(
+                session, campaign_id, branch, actor_event_ids=actor_event_ids
+            )
             rows = self._actor_audience_rows(rows, audience=audience)
             scored = [
                 (
@@ -491,41 +483,35 @@ class EventService:
         return selected_roles, selected_disclosure_scopes
 
     @staticmethod
-    def _actor_event_ids(
-        session,
+    def _actor_event_query(
         *,
         branch_id: str,
         actor_id: str,
         roles: set[str],
         knowledge_disclosure_scopes: set[str] | None,
-    ) -> set[str]:
-        event_ids = set(
-            session.scalars(
-                select(CampaignEventParticipant.event_id).where(
-                    CampaignEventParticipant.actor_id == actor_id,
-                    CampaignEventParticipant.role.in_(roles),
-                )
-            )
+    ):
+        # Keep the actor index in SQL: long campaigns must not deserialize every
+        # other actor's event payload or expand an unbounded IN parameter list.
+        event_ids = select(CampaignEventParticipant.event_id).where(
+            CampaignEventParticipant.actor_id == actor_id,
+            CampaignEventParticipant.role.in_(roles),
         )
         if knowledge_disclosure_scopes:
-            event_ids.update(
-                str(source_event_id)
-                for source_event_id in session.scalars(
-                    select(ActorKnowledgeRevision.source_event_id)
-                    .join(
-                        BranchActorKnowledgeHead,
-                        BranchActorKnowledgeHead.revision_id == ActorKnowledgeRevision.id,
-                    )
-                    .join(
-                        ActorKnowledge,
-                        ActorKnowledge.id == BranchActorKnowledgeHead.knowledge_id,
-                    )
-                    .where(
-                        BranchActorKnowledgeHead.branch_id == branch_id,
-                        ActorKnowledge.actor_id == actor_id,
-                        ActorKnowledgeRevision.source_event_id.is_not(None),
-                        ActorKnowledgeRevision.disclosure_scope.in_(knowledge_disclosure_scopes),
-                    )
+            event_ids = event_ids.union(
+                select(ActorKnowledgeRevision.source_event_id)
+                .join(
+                    BranchActorKnowledgeHead,
+                    BranchActorKnowledgeHead.revision_id == ActorKnowledgeRevision.id,
+                )
+                .join(
+                    ActorKnowledge,
+                    ActorKnowledge.id == BranchActorKnowledgeHead.knowledge_id,
+                )
+                .where(
+                    BranchActorKnowledgeHead.branch_id == branch_id,
+                    ActorKnowledge.actor_id == actor_id,
+                    ActorKnowledgeRevision.source_event_id.is_not(None),
+                    ActorKnowledgeRevision.disclosure_scope.in_(knowledge_disclosure_scopes),
                 )
             )
         return event_ids
@@ -628,35 +614,26 @@ class EventService:
         return rows[start:stop]
 
     @staticmethod
-    def _branch_rows(session, campaign_id: str, branch) -> list[CampaignEvent]:
-        bound_ids: set[str] = set()
-        if branch.head_snapshot_id:
-            bound_ids = set(
-                session.scalars(
-                    select(SnapshotEventBinding.event_id).where(
-                        SnapshotEventBinding.snapshot_id == branch.head_snapshot_id
-                    )
-                )
-            )
-        rows: dict[str, CampaignEvent] = {}
-        if bound_ids:
-            rows.update(
-                (row.id, row)
-                for row in session.scalars(
-                    select(CampaignEvent).where(CampaignEvent.id.in_(bound_ids))
-                )
-            )
-        rows.update(
-            (row.id, row)
-            for row in session.scalars(
-                select(CampaignEvent).where(
-                    CampaignEvent.campaign_id == campaign_id,
-                    CampaignEvent.branch_id == branch.id,
-                    CampaignEvent.committed_snapshot_id.is_(None),
-                )
-            )
+    def _branch_rows(
+        session, campaign_id: str, branch, *, actor_event_ids=None, requested_ids=None,
+    ) -> list[CampaignEvent]:
+        visible = and_(
+            CampaignEvent.branch_id == branch.id,
+            CampaignEvent.committed_snapshot_id.is_(None),
         )
-        return sorted(rows.values(), key=lambda row: (row.sequence, row.id))
+        if branch.head_snapshot_id:
+            snapshot_ids = select(SnapshotEventBinding.event_id).where(
+                SnapshotEventBinding.snapshot_id == branch.head_snapshot_id
+            )
+            visible = or_(visible, CampaignEvent.id.in_(snapshot_ids))
+        statement = select(CampaignEvent).where(
+            CampaignEvent.campaign_id == campaign_id, visible,
+        )
+        if actor_event_ids is not None:
+            statement = statement.where(CampaignEvent.id.in_(actor_event_ids))
+        if requested_ids is not None:
+            statement = statement.where(CampaignEvent.id.in_(requested_ids))
+        return list(session.scalars(statement.order_by(CampaignEvent.sequence, CampaignEvent.id)))
 
     @staticmethod
     def _normalize_participants(

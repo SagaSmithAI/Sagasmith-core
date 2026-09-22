@@ -3738,6 +3738,57 @@ def test_exact_actor_event_refs_recall_old_authorized_events_without_leaking(dat
         )
 
 
+@pytest.mark.parametrize("operation", ["list", "search", "exact"])
+def test_actor_recall_does_not_load_unrelated_event_payloads(database, operation) -> None:
+    from sqlalchemy import event
+
+    from sagasmith_core.models import CampaignEvent
+
+    campaign = CampaignService(database).create(system_id="dnd5e", name="Sparse recall")
+    actors = CharacterService(database)
+    witness = actors.create(system_id="dnd5e", campaign_id=campaign.id, name="Witness")
+    bystander = actors.create(system_id="dnd5e", campaign_id=campaign.id, name="Bystander")
+    events = EventService(database)
+    remembered = []
+    for phase in range(2):
+        remembered.append(events.add(
+            campaign.id, summary=f"Silver cicada encounter {phase}",
+            participants=[{"actor_id": witness.id, "role": "witness"}],
+        ))
+        for index in range(12):
+            events.add(
+                campaign.id, summary=f"Unrelated event {phase}/{index}",
+                payload={"narrative": "Unrelated private history. " * 200},
+                participants=[{"actor_id": bystander.id, "role": "witness"}],
+            )
+        if phase == 0:
+            SnapshotService(database).create(campaign.id, label="Archived history")
+
+    loaded = []
+
+    def record_load(row, _context):
+        loaded.append(row.id)
+
+    event.listen(CampaignEvent, "load", record_load)
+    try:
+        if operation == "list":
+            result = events.list_for_actor(campaign.id, actor_id=witness.id)
+        elif operation == "search":
+            result = events.search_for_actor(
+                campaign.id, actor_id=witness.id, query="silver cicada",
+            )
+        else:
+            result = events.list_for_actor_event_ids(
+                campaign.id, actor_id=witness.id, event_ids=[remembered[0].id],
+            )
+    finally:
+        event.remove(CampaignEvent, "load", record_load)
+    expected = {item.id for item in (remembered[:1] if operation == "exact" else remembered)}
+    assert {item.id for item in result} == expected
+    assert set(loaded) == expected
+    assert len(loaded) == len(expected)
+
+
 def test_actor_event_search_recalls_an_old_relevant_episode_and_respects_branches(
     database,
 ) -> None:
