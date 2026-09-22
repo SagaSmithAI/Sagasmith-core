@@ -2722,6 +2722,44 @@ def test_revision_undo_and_redo(database) -> None:
     assert campaigns.get(campaign.id).state == {"clock": 2}
 
 
+def test_character_revision_index_and_selection_do_not_load_unrelated_sheets(database) -> None:
+    from sqlalchemy import event
+
+    from sagasmith_core.models import Character
+
+    campaigns = CampaignService(database)
+    campaign = campaigns.create(system_id="dnd5e", name="Context selection")
+    other = campaigns.create(system_id="dnd5e", name="Other context")
+    characters = CharacterService(database)
+    actors = [characters.create(
+        system_id="dnd5e", campaign_id=campaign.id, name=f"Actor {index:02}",
+        sheet={"large": "x" * 10000},
+    ) for index in range(20)]
+    outsider = characters.create(system_id="dnd5e", campaign_id=other.id, name="Other")
+    loaded = []
+
+    def record(row, _context):
+        loaded.append(row.id)
+
+    event.listen(Character, "load", record)
+    try:
+        assert characters.revision_index(campaign_id=campaign.id) == {
+            actor.id: actor.revision for actor in actors
+        }
+        assert loaded == []
+        assert [actor.id for actor in characters.list(
+            campaign_id=campaign.id, character_ids=[actors[3].id, outsider.id],
+        )] == [actors[3].id]
+        assert loaded == [actors[3].id]
+        assert characters.list(campaign_id=campaign.id, character_ids=[]) == []
+    finally:
+        event.remove(Character, "load", record)
+    updated = characters.update(actors[3].id, sheet={"changed": True})
+    assert characters.revision_index(campaign_id=campaign.id)[updated.id] == updated.revision
+    with pytest.raises(ValueError, match="campaign_id"):
+        characters.revision_index(campaign_id="")
+
+
 def test_campaign_character_is_an_independent_library_instance(database) -> None:
     campaigns = CampaignService(database)
     campaign = campaigns.create(system_id="dnd5e", name="Instances")

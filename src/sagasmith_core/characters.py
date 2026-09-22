@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 import uuid
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -128,8 +128,13 @@ class CharacterService:
         system_id: str | None = None,
         campaign_id: str | None = None,
         character_type: str | None = None,
+        character_ids: Collection[str] | None = None,
     ) -> list[CharacterInfo]:
+        if character_ids is not None and not character_ids:
+            return []
         statement = select(Character).order_by(Character.name, Character.id)
+        if character_ids is not None:
+            statement = statement.where(Character.id.in_(character_ids))
         if system_id:
             statement = statement.where(Character.system_id == system_id)
         if campaign_id:
@@ -138,6 +143,16 @@ class CharacterService:
             statement = statement.where(Character.character_type == character_type)
         with self.database.transaction() as session:
             return [self._info(row) for row in session.scalars(statement)]
+
+    def revision_index(self, *, campaign_id: str) -> dict[str, int]:
+        """Read campaign invalidation tokens without loading sheets or notes."""
+        if not campaign_id:
+            raise ValueError("campaign_id is required for the revision index")
+        statement = select(Character.id, Character.revision).where(
+            Character.campaign_id == campaign_id
+        ).order_by(Character.name, Character.id)
+        with self.database.transaction() as session:
+            return dict(session.execute(statement).all())
 
     def list_library(
         self,
