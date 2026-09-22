@@ -47,6 +47,7 @@ class CampaignInfo:
     settings: dict[str, Any]
     state: dict[str, Any]
     revision: int
+    timeline_epoch: int = 0
 
 
 def slugify(value: str) -> str:
@@ -381,4 +382,5 @@ class CampaignService:
             settings=dict(row.settings),
             state=dict(row.state),
             revision=row.revision,
+            timeline_epoch=row.timeline_epoch,
         )
