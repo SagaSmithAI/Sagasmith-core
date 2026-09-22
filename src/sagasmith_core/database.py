@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import time
+import weakref
 from collections.abc import Generator, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -14,6 +16,7 @@ from alembic.config import Config
 from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
+from sagasmith_core.local_authority import DatabaseAuthority
 from sagasmith_core.models import Base
 from sagasmith_core.paths import data_root
 from sagasmith_core.work import UnitOfWork, _execution_owner
@@ -45,7 +48,8 @@ class Database:
     """Own the general TTRPG database and transactional session factory."""
 
     def __init__(
-        self, url: str | None = None, *, echo: bool = False, state_extensions: tuple = ()
+        self, url: str | None = None, *, echo: bool = False, state_extensions: tuple = (),
+        local_authority: bool = False,
     ) -> None:
         identities = [(item.system_id, item.id) for item in state_extensions]
         if len(identities) != len(set(identities)):
@@ -64,6 +68,18 @@ class Database:
             pool_pre_ping=True,
             echo=echo,
         )
+        self._authority = None
+        database_path = self.engine.url.database
+        if self.engine.dialect.name == "sqlite" and database_path not in {None, "", ":memory:"}:
+            try:
+                self._authority = DatabaseAuthority(database_path, exclusive=local_authority)
+            except BaseException:
+                self.engine.dispose()
+                raise
+            self._authority_finalizer = weakref.finalize(self, self._authority.close)
+        elif local_authority:
+            self.engine.dispose()
+            raise ValueError("local authority requires a file-backed SQLite database")
         if self.engine.dialect.name == "sqlite":
             event.listen(self.engine, "connect", self._configure_sqlite_connection)
         self.session_factory = sessionmaker(
@@ -83,10 +99,32 @@ class Database:
             f"sagasmith_uow_{id(self)}", default=None
         )
         event.listen(self.engine, "before_cursor_execute", self._track_command_writes)
+        self._query_metrics = ContextVar(f"query_metrics_{id(self)}", default=None)
+        event.listen(self.engine, "after_cursor_execute", self._record_query_time)
+
+    @contextmanager
+    def measure(self):
+        """Count SQL work without retaining query text or keeping transactions open."""
+        metrics = {"queries": 0, "elapsed_ms": 0.0}
+        token = self._query_metrics.set(metrics)
+        try:
+            yield metrics
+        finally:
+            self._query_metrics.reset(token)
+
+    def _record_query_time(self, connection, cursor, statement, parameters, context, executemany):
+        metrics = self._query_metrics.get()
+        if metrics is not None:
+            metrics["queries"] += 1
+            metrics["elapsed_ms"] += (time.perf_counter() - context._sagasmith_query_start) * 1000
 
     def _track_command_writes(
         self, connection, cursor, statement, parameters, context, executemany
     ):
+        if self._authority is not None and not self._authority_finalizer.alive:
+            raise RuntimeError("database authority was released; create a new Database")
+        if self._query_metrics.get() is not None:
+            context._sagasmith_query_start = time.perf_counter()
         work = self._ambient_uow.get()
         if work is None:
             return
@@ -163,6 +201,8 @@ class Database:
         Base.metadata.create_all(bind=self.engine)
 
     def upgrade_schema(self, revision: str = "head") -> None:
+        if self._authority is not None and not self._authority_finalizer.alive:
+            raise RuntimeError("database authority was released; create a new Database")
         command.upgrade(alembic_config(self.url), revision)
 
     def drop_schema(self) -> None:
@@ -171,6 +211,12 @@ class Database:
     @contextmanager
     def transaction(self, *, immediate: bool = False) -> Iterator[Session]:
         ambient = self._ambient_session.get()
+        inherited_work = self._ambient_uow.get()
+        # Python 3.14 free-threaded builds copy ContextVars into new threads.
+        # A child thread must open its own SQL transaction, while an async task
+        # on the same thread still cannot silently borrow its parent's UoW.
+        if inherited_work is not None and inherited_work.owner[0] != _execution_owner()[0]:
+            ambient = None
         if ambient is not None:
             work = self._ambient_uow.get()
             assert work is not None
@@ -217,3 +263,5 @@ class Database:
 
     def dispose(self) -> None:
         self.engine.dispose()
+        if self._authority is not None:
+            self._authority_finalizer()

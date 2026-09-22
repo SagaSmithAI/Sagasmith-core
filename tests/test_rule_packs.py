@@ -13,6 +13,7 @@ from sagasmith_core import (
 from sagasmith_core.branches import BranchService
 from sagasmith_core.models import RulePackPayload
 from sagasmith_core.rule_packs import RulePackError, RulesetUnavailableError
+from sagasmith_core.rule_profiles import RuleProfileMaintenance
 from sagasmith_core.state_document_storage import StateDocumentStorageError
 
 
@@ -185,6 +186,49 @@ def test_rule_profile_allows_only_declared_option_maintenance_while_locked(
             locale="zh-CN",
             options=maintained.options,
         )
+
+
+def test_checkpointed_option_maintenance_preserves_activity_lock(database) -> None:
+    campaigns = CampaignService(database)
+    campaign = campaigns.create(system_id="test", name="Checkpointed maintenance")
+    profiles = RuleProfileService(database)
+    profiles.set(campaign.id, edition="v1", options={"engine": "old", "house": "kept"})
+    state = {"mutation_locks": [{
+        "id": "test:activity", "domains": ["rule_profile"], "reason": "live activity",
+    }]}
+    campaigns.update(campaign.id, state=state)
+    snapshot = SnapshotService(database).create(campaign.id)
+    branch = BranchService(database).current(campaign.id)
+    revision = campaigns.get(campaign.id).revision
+
+    def maintain(*, option_keys=frozenset({"engine"}), lock_id="test:activity",
+                 head=snapshot.id, edition="v1", options=None):
+        return profiles.set(
+            campaign.id, edition=edition, options=options or {"engine": "new", "house": "kept"},
+            expected_campaign_revision=revision, idempotency_key=f"maintenance-{revision}",
+            idempotency_write=IdempotencyWrite(
+                scope=f"test-maintenance:{campaign.id}", payload={"revision": revision},
+                response=lambda result: {"campaign_revision": result["campaign_revision"]},
+            ),
+            maintenance=RuleProfileMaintenance(lock_id, option_keys, branch.id, head),
+        )
+
+    for kwargs, message in (
+        ({"lock_id": "other"}, "different activity lock"),
+        ({"head": "other"}, "checkpoint head changed"),
+        ({"edition": "v2"}, "cannot change edition"),
+        ({"options": {"engine": "new", "house": "changed"}}, "outside its explicit allowlist"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            maintain(**kwargs)
+        assert profiles.get(campaign.id).options["engine"] == "old"
+        assert campaigns.get(campaign.id).revision == revision
+    assert maintain().options == {"engine": "new", "house": "kept"}
+    assert campaigns.get(campaign.id).state == state
+    # An unchanged head is insufficient when the live checkpoint is now dirty.
+    revision = campaigns.get(campaign.id).revision
+    with pytest.raises(ValueError, match="(?i)(unsaved|dirty|snapshot)"):
+        maintain(options={"engine": "newer", "house": "kept"})
 
 
 def test_rule_profile_cannot_diverge_from_existing_character_editions(database) -> None:
